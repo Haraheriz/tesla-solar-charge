@@ -1,0 +1,158 @@
+# 📑 3. 運用・保守・トラブルシューティングマニュアル（日常管理の取扱説明書）
+
+## 1. 日常の稼働監視とログの確認方法
+
+本システムはバックグラウンドで完全自律稼働するため、通常はオペレーションを必要としない。システムの稼働状態や挙動をモニタリング・監査する場合は、以下の手順で行う。
+
+### 🔍 1. サービスの生存確認（ヘルスチェック）
+
+システムを構成する2つのサービスが正常に常駐しているかをワンラインで確認する。
+
+```bash
+sudo systemctl status tesla-proxy.service tesla-charger.service
+
+```
+
+* **正常時の状態：** 両方のサービスに緑色の文字で **`active (running)`** と表示されていること。
+* **異常時の状態：** 赤文字で `failed` または `activating (auto-restart)` となっている場合は、何らかのエラーで即死ループが発生している（「3. トラブルシューティング」を参照）。
+
+### 📝 2. 充電制御スクリプトのリアルタイムログ確認
+
+3分ごとに実行される太陽光余剰電力の演算、および車両への電流変更指令の履歴をリアルタイムに追跡（ストリーム表示）する。
+
+```bash
+tail -f /home/<username>/tesla-solar-charge/tesla_solar_charger.log
+
+```
+
+* ※ログ表示を終了するには `Ctrl + C` を押す。
+
+#### 🎯 ログ出力の解釈基準
+
+本システムのログは以下の3つの時間帯・モードに分けて明瞭に出力される。生成AIにログをパースさせる際も、この3パターンのいずれかに分類される。
+
+* **パターンA：昼間・充電追従稼働中（発電あり）**
+```text
+[2026-05-17 12:00:00] [INFO] --- 定期チェック開始 ---
+[2026-05-17 12:00:01] [INFO] 車両状態: 『online』 (RemoE瞬時電力: -3500 W)
+[2026-05-17 12:00:02] [INFO] 📋 演算状況 ➔ 目標: 16A (車両現在値: 5A / ステータス: Charging)
+[2026-05-17 12:00:03] [INFO] 🚀 電流を変更調整: 5A ➔ 16A
+
+```
+
+
+* **パターンB：昼間・車両スリープ保護中（Insomnia Defense作動）**
+```text
+[2026-05-17 13:15:00] [INFO] --- 定期チェック開始 ---
+[2026-05-17 13:15:01] [INFO] 💤 車両キャッシュ状態が『asleep』のため、車両を起こさず処理をスキップします。
+
+```
+
+
+* **パターンC：夜間・システム休止モード中（18:00〜翌朝07:00）**
+```text
+[2026-05-17 19:30:00] [INFO] --- 定期チェック開始 ---
+[2026-05-17 19:30:00] [INFO] 🌙 夜間休止モード中（現在時刻 19:30:00）
+[2026-05-17 19:30:00] [INFO] ⏳ 次の稼働チェックまで10分間スリープします...
+
+```
+
+
+
+---
+
+## 2. トークン失効・更新時の「手元調達・密輸型」復旧手順
+
+テスラのAPI認可トークン（`tesla_tokens.json`）が完全に失効した場合、あるいは初回認証を行う場合、Linux（ヘッドレス環境）からではブラウザセキュリティ（Private Network Access: PNA制限）により直接の認証着地がブロックされる。
+
+これを完全に迂回するため、以下の「Windows側でトークンを焼き、Linuxへ密輸する」手順を厳格に執行する。
+
+### 🔄 トークン更新の3ステップフロー
+
+```text
+【手元のWindows PC】                     【Linuxサーバー】
+ 1. スクリプトを一時的に直接実行 
+    (ブラウザが開き認証成功)
+ 2. tesla_tokens.json が生成 ➔➔(SCP転送)➔➔ 3. 指定ディレクトリへ上書き配置
+                                           4. サービス再起動で完全復旧
+
+```
+
+### 🛠️ 具体的実行コマンド
+
+1. **手元のWindows側での作業：**
+Windows側の作業フォルダ（Python環境がある場所）で、一時的にメインスクリプトを直接実行する。
+```powershell
+python tesla_solar_charger.py
+
+```
+
+
+自動的にブラウザが立ち上がり、テスラの公式ログイン画面が表示される。ログイン完了後、画面が白くなりWindowsのコンソール側に `[INFO] 💾 トークンを新規保存しました。` と表示されれば成功。フォルダ内に最新の `tesla_tokens.json` が生成される。
+2. **Linux側への転送（密輸）：**
+生成された `tesla_tokens.json` を、Linux側の対象ディレクトリへ上書き転送（SCP等）する。
+* 転送先：`/home/<username>/tesla-solar-charge/tesla_tokens.json`
+
+
+3. **権限修復とサービス再起動：**
+Linuxのコンソールに入り、以下のコマンドでトークンファイルのパーミッションを厳格化し、システムを再バインドする。
+```bash
+# 所有者のみ読み書き可能に制限（セキュリティ担保）
+chmod 600 /home/<username>/tesla-solar-charge/tesla_tokens.json
+
+# サービスをリスタートして新しいトークンを読み込ませる
+sudo systemctl restart tesla-proxy.service tesla-charger.service
+
+```
+
+
+
+---
+
+## 3. 緊急時のトラブルシューティング（障害対応）
+
+### 🚨 事象1：プロキシが `status=1/FAILURE` で即死を繰り返す
+
+* **想定原因A：** 過去に手動テストした際のプロキシプロセスがゾンビ化して裏で生き残っており、ポート `4443` を既に占有している。
+* **対応策A：** 以下のコマンドで幽霊プロセスを強制パージ（殺害）した後に再起動する。
+```bash
+# 4443番ポートを掴んでいるプロセスID(PID)を特定してキル
+sudo fuser -k 4443/tcp
+
+# サービスを再起動
+sudo systemctl restart tesla-proxy.service
+
+```
+
+
+* **想定原因B：** Windowsから鍵ファイルを転送した際、改行コードが Windows形式（`CRLF`）になっており、Linuxの暗号ライブラリがパースに失敗している。
+* **対応策B：** 改行コードをLinux標準の `LF` に一発置換する。
+```bash
+sudo apt-get install dos2unix -y  # 未導入の場合のみ
+dos2unix /home/<username>/tesla-solar-charge/*.pem
+sudo systemctl restart tesla-proxy.service
+
+```
+
+
+
+### 🚨 事象2：Python側が `status=1/FAILURE` で即死する
+
+* **想定原因：** 大前提であるGoプロキシ（4443番ポート）が何らかの理由で落ちているため、Python側が通信を拒否され（Connection Refused）自死している。
+* **対応策：** まず `sudo journalctl -u tesla-proxy.service -n 20 --no-pager` を叩き、プロキシが死んでいる根本原因（鍵の不整合など、仕様書第5章を参照）を排除してプロキシ側を先に緑色の `running` に戻すこと。
+
+---
+
+## 4. 運用管理コマンド クイックリファレンス（チートシート）
+
+日常のメンテナンスで保守担当者が使用する、主要コマンドの一覧である。
+
+| 操作目的 | 実行コマンド |
+| --- | --- |
+| **全システムの現在の状態を見る** | `sudo systemctl status tesla-proxy.service tesla-charger.service` |
+| **全システムをまとめて起動する** | `sudo systemctl start tesla-proxy.service tesla-charger.service` |
+| **全システムを安全に完全停止する** | `sudo systemctl stop tesla-charger.service tesla-proxy.service` |
+| **設定変更後に一括リスタートする** | `sudo systemctl restart tesla-proxy.service tesla-charger.service` |
+| **プロキシ側の「生のエラー」を追跡する** | `sudo journalctl -u tesla-proxy.service -f --no-pager` |
+| **Python側の「システムエラー」を追跡する** | `sudo journalctl -u tesla-charger.service -f --no-pager` |
+| **資産フォルダ全体の権限状態を確認する** | `ls -la /home/<username>/tesla-solar-charge/` |
