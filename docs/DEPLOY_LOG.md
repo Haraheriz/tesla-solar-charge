@@ -4,7 +4,22 @@
 
 ---
 
-## 2026-06-21
+## 2026-06-21（Nature Remoトークン再発行）
+
+**内容：** Nature Remo Cloud APIのアクセストークンを再発行し、ラズパイへ反映。
+
+**理由：** 開発初期のPoCスクリプトにハードコードされ漏洩していたトークンが、`tesla_config.json` 上でそのまま使われ続けていたため。Tesla認証情報のローテーション時に対応していなかった残作業。
+
+**作業内容：**
+- [home.nature.global](https://home.nature.global) で新しいアクセストークンを発行（スコープは `basic` のみ。`sendir` / `echonetlite.*.read` / `nature_evcc` は本プロジェクトで未使用のため選択せず）
+- ローカル（Windows側）の `tesla_config.json` の `REMO_ACCESS_TOKEN` を更新
+- `scp` でラズパイへ転送、`tesla-charger.service` を再起動
+
+**結果：** `tesla-charger.service` `active (running)`。夜間のため、Nature Remoへの実通信確認は日中の稼働確認時に持ち越し。
+
+---
+
+## 2026-06-21（表現クリーンアップ）
 
 **内容：** ログ・コメント・docs内の表現クリーンアップ（絵文字除去、冗長表現・曖昧語句・誇張表現の修正）を `tesla_solar_charger.py` のみラズパイへ反映。
 
