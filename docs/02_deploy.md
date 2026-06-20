@@ -18,6 +18,10 @@
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 
+> ⚠️ **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**
+> Windows側の開発・検証スクリプト（`poc/complete_tesla_activation.py`等）は、テスラ車両コマンド用の鍵ペアを **`private-key.pem` / `public-key.pem`** という名前で生成する。一方、ラズパイ側の `systemd` サービス定義（`tesla-proxy.service`）は **`tesla_app_key.pem`** という名前を前提にしている。
+> 転送時は鍵の中身（バイト列）は同一のまま、**ファイル名だけ `tesla_app_key.pem` にリネームしてから配置すること**。リネームせずに別名のまま使う場合は、`/etc/systemd/system/tesla-proxy.service` 内の `-key-file` のパスも合わせて書き換える必要がある。
+
 ---
 
 ## 2. 【Step 1】開発環境でのクロスコンパイル（Windows側作業）
