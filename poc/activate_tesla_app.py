@@ -57,7 +57,7 @@ def activate_app():
             print(" 🎉 アプリのアクティベートに成功しました！")
             print("========================================================")
             print("テスラの地域サーバーにアプリが正式に登録されました。")
-            print("これで先ほどの『test_tesla_auto.py』が動くようになります！")
+            print("これでこのアプリの認証情報を使って車両データへアクセスできるようになります。")
         else:
             print(f"\n登録が拒否されました（ステータスコード: {reg_response.status_code}）")
             print(f"詳細: {reg_response.text}")
