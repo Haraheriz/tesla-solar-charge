@@ -41,7 +41,7 @@ def main():
     global received_code
     
     # 認証用URL（今回はトンネルなしなので、リダイレクト先はlocalhostのままで大丈夫です）
-    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri=http://localhost:8000/callback&response_type=code&scope=openid%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
+    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri=http://localhost:8000/callback&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
     
     print("=========================================================================")
     print(" ① 以下のURLをコピーして、ブラウザの『新しいタブ』で開いて承認してください：")

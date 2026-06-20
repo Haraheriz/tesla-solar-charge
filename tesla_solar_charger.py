@@ -9,6 +9,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any
 
+# Windows環境での標準出力のエンコーディング問題を解決
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 # ==========================================
 # ⚙️ 構造化ロギングの設定
 # ==========================================
@@ -97,7 +103,7 @@ def get_remo_power() -> Optional[int]:
         logger.error(f"Nature Remo E 通信エラー: {e}")
     return None
 
-def save_tokens(acc: str, ref: str, exp_in: int) -> None:
+def save_tokens(acc: str, ref: Optional[str], exp_in: int) -> None:
     global token_expires_at
     token_expires_at = time.time() + int(exp_in) - 1800
     token_data: Dict[str, Any] = {
@@ -119,6 +125,8 @@ def load_tokens() -> bool:
                 data: Dict[str, Any] = json.load(f)
                 access_token = data.get("access_token")
                 refresh_token = data.get("refresh_token")
+                if refresh_token == "None":
+                    refresh_token = None
                 token_expires_at = float(data.get("token_expires_at", 0.0))
                 return True
         except Exception:
@@ -127,10 +135,15 @@ def load_tokens() -> bool:
 
 def refresh_tesla_token() -> bool:
     global access_token, refresh_token
+    if not refresh_token:
+        logger.error("リフレッシュトークンが存在しないため、自動リフレッシュをスキップします。")
+        return False
     logger.info("アクセストークンを自動リフレッシュ中...")
     payload: Dict[str, str] = {
-        "grant_type": "refresh_token", "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET, "refresh_token": str(refresh_token)
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "refresh_token": refresh_token
     }
     try:
         res = requests.post(AUTH_URL, data=payload, timeout=10)
@@ -138,7 +151,11 @@ def refresh_tesla_token() -> bool:
         data: Dict[str, Any] = res.json()
         access_token = data.get("access_token")
         refresh_token = data.get("refresh_token")
-        save_tokens(str(access_token), str(refresh_token), int(data.get("expires_in", 28800)))
+        save_tokens(
+            str(access_token) if access_token else "",
+            refresh_token,
+            int(data.get("expires_in", 28800))
+        )
         logger.info("トークンの自動保存・更新に成功しました。")
         return True
     except Exception as e:
@@ -180,7 +197,7 @@ def main() -> None:
     # 🚨 初回生成（手元のWindows PC実行時のみここを通る）
     if not os.path.exists(TOKEN_FILE) or refresh_token is None:
         redirect_uri = f"http://{DOMAIN}/callback"
-        login_url: str = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
+        login_url: str = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
         
         logger.warning("⚠️ 初回認証手続きを開始します。ブラウザが自動起動しない場合は以下を開いてください：")
         logger.warning(f"\n{login_url}\n")
@@ -208,7 +225,11 @@ def main() -> None:
         token_data: Dict[str, Any] = res.json()
         access_token = token_data.get("access_token")
         refresh_token = token_data.get("refresh_token")
-        save_tokens(str(access_token), str(refresh_token), int(token_data.get("expires_in", 28800)))
+        save_tokens(
+            str(access_token) if access_token else "",
+            refresh_token,
+            int(token_data.get("expires_in", 28800))
+        )
         logger.info("🎯 手元でのトークン生成に完全成功！『tesla_tokens.json』が生成されました。")
 
     headers: Dict[str, str] = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "Accept": "application/json"}
@@ -226,7 +247,9 @@ def main() -> None:
     while True:
         now = time.localtime()
         if not (7 <= now.tm_hour < 18):
-            logger.debug(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
+            logger.info("--- 定期チェック開始 ---")
+            logger.info(f"🌙 夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
+            logger.info("⏳ 次の稼働チェックまで10分間スリープします...")
             time.sleep(600)
             continue
 

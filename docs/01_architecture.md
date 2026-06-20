@@ -46,7 +46,7 @@
 
 本システムは、テスラ車両が正常に「スリープ（睡眠状態）」に移行できるようにするため、以下の2段階チェックを厳格に実行する。
 
-1. **フェーズ1（状態キャッシュ確認）：** `GET /api/v1/vehicles` を実行し、テスラサーバー側が保持している車両の状態キャッシュを確認する。
+1. **フェーズ1（状態キャッシュ確認）：** `GET /api/1/vehicles` を実行し、テスラサーバー側が保持している車両の状態キャッシュを確認する。
 2. **フェーズ2（条件分岐）：**
 * キャッシュ状態が `asleep` または `offline` の場合：車両を起こさないよう、詳細データの取得（`vehicle_data`）およびコマンド送信を完全にスキップし、休止する。
 * キャッシュ状態が `online` の場合のみ：詳細データ（現在の充電電流値、バッテリー残量など）を取得し、演算・制御を実行する。
@@ -71,15 +71,15 @@
 
 プロキシ（`localhost:4443`）を介して、以下の公式フリートエンドポイントを暗号署名付きで叩く。
 
-* **`GET /api/v1/vehicles`**
+* **`GET /api/1/vehicles`**
 * **用途：** 車両の一覧および最新の状態キャッシュ（`state`）を取得する（スリープ阻害防止の最重要API）。
 
 
-* **`GET /api/v1/vehicles/{vehicle_id}/vehicle_data`**
+* **`GET /api/1/vehicles/{vehicle_id}/vehicle_data`**
 * **用途：** 車両の現在のバッテリー残量（`battery_level`）、充電ステータス（`charging_state`）、および現在の設定電流値（`charge_current_request`）を精密に取得する。
 
 
-* **`POST /api/v1/vehicles/{vehicle_id}/command/charging_set_limit`**
+* **`POST /api/1/vehicles/{vehicle_id}/command/set_charging_amps`**
 * **用途：** 太陽光の余剰電力に合わせて、車両の充電電流（アンペア数）を `1A` 単位で動的に変更・指令する。
 
 

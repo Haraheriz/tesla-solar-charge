@@ -28,7 +28,7 @@
 1. **Create App の実行：**
 ダッシュボードから「Create Application」を選択する。
 2. **各種パラメーターの厳格設定：**
-* **Scopes（権限範囲）：** 車両状態の取得および充電制御を行うため、最低限 `vehicle_device_data`（状態取得）および `vehicle_charging_commands`（充電制御）の2つのスコープを必ず選択する。
+* **Scopes（権限範囲）：** 車両状態の取得、充電制御、および長期間の自動稼働に必要なリフレッシュトークンを取得するため、**`offline_access`**、`vehicle_device_data`（状態取得）、および `vehicle_charging_commands`（充電制御）のスコープを必ず選択する（`offline_access` が欠落するとトークン自動更新が失敗し、約8時間で期限切れになります）。
 * **Redirect URI：** トークン手元調達（密輸型）スクリプトがローカルで認証を受け取るため、`http://localhost:8080/callback` 等のローカルループバックURLを設定する。
 
 
