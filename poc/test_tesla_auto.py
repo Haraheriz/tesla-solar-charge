@@ -143,7 +143,7 @@ def main():
         print(f" バッテリー残量: {battery_level} %")
         print(f" 現在の充電設定: {charge_current_request} A")
         print("========================================")
-        print("自動認証テスト、大成功です！")
+        print("自動認証テストが完了しました。")
 
     except Exception as e:
         print(f"\nエラーが発生しました: {e}")

@@ -193,7 +193,7 @@ def main() -> None:
     logger.info("=========================================================================")
 
     if load_tokens():
-        logger.info("有効なトークンファイルを発見。サイレントログインします。")
+        logger.info("有効なトークンファイルを発見。保存済みトークンで再ログインします。")
         if time.time() > token_expires_at:
             if not refresh_tesla_token():
                 logger.error("トークンリフレッシュに失敗。再認証が必要です。")
@@ -251,7 +251,7 @@ def main() -> None:
 
     if FORCE_RUN:
         logger.warning("FORCE_RUNモード：夜間休止モードを無視して常時稼働します（動作確認専用）。")
-        logger.warning("各サイクルごとに画面で仮想の家庭消費電力（W）を入力できます（空Enterで実測値を使用）。")
+        logger.warning("サイクルごとに画面で仮想の家庭消費電力（W）を入力できます（空Enterで実測値を使用）。")
 
     while True:
         now = time.localtime()

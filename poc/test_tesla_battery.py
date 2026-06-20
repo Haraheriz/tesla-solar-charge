@@ -107,7 +107,7 @@ def main():
         print(f" バッテリー残量: {battery_level} %")
         print(f" 現在の充電設定: {charge_current_request} A")
         print("========================================")
-        print("テスラAPIの読み込みテスト、大成功です！")
+        print("テスラAPIの読み込みテストが完了しました。")
 
     except requests.exceptions.HTTPError as e:
         print(f"\nエラーが発生しました。引換券（URL）の期限が切れた可能性があります。")

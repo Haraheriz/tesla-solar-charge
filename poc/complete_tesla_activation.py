@@ -123,7 +123,7 @@ def send_activation_request():
         if reg_response.status_code in [200, 201]:
             print("アプリのアクティベートに完全成功しました！！！")
             print("========================================================")
-            print("テスラAPIのすべてのセキュリティガードを完全突破しました。")
+            print("テスラAPIへのパートナーアカウント登録が完了しました。")
             print("これでこのアプリは、テスラ公式に認められた正規アプリになりました！")
         else:
             print(f" 登録拒否（ステータスコード: {reg_response.status_code}）")
