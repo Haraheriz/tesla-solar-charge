@@ -59,6 +59,11 @@ MAX_AMPS: int = int(config.get("MAX_AMPS", 48))
 # 夜間休止モード（7:00-18:00以外は停止）を無視して常時稼働させる
 FORCE_RUN: bool = "--force-run" in sys.argv or os.environ.get("FORCE_RUN") == "1"
 
+# 動作確認用：環境変数 FORCE_HOUSE_POWER（W）を設定すると、Nature Remoの実測値を
+# 無視してこの値を使う（負の値＝売電中・余剰あり、正の値＝買電中）
+_force_house_power_env: Optional[str] = os.environ.get("FORCE_HOUSE_POWER")
+FORCE_HOUSE_POWER: Optional[int] = int(_force_house_power_env) if _force_house_power_env is not None else None
+
 AUTH_URL: str = "https://auth.tesla.com/oauth2/v3/token"
 PROXY_HOST: str = "https://localhost:4443"
 
@@ -250,6 +255,8 @@ def main() -> None:
 
     if FORCE_RUN:
         logger.warning("⚠️ FORCE_RUNモード：夜間休止モードを無視して常時稼働します（動作確認専用）。")
+    if FORCE_HOUSE_POWER is not None:
+        logger.warning(f"⚠️ FORCE_HOUSE_POWERモード：Nature Remoの実測値を無視し、house_power={FORCE_HOUSE_POWER}Wとして計算します（動作確認専用）。")
 
     while True:
         now = time.localtime()
@@ -267,10 +274,13 @@ def main() -> None:
             headers["Authorization"] = f"Bearer {access_token}"
 
         logger.info("--- 定期チェック開始 ---")
-        house_power: Optional[int] = get_remo_power()
-        if house_power is None:
-            time.sleep(180)
-            continue
+        if FORCE_HOUSE_POWER is not None:
+            house_power: Optional[int] = FORCE_HOUSE_POWER
+        else:
+            house_power = get_remo_power()
+            if house_power is None:
+                time.sleep(180)
+                continue
             
         try:
             v_res = requests.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10, verify='cert.pem')
