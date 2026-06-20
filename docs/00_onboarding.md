@@ -28,13 +28,23 @@
 1. **Create App の実行：**
 ダッシュボードから「Create Application」を選択する。
 2. **各種パラメーターの厳格設定：**
-* **Scopes（権限範囲）：** 車両状態の取得、充電制御、および長期間の自動稼働に必要なリフレッシュトークンを取得するため、**`offline_access`**、`vehicle_device_data`（状態取得）、および `vehicle_charging_commands`（充電制御）のスコープを必ず選択する（`offline_access` が欠落するとトークン自動更新が失敗し、約8時間で期限切れになります）。
-* **Redirect URI：** トークン手元調達（初回手動認証方式）スクリプトがローカルで認証を受け取るため、`http://localhost:8080/callback` 等のローカルループバックURLを設定する。
+実際にポータル上で入力・選択した項目名と値は以下の通り（項目名はTesla Developer Portalの日本語UI表記に準拠）。
 
+| 設定項目（ポータル上の表記） | 値 |
+| --- | --- |
+| アプリ名 | `Solar Charge Optimizer` |
+| アプリの説明 | `Personal solar-surplus EV charging optimization script` |
+| 利用目的 | 個人の自家用車両のみを対象とした非商用利用であること、Nature Remo Eと連携して太陽光余剰電力に応じた充電制御を行うことを明記する |
+| オープンソースの貢献 | `No` |
+| OAuth付与タイプ | `client-credentials`, `authorization-code` |
+| 許可された送信元（Allowed Origin） | `https://<GitHub Pages等のドメイン>`（パートナーアカウント登録・公開鍵ホスティングに使用） |
+| 許可されたリダイレクトURI | `http://localhost:8000/callback`（ローカルループバック。本システムは `tesla_config.json` の `DOMAIN` 設定に対応） |
+| 許可されたリターンURL | 未設定（本システムでは使用しない） |
+| Scopes（権限範囲） | **`vehicle_device_data`**（車両情報）、**`vehicle_charging_cmds`**（車両充電管理）の2つのみを選択する。認証URLには加えて **`offline_access`** をスコープ文字列に含める（長期間の自動稼働に必要なリフレッシュトークン取得のため。これが欠落するとトークン自動更新が失敗し、約8時間で期限切れになる） |
 
+* ポータルのスコープ選択画面では「車両情報」「車両充電管理」の2つだけにチェックを入れる（「車両コマンド」「プロフィール情報」「車両の位置」「エナジー製品情報/コマンド」は不要）。
 3. **認証情報の取得：**
-申請完了後、画面に発行される **`Client ID`** を控える。
-* ※本システム（ローカルプロキシ中継型）では、Client Secretや独自ドメインによるJWS（JSON Web Signature）認証を必要としない「ローカルプロキシによる簡易署名運用」を採用しているため、Client IDのみが認証の起点となる。
+申請完了後、画面に発行される **`Client ID`** と **`Client Secret`** を控える（**`Client Secret`は再表示できないポータルが多いため、その場で安全な場所に保存すること**）。本システムは認証コード交換・トークンリフレッシュ・パートナーアカウント登録のいずれでもClient Secretを使用する。
 
 
 
