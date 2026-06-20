@@ -55,6 +55,10 @@ DOMAIN: str = str(config.get("DOMAIN", "localhost:8000"))
 MIN_AMPS: int = int(config.get("MIN_AMPS", 3))
 MAX_AMPS: int = int(config.get("MAX_AMPS", 48))
 
+# 動作確認用：コマンドライン引数 --force-run または環境変数 FORCE_RUN=1 で
+# 夜間休止モード（7:00-18:00以外は停止）を無視して常時稼働させる
+FORCE_RUN: bool = "--force-run" in sys.argv or os.environ.get("FORCE_RUN") == "1"
+
 AUTH_URL: str = "https://auth.tesla.com/oauth2/v3/token"
 PROXY_HOST: str = "https://localhost:4443"
 
@@ -244,9 +248,12 @@ def main() -> None:
     logger.info(f"🚗 対象車両 (VIN: {vin}) を捕捉。常駐ループ稼働を開始します。")
     print("-------------------------------------------------------------------------")
 
+    if FORCE_RUN:
+        logger.warning("⚠️ FORCE_RUNモード：夜間休止モードを無視して常時稼働します（動作確認専用）。")
+
     while True:
         now = time.localtime()
-        if not (7 <= now.tm_hour < 18):
+        if not FORCE_RUN and not (7 <= now.tm_hour < 18):
             logger.info("--- 定期チェック開始 ---")
             logger.info(f"🌙 夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
             logger.info("⏳ 次の稼働チェックまで10分間スリープします...")
