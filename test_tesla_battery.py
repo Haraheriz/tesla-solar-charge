@@ -1,14 +1,15 @@
+import os
 import requests
 from urllib.parse import urlparse, parse_qs
 
 # ==========================================
-# 設定項目：ご自身の情報を貼り付けてください
+# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み
 # ==========================================
-CLIENT_ID = "***REMOVED_CLIENT_ID***"
-CLIENT_SECRET = "***REMOVED_CLIENT_SECRET***"
+CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
+CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
 
 # ブラウザのアドレスバーからコピーした「http://localhost:8000/callback?code=...」のURLをそのまま貼り付け
-REDIRECTED_URL = "http://localhost:8000/callback?code=***REMOVED_AUTH_CODE***&issuer=https%3A%2F%2Fauth.tesla.com%2Foauth2%2Fv3&state=12345"
+REDIRECTED_URL = os.environ.get("TESLA_REDIRECTED_URL", "http://localhost:8000/callback?code=PASTE_CODE_HERE&issuer=https%3A%2F%2Fauth.tesla.com%2Foauth2%2Fv3&state=12345")
 
 # ------------------------------------------
 # 1. URLから認可コード（code）を自動抽出

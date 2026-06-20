@@ -1,10 +1,11 @@
+import os
 import requests
 
 # ==========================================
-# 設定項目：ご自身の情報を貼り付けてください
+# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み
 # ==========================================
-CLIENT_ID = "***REMOVED_CLIENT_ID***"
-CLIENT_SECRET = "***REMOVED_CLIENT_SECRET***"
+CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
+CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
 
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 API_HOST = "https://fleet-api.prd.na.vn.cloud.tesla.com" # 日本の車両が属するリージョン

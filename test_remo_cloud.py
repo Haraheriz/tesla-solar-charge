@@ -1,9 +1,10 @@
+import os
 import requests
 
 # ==========================================
-# 設定項目：ご自身のアクセストークンを貼り付けてください
+# 設定項目：環境変数 REMO_ACCESS_TOKEN から読み込み
 # ==========================================
-ACCESS_TOKEN = "***REMOVED_ACCESS_TOKEN***"
+ACCESS_TOKEN = os.environ["REMO_ACCESS_TOKEN"]
 
 URL = "https://api.nature.global/1/appliances"
 HEADERS = {
