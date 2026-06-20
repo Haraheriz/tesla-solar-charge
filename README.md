@@ -51,3 +51,7 @@ tesla-solar-charge/
                                       # (ラズパイ常駐稼働時に動的に自動生成・自動圧縮される)
 
 ```
+
+## ライセンス
+
+[MIT License](./LICENSE)
