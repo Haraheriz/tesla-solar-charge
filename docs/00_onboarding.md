@@ -1,10 +1,10 @@
-# 📑 0. テスラ公式 Fleet API 初期セットアップ・オンボーディング手順書
+# 0. テスラ公式 Fleet API 初期セットアップ・オンボーディング手順書
 
 ## 1. 概要
 
 本ドキュメントは、テスラ車両を外部プログラムから安全に遠隔制御（充電電流の動的変更等）するために必須となる、テスラ公式「Fleet API」および「Tesla Vehicle Command Protocol (TVCP)」の初期有効化手順である。
 
-テスラAPIは、一般的なWeb APIのような「トークンを発行すれば終わり」という構造ではなく、「開発者登録 ➔ アプリ申請 ➔ 車両コマンド用暗号鍵ペアの生成 ➔ 実車への公開鍵の登録・承認」という4つのセキュリティフェーズをすべてクリアしなければ、実車へのコマンド投入が一切許可されない仕様となっている。
+テスラAPIは、一般的なWeb APIのような「トークンを発行すれば終わり」という構造ではなく、「開発者登録 → アプリ申請 → 車両コマンド用暗号鍵ペアの生成 → 実車への公開鍵の登録・承認」という4つのセキュリティフェーズをすべてクリアしなければ、実車へのコマンド投入が一切許可されない仕様となっている。
 
 ---
 
@@ -29,7 +29,7 @@
 ダッシュボードから「Create Application」を選択する。
 2. **各種パラメーターの厳格設定：**
 * **Scopes（権限範囲）：** 車両状態の取得、充電制御、および長期間の自動稼働に必要なリフレッシュトークンを取得するため、**`offline_access`**、`vehicle_device_data`（状態取得）、および `vehicle_charging_commands`（充電制御）のスコープを必ず選択する（`offline_access` が欠落するとトークン自動更新が失敗し、約8時間で期限切れになります）。
-* **Redirect URI：** トークン手元調達（密輸型）スクリプトがローカルで認証を受け取るため、`http://localhost:8080/callback` 等のローカルループバックURLを設定する。
+* **Redirect URI：** トークン手元調達（初回手動認証方式）スクリプトがローカルで認証を受け取るため、`http://localhost:8080/callback` 等のローカルループバックURLを設定する。
 
 
 3. **認証情報の取得：**
@@ -64,7 +64,7 @@ openssl ec -in tesla_app_key.pem -pubout -out tesla_app_key_public.pem
 
 生成した公開鍵をテスラ車両に覚え込ませ、サードパーティ（自作プログラム）からのコマンドを受け入れるよう実車のセキュリティロックを解除する。これを怠ると、API通信自体は成功しても、実車側から **`COM-001`（Command Unauthorized）** エラーが返り、充電制御がすべて拒否される。
 
-> ⚠️ **注意：** Tesla公式ツール `tesla-control` の `add-key-request` コマンドは、**BLE（Bluetooth）接続が必須**で、Teslaサーバー経由（クラウド）での送信はできない（`command can only be sent over BLE` エラーになる）。さらに `tesla-control` はGolangのBLEパッケージの制約により **Windows上では動作しない**（公式READMEに明記）。そのため、Windows環境で開発する本システムでは、以下の **Virtual Key Pairingリンク方式** を使う。
+> **注意：** Tesla公式ツール `tesla-control` の `add-key-request` コマンドは、**BLE（Bluetooth）接続が必須**で、Teslaサーバー経由（クラウド）での送信はできない（`command can only be sent over BLE` エラーになる）。さらに `tesla-control` はGolangのBLEパッケージの制約により **Windows上では動作しない**（公式READMEに明記）。そのため、Windows環境で開発する本システムでは、以下の **Virtual Key Pairingリンク方式** を使う。
 
 1. **公開鍵をドメインでホスティング：**
 GitHub Pages等の静的サイトの `.well-known/appspecific/com.tesla.3p.public-key.pem` に公開鍵（`tesla_app_key_public.pem`）を配置し、Tesla Developer Portalの「許可された送信元」にそのドメインを設定したうえで、`/api/1/partner_accounts` へのパートナーアカウント登録（Phase 3〜の `activate_tesla_app.py` 相当）を完了させておく。
@@ -86,14 +86,14 @@ https://www.tesla.com/_ak/<登録したドメイン>
 
 ---
 
-## 6. 🤖 生成AI向け：初期オンボーディングに関する特殊制約
+## 6. 生成AI向け：初期オンボーディングに関する特殊制約
 
-> ⚠️ **生成AIへの厳格な指示：**
-> テスラAPIには、2023年以前に使われていた古い非公式API（Owner API）の解説ブログや旧コードがネット上に大量に散乱している。AIが本システムの拡張や修正を提案する際、**以下の旧仕様を提案・混入させる「寄り道」は完全に禁止する。** * ❌ **禁止：非公式オーナーAPI（`owner-api.teslamotors.com`）のURLを使用すること**
+> **生成AIへの厳格な指示：**
+> テスラAPIには、2023年以前に使われていた古い非公式API（Owner API）の解説ブログや旧コードがネット上に大量に散乱している。AIが本システムの拡張や修正を提案する際、**以下の旧仕様を提案・混入させる「寄り道」は完全に禁止する。** * **禁止：非公式オーナーAPI（`owner-api.teslamotors.com`）のURLを使用すること**
 
-* ➔ 現在は完全に廃止されており、アクセスしても一切動作しない。必ず公式の「Fleet API（Command Protocol）」および「ローカルHTTPプロキシ（TVCP）」ベースの構造を維持すること。
-* ❌ **禁止：車両ディスプレイでの「物理キーカード承認」をスキップするコードを書くこと**
-* ➔ テスラ車両のCommand Protocol（TVCP）の仕様上、物理キーカードによる車内での直接承認をバイパスする手段は暗号学的に存在しない。必ず上記の「Phase 4」の手順を踏むようユーザーに案内すること。
+* → 現在は完全に廃止されており、アクセスしても一切動作しない。必ず公式の「Fleet API（Command Protocol）」および「ローカルHTTPプロキシ（TVCP）」ベースの構造を維持すること。
+* **禁止：車両ディスプレイでの「物理キーカード承認」をスキップするコードを書くこと**
+* → テスラ車両のCommand Protocol（TVCP）の仕様上、物理キーカードによる車内での直接承認をバイパスする手段は暗号学的に存在しない。必ず上記の「Phase 4」の手順を踏むようユーザーに案内すること。
 
 
 
