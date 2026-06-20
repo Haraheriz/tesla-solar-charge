@@ -64,12 +64,23 @@ openssl ec -in tesla_app_key.pem -pubout -out tesla_app_key_public.pem
 
 生成した公開鍵をテスラ車両に覚え込ませ、サードパーティ（自作プログラム）からのコマンドを受け入れるよう実車のセキュリティロックを解除する。これを怠ると、API通信自体は成功しても、実車側から **`COM-001`（Command Unauthorized）** エラーが返り、充電制御がすべて拒否される。
 
-1. **公開鍵登録エンドポイントの実行：**
-公式の `tesla-control` ツール、またはセットアップ用スクリプトを用い、テスラサーバーを介して対象車両のVINを指定し、公開鍵（`tesla_app_key_public.pem`）を送信する。
-2. **実車（車内センターディスプレイ）での最終承認：**
-公開鍵が実車に届くと、テスラ車のセンターディスプレイに「サードパーティによるコントロール（鍵の追加）を承認しますか？」というセキュリティポップアップが表示される。
-3. **キーカードのタップ：**
-画面の指示に従い、実車のセンターコンソール（またはBピラー）に**テスラ純正の物理キーカード**をタップして、暗号鍵の登録を最終承認する。
+> ⚠️ **注意：** Tesla公式ツール `tesla-control` の `add-key-request` コマンドは、**BLE（Bluetooth）接続が必須**で、Teslaサーバー経由（クラウド）での送信はできない（`command can only be sent over BLE` エラーになる）。さらに `tesla-control` はGolangのBLEパッケージの制約により **Windows上では動作しない**（公式READMEに明記）。そのため、Windows環境で開発する本システムでは、以下の **Virtual Key Pairingリンク方式** を使う。
+
+1. **公開鍵をドメインでホスティング：**
+GitHub Pages等の静的サイトの `.well-known/appspecific/com.tesla.3p.public-key.pem` に公開鍵（`tesla_app_key_public.pem`）を配置し、Tesla Developer Portalの「許可された送信元」にそのドメインを設定したうえで、`/api/1/partner_accounts` へのパートナーアカウント登録（Phase 3〜の `activate_tesla_app.py` 相当）を完了させておく。
+2. **Virtual Key Pairingリンクを開く：**
+車の近く（Bluetoothが繋がる距離）で、**Teslaアプリがインストールされたスマートフォン**から以下のURLを開く。
+
+```text
+https://www.tesla.com/_ak/<登録したドメイン>
+```
+
+例：`https://www.tesla.com/_ak/haraheriz.github.io`
+
+3. **Teslaアプリでの承認：**
+リンクをタップするとTeslaアプリが自動起動し、「このアプリを信頼しますか？」といった承認画面が表示されるので承認する。
+4. **（必要な場合）実車（車内センターディスプレイ）での最終承認：**
+車種・状況によっては、車のセンターディスプレイに「サードパーティによるコントロール（鍵の追加）を承認しますか？」というセキュリティポップアップが表示されることがある。その場合は画面の指示に従い、**テスラ純正の物理キーカード**をセンターコンソール（またはBピラー）にタップして最終承認する。
 
 これで実車側のセキュリティガードが完全に解除され、ローカルプロキシ（`tesla-http-proxy`）を中継した暗号署名付きコマンドが実車へ届くようになる。
 
