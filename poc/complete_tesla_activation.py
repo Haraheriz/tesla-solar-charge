@@ -3,17 +3,20 @@ import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
+from _env import load_env
 
 # cryptographyライブラリから必要なモジュールをインポート
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+load_env()
+
 # ==========================================
-# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み
+# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET / TESLA_DOMAIN から読み込み
 # ==========================================
 CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
 CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
-DOMAIN = "haraheriz.github.io"
+DOMAIN = os.environ["TESLA_DOMAIN"]
 
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 API_HOST = "https://fleet-api.prd.na.vn.cloud.tesla.com"
@@ -121,7 +124,7 @@ def send_activation_request():
             print(" 🎉🎉🎉 アプリのアクティベートに完全成功しました！！！ 🎉🎉🎉")
             print("========================================================")
             print("テスラAPIのすべてのセキュリティガードを完全突破しました。")
-            print("これで地﨑様のアプリは、テスラ公式に認められた正規アプリになりました！")
+            print("これでこのアプリは、テスラ公式に認められた正規アプリになりました！")
         else:
             print(f" 登録拒否（ステータスコード: {reg_response.status_code}）")
             print(f"詳細: {reg_response.text}")

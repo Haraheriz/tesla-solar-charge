@@ -1,11 +1,15 @@
 import os
 import requests
+from _env import load_env
+
+load_env()
 
 # ==========================================
-# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み
+# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET / TESLA_DOMAIN から読み込み
 # ==========================================
 CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
 CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
+DOMAIN = os.environ["TESLA_DOMAIN"]
 
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 API_HOST = "https://fleet-api.prd.na.vn.cloud.tesla.com" # 日本の車両が属するリージョン
@@ -43,7 +47,7 @@ def activate_app():
         # アプリ作成時に指定したリダイレクトURLのドメイン（今回はlocalhost）を申請します
         register_url = f"{API_HOST}/api/1/partner_accounts"
         register_payload = {
-            "domain": "cooper-duplicate-joan-exit.trycloudflare.com"
+            "domain": DOMAIN
         }
         
         reg_response = requests.post(register_url, headers=headers, json=register_payload, timeout=10)
@@ -52,7 +56,7 @@ def activate_app():
             print("\n========================================================")
             print(" 🎉 アプリのアクティベートに成功しました！")
             print("========================================================")
-            print("テスラの地域サーバーに地﨑様のアプリが正式に登録されました。")
+            print("テスラの地域サーバーにアプリが正式に登録されました。")
             print("これで先ほどの『test_tesla_auto.py』が動くようになります！")
         else:
             print(f"\n登録が拒否されました（ステータスコード: {reg_response.status_code}）")

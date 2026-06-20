@@ -3,12 +3,16 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
+from _env import load_env
+
+load_env()
 
 # ==========================================
-# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み
+# 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET / TESLA_DOMAIN から読み込み
 # ==========================================
 CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
 CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
+REDIRECT_URI = f"https://{os.environ['TESLA_DOMAIN']}/callback"
 
 # テスラAPIのエンドポイント
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
@@ -55,7 +59,7 @@ def main():
     global received_code
     
     # 1. ログイン用URLの生成
-    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri=https://cooper-duplicate-joan-exit.trycloudflare.com/callback&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
+    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
     
     print("=========================================================================")
     print("① 以下のURLをコピーして、ブラウザの『新しいタブ』で開いてログインしてください：")
@@ -82,7 +86,7 @@ def main():
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "code": received_code,
-        "redirect_uri": "https://cooper-duplicate-joan-exit.trycloudflare.com/callback"
+        "redirect_uri": REDIRECT_URI
     }
     
     try:

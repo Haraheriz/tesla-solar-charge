@@ -1,5 +1,8 @@
 import os
 import requests
+from _env import load_env
+
+load_env()
 
 # ==========================================
 # 設定項目：環境変数 REMO_ACCESS_TOKEN から読み込み

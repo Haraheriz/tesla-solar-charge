@@ -28,6 +28,7 @@ tesla-solar-charge/
 │
 ├── poc/                               # 🧪 [開発用] 本実装に至るまでの実証・検証スクリプト一式
 │                                     # (Tesla/Nature Remo APIの認証フローを個別に確認するための使い捨てコード。本番では使用しない)
+│                                     # 詳細・セットアップ方法は poc/README.md を参照
 │
 ├── tesla_tokens.json                 # 🔄【動線: Win ➔ RPi】テスラAPI認可トークン
 │                                     # (Windows側で一時実行して生成し、ラズパイへ密輸・上書き配置)

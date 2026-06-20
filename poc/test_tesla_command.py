@@ -3,13 +3,15 @@ import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
+from _env import load_env
+
+load_env()
 
 # ==========================================
 # 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み
 # ==========================================
 CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
 CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
-DOMAIN = "haraheriz.github.io"
 
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 API_HOST = "https://localhost:4443"
@@ -111,7 +113,7 @@ def main():
         
         if result_data.get("response", {}).get("result") is True:
             print("\n 🎉🎉🎉 コマンド送信に完全成功しました！！！ 🎉🎉🎉")
-            print("今この瞬間、Model3Xの充電設定が『6A』に遠隔で書き換わりました！")
+            print(f"今この瞬間、{display_name}の充電設定が『6A』に遠隔で書き換わりました！")
             print("スマホのテスラアプリを開いて、本当に6Aに変わっているか確認してみてください！")
         else:
             print("\nコマンドは届きましたが、車側が拒否した可能性があります（スリープ中など）。")

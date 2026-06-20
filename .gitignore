@@ -17,3 +17,6 @@ venv/
 __pycache__/
 *.pyc
 *.log
+
+# 5. poc/ 用の個人設定（環境変数一括読み込み用、漏洩厳禁）
+poc/.env

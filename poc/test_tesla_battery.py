@@ -1,6 +1,9 @@
 import os
 import requests
 from urllib.parse import urlparse, parse_qs
+from _env import load_env
+
+load_env()
 
 # ==========================================
 # 設定項目：環境変数 TESLA_CLIENT_ID / TESLA_CLIENT_SECRET から読み込み

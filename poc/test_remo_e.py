@@ -1,10 +1,14 @@
+import os
 import requests
 import json
+from _env import load_env
+
+load_env()
 
 # ==========================================
-# 設定項目：ご自宅のNature Remo EのIPアドレスに書き換えてください
+# 設定項目：環境変数 REMO_LOCAL_IP から読み込み（ご自宅のNature Remo EのIPアドレス）
 # ==========================================
-REMO_IP = "192.168.8.143" 
+REMO_IP = os.environ["REMO_LOCAL_IP"]
 
 # ローカルAPIのURL
 URL = f"http://{REMO_IP}/local_api/broute"
