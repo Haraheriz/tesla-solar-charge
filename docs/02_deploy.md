@@ -16,6 +16,8 @@
 ├── tesla_tokens.json          # [転送] テスラAPIリフレッシュトークン
 ├── tesla-http-proxy           # [転送] Go言語ネイティブバイナリ
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
+├── control_server.py          # [転送] スマホ操作用コントロールサーバー
+├── override_state.py          # [転送] マニュアル・オーバーライド状態の共有モジュール
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 
 > **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**
@@ -145,7 +147,37 @@ WantedBy=multi-user.target
 
 ```
 
-### 3. サービスの有効化と即時起動コマンド
+### 3. スマホ操作用コントロールサーバー設定ファイルの配置
+
+`tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定したうえで、以下を配置する。
+
+```bash
+sudo nano /etc/systemd/system/tesla-control.service
+
+```
+
+（以下をコピペして保存、`<username>` は実際の実行ユーザー名に置換すること）
+
+```ini
+[Unit]
+Description=Tesla Solar Charger Manual Override Control Server
+After=network.target
+
+[Service]
+Type=simple
+User=<username>
+WorkingDirectory=/home/<username>/tesla-solar-charge
+ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python control_server.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+### 4. サービスの有効化と即時起動コマンド
 
 ファイルを配置後、システムに認識させて一気に起動する。
 
@@ -156,10 +188,12 @@ sudo systemctl daemon-reload
 # OS起動時の自動実行を有効化
 sudo systemctl enable tesla-proxy.service
 sudo systemctl enable tesla-charger.service
+sudo systemctl enable tesla-control.service
 
 # サービスを今すぐ手動起動
 sudo systemctl start tesla-proxy.service
 sudo systemctl start tesla-charger.service
+sudo systemctl start tesla-control.service
 
 ```
 
@@ -170,10 +204,10 @@ sudo systemctl start tesla-charger.service
 デプロイが正常に完了したか、以下のコマンドで最終確認を行う。
 
 ```bash
-# 2つのサービスが揃って緑文字の「active (running)」になっているか確認
-sudo systemctl status tesla-proxy.service tesla-charger.service
+# 3つのサービスが揃って緑文字の「active (running)」になっているか確認
+sudo systemctl status tesla-proxy.service tesla-charger.service tesla-control.service
 
-# メモリ上でプロセスが物理的に2つ並んで実在しているか確認
+# メモリ上でプロセスが物理的に3つ並んで実在しているか確認
 ps aux | grep tesla
 
 ```

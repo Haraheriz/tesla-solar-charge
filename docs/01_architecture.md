@@ -42,6 +42,31 @@
 
 ```
 
+### マニュアル・オーバーライド機構（スマホからのフル充電切替）
+
+太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電など）に備え、`control_server.py` が宅内LAN上で軽量HTTPサーバーとして常駐し、スマートフォンのブラウザから「フル充電モード」をワンタップでON/OFFできる。
+
+```text
+[スマートフォン (ブラウザ)]
+         │ (HTTPS/HTTP、トークン付きURL)
+         ▼
+  ┌────────────────────────┐
+  │   control_server.py     │  ← override_state.json を読み書き
+  │   (stdlib http.server)  │
+  └───────────┬─────────────┘
+              │ (ファイル共有: override_state.json)
+              ▼
+  ┌────────────────────────┐
+  │ tesla_solar_charger.py │  ← 毎サイクル override_state.json を確認
+  └────────────────────────┘
+```
+
+* **`override_state.json`：** `{"manual_override": true/false, "updated_at": ...}` を保持する共有状態ファイル。`override_state.py` が原子的な読み書き（`save_tokens`と同様の tmp→rename 方式）を提供する。
+* **`manual_override: true` の場合：** `tesla_solar_charger.py` は夜間休止モードおよびNature Remoの瞬時電力に基づく漸進的フィードバック制御（第4章）をすべてスキップし、車両を起動（必要な場合）して `MAX_AMPS` でのフル充電を維持する。
+* **`manual_override: false` の場合：** 通常の太陽光追従ロジックに復帰する。
+* **認証：** `control_server.py` はクエリパラメータ `?token=` またはヘッダー `X-Control-Token` で、`tesla_config.json` の `CONTROL_TOKEN`（ランダムな共有シークレット）との一致を要求する。トークンが一致しない場合はHTTP 403を返し、ページ・APIともに一切の情報を返さない。
+* **UI：** トークン付きURL（例：`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`）にアクセスすると、ON/OFFトグルボタン1つだけのモバイル向けページが表示される。スマホのホーム画面に追加（Webクリップ）しておけば、ネイティブアプリのように1タップで起動できる。
+
 ### 車両保護ロジック（Insomnia Defense / 不眠症防御アルゴリズム）
 
 本システムは、テスラ車両が正常に「スリープ（睡眠状態）」に移行できるようにするため、以下の2段階チェックを厳格に実行する。
@@ -197,3 +222,26 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 
 ```
+
+### ③ スマホ操作用コントロールサーバー用：`/etc/systemd/system/tesla-control.service`
+
+```ini
+[Unit]
+Description=Tesla Solar Charger Manual Override Control Server
+After=network.target
+
+[Service]
+Type=simple
+User=<username>
+WorkingDirectory=/home/<username>/tesla-solar-charge
+ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python control_server.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+`tesla-charger.service` とは独立して起動・停止できる（`Requires=`の依存関係なし）。コントロールサーバーが落ちていても充電制御自体は通常運転を継続する。
