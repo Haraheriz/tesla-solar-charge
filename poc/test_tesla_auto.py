@@ -1,5 +1,6 @@
 import os
 import sys
+import secrets
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -20,6 +21,10 @@ API_HOST = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
 # ブラウザから受け取ったコードを一時保存する変数
 received_code = None
+expected_oauth_state = secrets.token_urlsafe(32)
+
+cloud_session = requests.Session()
+cloud_session.verify = True
 
 # ------------------------------------------
 # ローカルWEBサーバーの受付窓口ロジック
@@ -30,7 +35,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         # テスラからのリダイレクト（/callback）をキャッチ
         if self.path.startswith("/callback"):
             query = parse_qs(urlparse(self.path).query)
-            if "code" in query:
+            if "code" in query and query.get("state", [None])[0] == expected_oauth_state:
                 received_code = query["code"][0]
 
                 # ブラウザ側に成功画面を表示
@@ -59,7 +64,7 @@ def main():
     global received_code
 
     # 1. ログイン用URLの生成
-    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
+    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state={expected_oauth_state}"
 
     print("=========================================================================")
     print("① 以下のURLをコピーして、ブラウザの『新しいタブ』で開いてログインしてください：")
@@ -90,7 +95,7 @@ def main():
     }
 
     try:
-        response = requests.post(AUTH_URL, data=token_payload, timeout=10)
+        response = cloud_session.post(AUTH_URL, data=token_payload, timeout=10)
         response.raise_for_status()
         token_data = response.json()
 
@@ -105,7 +110,7 @@ def main():
         # 4. 車両リストの取得
         print("\n車両リストを取得しています...")
         vehicles_url = f"{API_HOST}/api/1/vehicles"
-        v_response = requests.get(vehicles_url, headers=headers, timeout=10)
+        v_response = cloud_session.get(vehicles_url, headers=headers, timeout=10)
         v_response.raise_for_status()
         vehicles = v_response.json().get("response", [])
 
@@ -130,7 +135,7 @@ def main():
         data_url = f"{API_HOST}/api/1/vehicles/{vehicle_id}/vehicle_data"
         params = {"endpoints": "charge_state"}
 
-        d_response = requests.get(data_url, headers=headers, params=params, timeout=10)
+        d_response = cloud_session.get(data_url, headers=headers, params=params, timeout=10)
         d_response.raise_for_status()
 
         v_data = d_response.json().get("response", {})

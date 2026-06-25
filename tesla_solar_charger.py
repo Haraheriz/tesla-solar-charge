@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import secrets
 import requests
 import logging
 from logging.handlers import RotatingFileHandler
@@ -37,8 +38,11 @@ logger.addHandler(console_handler)
 # ==========================================
 # 設定ファイルの自動読み込み ＆ 型ガード
 # ==========================================
-CONFIG_FILE: str = "tesla_config.json"
-TOKEN_FILE: str = "tesla_tokens.json"
+# 実行時のカレントディレクトリに依存しないよう、スクリプト自身の場所を基準に解決する。
+# 環境ごとに置き場所を変えたい場合は環境変数 TESLA_CONFIG_PATH / TESLA_TOKEN_PATH で上書き可能。
+BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE: str = os.environ.get("TESLA_CONFIG_PATH", os.path.join(BASE_DIR, "tesla_config.json"))
+TOKEN_FILE: str = os.environ.get("TESLA_TOKEN_PATH", os.path.join(BASE_DIR, "tesla_tokens.json"))
 
 if not os.path.exists(CONFIG_FILE):
     logger.critical(f"設定ファイル（{CONFIG_FILE}）が見つかりません。")
@@ -63,7 +67,21 @@ FORCE_RUN: bool = "--force-run" in sys.argv or os.environ.get("FORCE_RUN") == "1
 AUTH_URL: str = "https://auth.tesla.com/oauth2/v3/token"
 PROXY_HOST: str = "https://localhost:4443"
 
+# ローカルTesla HTTPプロキシ用の自己署名証明書のパス。
+# 環境ごとに置き場所を変えたい場合は環境変数 TESLA_CERT_PATH で上書き可能。
+PROXY_CERT_PATH: str = os.environ.get("TESLA_CERT_PATH", os.path.join(BASE_DIR, "cert.pem"))
+
+# ローカルプロキシ宛と外部クラウドAPI宛でTLS検証方法を明確に分離する。
+# proxy_session: 自己署名証明書(cert.pem)をピン留めして検証
+# cloud_session: 標準CAバンドルで通常のチェーン検証
+proxy_session = requests.Session()
+proxy_session.verify = PROXY_CERT_PATH
+
+cloud_session = requests.Session()
+cloud_session.verify = True
+
 received_code: Optional[str] = None
+expected_oauth_state: Optional[str] = None
 refresh_token: Optional[str] = None
 access_token: Optional[str] = None
 token_expires_at: float = 0.0
@@ -75,7 +93,7 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         global received_code
         if self.path.startswith("/callback"):
             query: Dict[str, list] = parse_qs(urlparse(self.path).query)
-            if "code" in query:
+            if "code" in query and query.get("state", [None])[0] == expected_oauth_state:
                 received_code = query["code"][0]
                 self.send_response(200)
                 self.send_header("Content-type", "text/html; charset=utf-8")
@@ -93,7 +111,7 @@ def get_remo_power() -> Optional[int]:
     url: str = "https://api.nature.global/1/appliances"
     headers: Dict[str, str] = {"Authorization": f"Bearer {REMO_ACCESS_TOKEN}"}
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = cloud_session.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         for appliance in response.json():
             if appliance.get("type") == "EL_SMART_METER":
@@ -116,7 +134,8 @@ def save_tokens(acc: str, ref: Optional[str], exp_in: int) -> None:
     }
     tmp_file: str = TOKEN_FILE + ".tmp"
     try:
-        with open(tmp_file, "w", encoding="utf-8") as f:
+        fd = os.open(tmp_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(token_data, f, ensure_ascii=False, indent=4)
         os.replace(tmp_file, TOKEN_FILE)
     except Exception as e:
@@ -151,7 +170,7 @@ def refresh_tesla_token() -> bool:
         "refresh_token": refresh_token
     }
     try:
-        res = requests.post(AUTH_URL, data=payload, timeout=10)
+        res = cloud_session.post(AUTH_URL, data=payload, timeout=10)
         res.raise_for_status()
         data: Dict[str, Any] = res.json()
         access_token = data.get("access_token")
@@ -172,7 +191,7 @@ def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
     url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/wake_up"
     for i in range(5):
         try:
-            res = requests.post(url, headers=headers, timeout=15, verify='cert.pem')
+            res = proxy_session.post(url, headers=headers, timeout=15)
             if res.status_code == 200:
                 state: str = res.json().get("response", {}).get("state", "")
                 if state == "online":
@@ -186,7 +205,7 @@ def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
     return False
 
 def main() -> None:
-    global received_code, access_token, refresh_token, token_expires_at
+    global received_code, expected_oauth_state, access_token, refresh_token, token_expires_at
 
     logger.info("=========================================================================")
     logger.info("太陽光自動充電制御システム（トークン手元調達・初回手動認証方式）起動")
@@ -202,7 +221,8 @@ def main() -> None:
     # 初回生成（手元のWindows PC実行時のみここを通る）
     if not os.path.exists(TOKEN_FILE) or refresh_token is None:
         redirect_uri = f"http://{DOMAIN}/callback"
-        login_url: str = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
+        expected_oauth_state = secrets.token_urlsafe(32)
+        login_url: str = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state={expected_oauth_state}"
 
         logger.warning("初回認証手続きを開始します。ブラウザが自動起動しない場合は以下を開いてください：")
         logger.warning(f"\n{login_url}\n")
@@ -224,7 +244,7 @@ def main() -> None:
             "grant_type": "authorization_code", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET,
             "code": received_code, "redirect_uri": redirect_uri
         }
-        res = requests.post(AUTH_URL, data=token_payload, timeout=10)
+        res = cloud_session.post(AUTH_URL, data=token_payload, timeout=10)
         res.raise_for_status()
 
         token_data: Dict[str, Any] = res.json()
@@ -239,7 +259,7 @@ def main() -> None:
 
     headers: Dict[str, str] = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "Accept": "application/json"}
 
-    v_res = requests.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10, verify='cert.pem')
+    v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
     vehicles = v_res.json().get("response", [])
     if not vehicles:
         logger.critical("車両リストを取得できませんでした。終了します。")
@@ -287,7 +307,7 @@ def main() -> None:
                 continue
 
         try:
-            v_res = requests.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10, verify='cert.pem')
+            v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
             if v_res.status_code != 200:
                 logger.warning(f"車両リスト取得エラー (HTTP {v_res.status_code})。10分待機します。")
                 time.sleep(600)
@@ -314,7 +334,7 @@ def main() -> None:
                         continue
 
             state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
-            s_res = requests.get(state_url, headers=headers, timeout=10, verify='cert.pem')
+            s_res = proxy_session.get(state_url, headers=headers, timeout=10)
 
             if s_res.status_code == 401:
                 token_expires_at = 0.0
@@ -348,7 +368,7 @@ def main() -> None:
             if target_amps < MIN_AMPS:
                 if charging_status == "Charging":
                     logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * 200}W）を下回りました。充電を『一時停止』します。")
-                    requests.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_stop", headers=headers, timeout=15, verify='cert.pem')
+                    proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_stop", headers=headers, timeout=15)
                 else:
                     logger.info(f"充電停止中。余剰電力が{MIN_AMPS * 200}W以上回復するまで待機します。")
             else:
@@ -357,14 +377,14 @@ def main() -> None:
 
                 if charging_status != "Charging":
                     logger.info(f"余剰電力（{target_amps}A分）を検知！充電を『再開』します。")
-                    requests.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_start", headers=headers, timeout=15, verify='cert.pem')
+                    proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_start", headers=headers, timeout=15)
                     time.sleep(5)
                     raw_amps = MIN_AMPS
 
                 if target_amps != raw_amps or charging_status != "Charging":
                     logger.info(f"電流を変更調整: {raw_amps}A → {target_amps}A")
                     cmd_url = f"{PROXY_HOST}/api/1/vehicles/{vin}/command/set_charging_amps"
-                    cmd_res = requests.post(cmd_url, headers=headers, json={"charging_amps": target_amps}, timeout=15, verify='cert.pem')
+                    cmd_res = proxy_session.post(cmd_url, headers=headers, json={"charging_amps": target_amps}, timeout=15)
                     if cmd_res.json().get("response", {}).get("result") is True:
                         logger.info(f"遠隔調整成功: {target_amps}A に固定されました。")
                 else:

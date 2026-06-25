@@ -12,6 +12,8 @@ CLIENT_ID = os.environ["TESLA_CLIENT_ID"]
 CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
 
 # ブラウザのアドレスバーからコピーした「http://localhost:8000/callback?code=...」のURLをそのまま貼り付け
+# 注: このURLのstateはダミーのプレースホルダー値。このスクリプトはlogin_urlの生成もstateの検証も行わず、
+# 貼り付けられたURLからcodeを抜き出すだけなので、ここをランダム化してもCSRF対策上の意味はない。
 REDIRECTED_URL = os.environ.get("TESLA_REDIRECTED_URL", "http://localhost:8000/callback?code=PASTE_CODE_HERE&issuer=https%3A%2F%2Fauth.tesla.com%2Foauth2%2Fv3&state=12345")
 
 # ------------------------------------------
@@ -28,6 +30,9 @@ except Exception:
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 API_HOST = "https://fleet-api.prd.na.vn.cloud.tesla.com" # グローバル（日本含む）エンドポイント
 
+cloud_session = requests.Session()
+cloud_session.verify = True
+
 def main():
     # ------------------------------------------
     # 2. 引換券（code）を本物の「アクセストークン」に交換する
@@ -43,7 +48,7 @@ def main():
     }
 
     try:
-        response = requests.post(AUTH_URL, data=token_payload, timeout=10)
+        response = cloud_session.post(AUTH_URL, data=token_payload, timeout=10)
         response.raise_for_status()
         token_data = response.json()
 
@@ -62,7 +67,7 @@ def main():
         print("\n車両リストを取得しています...")
         vehicles_url = f"{API_HOST}/api/1/vehicles"
 
-        v_response = requests.get(vehicles_url, headers=headers, timeout=10)
+        v_response = cloud_session.get(vehicles_url, headers=headers, timeout=10)
         v_response.raise_for_status()
         vehicles = v_response.json().get("response", [])
 
@@ -93,7 +98,7 @@ def main():
         # 必要なデータカテゴリを指定して通信量を節約
         params = {"endpoints": "charge_state"}
 
-        d_response = requests.get(data_url, headers=headers, params=params, timeout=10)
+        d_response = cloud_session.get(data_url, headers=headers, params=params, timeout=10)
         d_response.raise_for_status()
 
         v_data = d_response.json().get("response", {})

@@ -1,5 +1,6 @@
 import os
 import sys
+import secrets
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import requests
@@ -16,14 +17,24 @@ CLIENT_SECRET = os.environ["TESLA_CLIENT_SECRET"]
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 API_HOST = "https://localhost:4443"
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROXY_CERT_PATH = os.environ.get("TESLA_CERT_PATH", os.path.join(BASE_DIR, "cert.pem"))
+
+proxy_session = requests.Session()
+proxy_session.verify = PROXY_CERT_PATH
+
+cloud_session = requests.Session()
+cloud_session.verify = True
+
 received_code = None
+expected_oauth_state = secrets.token_urlsafe(32)
 
 class OAuthCallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         global received_code
         if self.path.startswith("/callback"):
             query = parse_qs(urlparse(self.path).query)
-            if "code" in query:
+            if "code" in query and query.get("state", [None])[0] == expected_oauth_state:
                 received_code = query["code"][0]
                 self.send_response(200)
                 self.send_header("Content-type", "text/html; charset=utf-8")
@@ -44,7 +55,7 @@ def main():
     global received_code
 
     # 認証用URL（今回はトンネルなしなので、リダイレクト先はlocalhostのままで大丈夫です）
-    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri=http://localhost:8000/callback&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state=12345"
+    login_url = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri=http://localhost:8000/callback&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state={expected_oauth_state}"
 
     print("=========================================================================")
     print(" ① 以下のURLをコピーして、ブラウザの『新しいタブ』で開いて承認してください：")
@@ -70,7 +81,7 @@ def main():
     }
 
     try:
-        response = requests.post(AUTH_URL, data=token_payload, timeout=10)
+        response = cloud_session.post(AUTH_URL, data=token_payload, timeout=10)
         response.raise_for_status()
         access_token = response.json().get("access_token")
 
@@ -82,7 +93,7 @@ def main():
 
         # 1. 車両のVINコードを取得
         print("車両リストを取得しています...")
-        v_response = requests.get(f"{API_HOST}/api/1/vehicles", headers=headers, timeout=10, verify='cert.pem')
+        v_response = proxy_session.get(f"{API_HOST}/api/1/vehicles", headers=headers, timeout=10)
         v_response.raise_for_status()
         vehicles = v_response.json().get("response", [])
 
@@ -102,7 +113,7 @@ def main():
             "charging_amps": 6
         }
 
-        cmd_response = requests.post(command_url, headers=headers, json=command_payload, timeout=15, verify='cert.pem')
+        cmd_response = proxy_session.post(command_url, headers=headers, json=command_payload, timeout=15)
         cmd_response.raise_for_status()
 
         result_data = cmd_response.json()
