@@ -13,6 +13,29 @@
 
 ---
 
+## 2026-06-25（セキュリティ強化: TLS検証・CSRF対策・パス解決・ファイル権限）
+
+**タグ：** `v0.1.1`
+
+**内容：** セキュリティレビューで見つかった4点を修正し、ラズパイへ反映（[PR #1](https://github.com/Haraheriz/tesla-solar-charge/pull/1)）。
+
+**理由：**
+- `requests`の`verify='cert.pem'`が、ローカルTeslaプロキシ宛・外部クラウドAPI宛の区別なく使われており、本来TLS検証すべき箇所の意図が不明確だった
+- OAuthの`state`パラメータが固定値`"12345"`で、CSRF/認可コード差し替え対策として機能していなかった
+- `cert.pem` / `tesla_config.json` / `tesla_tokens.json`のパスが相対パス指定で、実行時のカレントディレクトリに依存していた
+- トークンファイルの書き込み権限がプロセスのumask依存で、明示的に制限されていなかった
+
+**作業内容：**
+- HTTPセッションを`proxy_session`（ローカルプロキシ用、`cert.pem`をピン留め検証）と`cloud_session`（外部API用、標準CA検証）に分離
+- OAuth `state`を`secrets.token_urlsafe(32)`でランダム化し、コールバック時に検証
+- `cert.pem` / `tesla_config.json` / `tesla_tokens.json`のパスを`__file__`基準の絶対パスに変更（`TESLA_CERT_PATH` / `TESLA_CONFIG_PATH` / `TESLA_TOKEN_PATH`で上書き可能）
+- `tesla_tokens.json`を`0o600`権限で書き込むように変更
+- `tesla_solar_charger.py`をラズパイへ転送し、`tesla-charger.service`を再起動。`--force-run`で`wake_up` / `charge_start` / `set_charging_amps` / `charge_stop`を実機確認
+
+**結果：** `tesla-charger.service` `active (running)`。ローカルとラズパイのファイルがsha256で完全一致することを確認。
+
+---
+
 ## 2026-06-21（Nature Remoトークン再発行）
 
 **内容：** Nature Remo Cloud APIのアクセストークンを再発行し、ラズパイへ反映。
