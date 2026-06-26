@@ -223,7 +223,7 @@ WantedBy=multi-user.target
 
 ```
 
-### ③ スマホ操作用コントロールサーバー用：`/etc/systemd/system/tesla-control.service`
+### ③ スマホ操作用コントロールサーバー用：`/etc/systemd/system/tesla-override.service`
 
 ```ini
 [Unit]

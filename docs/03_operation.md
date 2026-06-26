@@ -85,7 +85,7 @@ python tesla_solar_charger.py --force-run
 
 ## 3. スマホからの「フル充電モード」切替（マニュアル・オーバーライド）
 
-太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電、出発前の追加充電など）に使う機能。`tesla-control.service` が宅内LAN上で軽量Webサーバーとして常駐しており、スマートフォンのブラウザからトークン付きURLにアクセスするだけでON/OFFを切替えられる。
+太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電、出発前の追加充電など）に使う機能。`tesla-override.service` が宅内LAN上で軽量Webサーバーとして常駐しており、スマートフォンのブラウザからトークン付きURLにアクセスするだけでON/OFFを切替えられる。
 
 ### 使い方
 
@@ -201,11 +201,11 @@ sudo systemctl restart tesla-proxy.service
 
 | 操作目的 | 実行コマンド |
 | --- | --- |
-| **全システムの現在の状態を見る** | `sudo systemctl status tesla-proxy.service tesla-charger.service tesla-control.service` |
-| **全システムをまとめて起動する** | `sudo systemctl start tesla-proxy.service tesla-charger.service tesla-control.service` |
-| **全システムを安全に完全停止する** | `sudo systemctl stop tesla-charger.service tesla-proxy.service tesla-control.service` |
-| **設定変更後に一括リスタートする** | `sudo systemctl restart tesla-proxy.service tesla-charger.service tesla-control.service` |
+| **全システムの現在の状態を見る** | `sudo systemctl status tesla-proxy.service tesla-charger.service tesla-override.service` |
+| **全システムをまとめて起動する** | `sudo systemctl start tesla-proxy.service tesla-charger.service tesla-override.service` |
+| **全システムを安全に完全停止する** | `sudo systemctl stop tesla-charger.service tesla-proxy.service tesla-override.service` |
+| **設定変更後に一括リスタートする** | `sudo systemctl restart tesla-proxy.service tesla-charger.service tesla-override.service` |
 | **プロキシ側の「生のエラー」を追跡する** | `sudo journalctl -u tesla-proxy.service -f --no-pager` |
 | **Python側の「システムエラー」を追跡する** | `sudo journalctl -u tesla-charger.service -f --no-pager` |
-| **スマホ操作用サーバーのログを追跡する** | `sudo journalctl -u tesla-control.service -f --no-pager` |
+| **スマホ操作用サーバーのログを追跡する** | `sudo journalctl -u tesla-override.service -f --no-pager` |
 | **資産フォルダ全体の権限状態を確認する** | `ls -la /home/<username>/tesla-solar-charge/` |

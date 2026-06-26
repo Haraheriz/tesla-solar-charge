@@ -152,7 +152,7 @@ WantedBy=multi-user.target
 `tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定したうえで、以下を配置する。
 
 ```bash
-sudo nano /etc/systemd/system/tesla-control.service
+sudo nano /etc/systemd/system/tesla-override.service
 
 ```
 
@@ -188,12 +188,12 @@ sudo systemctl daemon-reload
 # OS起動時の自動実行を有効化
 sudo systemctl enable tesla-proxy.service
 sudo systemctl enable tesla-charger.service
-sudo systemctl enable tesla-control.service
+sudo systemctl enable tesla-override.service
 
 # サービスを今すぐ手動起動
 sudo systemctl start tesla-proxy.service
 sudo systemctl start tesla-charger.service
-sudo systemctl start tesla-control.service
+sudo systemctl start tesla-override.service
 
 ```
 
@@ -205,7 +205,7 @@ sudo systemctl start tesla-control.service
 
 ```bash
 # 3つのサービスが揃って緑文字の「active (running)」になっているか確認
-sudo systemctl status tesla-proxy.service tesla-charger.service tesla-control.service
+sudo systemctl status tesla-proxy.service tesla-charger.service tesla-override.service
 
 # メモリ上でプロセスが物理的に3つ並んで実在しているか確認
 ps aux | grep tesla
