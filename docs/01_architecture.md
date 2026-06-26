@@ -67,6 +67,17 @@
 * **認証：** `control_server.py` はクエリパラメータ `?token=` またはヘッダー `X-Control-Token` で、`tesla_config.json` の `CONTROL_TOKEN`（ランダムな共有シークレット）との一致を要求する。トークンが一致しない場合はHTTP 403を返し、ページ・APIともに一切の情報を返さない。
 * **UI：** トークン付きURL（例：`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`）にアクセスすると、ON/OFFトグルボタン1つだけのモバイル向けページが表示される。スマホのホーム画面に追加（Webクリップ）しておけば、ネイティブアプリのように1タップで起動できる。
 
+#### PWA（Progressive Web App）対応
+
+`control_server.py` は以下の資材を配信し、ホーム画面アイコンからアプリのように起動できるPWAとして構成されている。
+
+* **`icons/icon-192.png` / `icons/icon-512.png`：** ダークネイビー地に緑の雷アイコンを描いたPNG画像（外部画像ライブラリ無しで、`struct`/`zlib`/`binascii.crc32` を用いた自前のPNGエンコーダで生成）。OSのマスク処理でアイコンの角が欠けないよう、図柄を全体の約80%サイズに縮小して中央配置（"maskable"対応）。
+* **`/manifest.webmanifest`：** アプリ名・テーマカラー・アイコン・`start_url` を定義するWebアプリマニフェスト。`start_url` に実際の `CONTROL_TOKEN` を埋め込むため、このエンドポイントは他のページと同様に **トークン必須**（トークン漏洩防止のため）。
+* **`/sw.js`：** インストール判定（Service Worker登録）のためだけに存在する最小限のService Worker。充電状態は常に最新を取得する必要があるため、実質的なキャッシュ戦略は持たない（オフライン時のフォールバック処理のみ）。機密情報を含まないため、トークン無しで公開配信する。
+* **アイコン画像自体（`/icons/icon-192.png`, `/icons/icon-512.png`）：** 同様に機密情報を含まないため、トークン無しで公開配信する。
+
+> **重要な制約（iOS/Android差異）：** iOS Safariの「ホーム画面に追加」は、平文HTTP・Service Worker無しでも `apple-touch-icon` と `apple-mobile-web-app-capable` 等のメタタグだけで機能する。一方、**Android Chromeは「インストール可能」と判定するために安全なコンテキスト（HTTPSまたは`localhost`）を要求する**ため、宅内LANの平文HTTP（`http://<ラズパイのIP>:8090/...`）ではService Workerの登録が静かに失敗し、Android側は正式なPWAインストール（ホーム画面追加は可能でも、スタンドアロン起動やインストールバナーは出ない）にはならない。Androidでも完全なPWA体験が必要な場合は、Tailscale等のVPN経由で到達可能なホスト名にTLS証明書を発行し、HTTPS経由でアクセスする構成を推奨する。
+
 ### 車両保護ロジック（Insomnia Defense / 不眠症防御アルゴリズム）
 
 本システムは、テスラ車両が正常に「スリープ（睡眠状態）」に移行できるようにするため、以下の2段階チェックを厳格に実行する。

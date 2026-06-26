@@ -18,6 +18,7 @@
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
 ├── override_state.py          # [転送] マニュアル・オーバーライド状態の共有モジュール
+├── icons/                     # [転送] PWA用アプリアイコン（icon-192.png, icon-512.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 
 > **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**

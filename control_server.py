@@ -47,12 +47,21 @@ if not CONTROL_TOKEN:
     logger.critical("CONTROL_TOKEN が tesla_config.json に設定されていません。第三者による無断操作を防ぐため起動を中止します。")
     sys.exit(1)
 
+ICONS_DIR: str = os.path.join(BASE_DIR, "icons")
+
 PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Tesla 充電コントロール</title>
+<link rel="manifest" href="/manifest.webmanifest?token=__TOKEN__">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<meta name="theme-color" content="#0b0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tesla充電">
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
          background:#0b0f14; color:#e6edf3; margin:0; padding:24px;
@@ -139,14 +148,57 @@ document.getElementById("toggle").addEventListener("click", async () => {
 
 refresh();
 setInterval(refresh, 5000);
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
 </script>
 </body>
 </html>
 """
 
+MANIFEST_TEMPLATE: str = """{
+  "name": "Tesla 充電コントロール",
+  "short_name": "Tesla充電",
+  "description": "太陽光発電の状況に関わらずフル充電モードを切替えるコントローラー",
+  "start_url": "/?token=__TOKEN__",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
+"""
+
+SERVICE_WORKER_SCRIPT: str = """const CACHE_NAME = "tesla-control-v1";
+
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener("fetch", (event) => {
+  // 充電状態は常に最新を取得する必要があるため、オフライン時のフォールバック以外はキャッシュしない
+  event.respondWith(
+    fetch(event.request).catch(() => caches.match(event.request))
+  );
+});
+"""
+
 
 def render_page(token: str) -> str:
     return PAGE_TEMPLATE.replace("__TOKEN__", html.escape(token, quote=True))
+
+
+def render_manifest(token: str) -> str:
+    escaped_token = json.dumps(token)[1:-1]
+    return MANIFEST_TEMPLATE.replace("__TOKEN__", escaped_token)
 
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -166,6 +218,13 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query: Dict[str, list] = parse_qs(parsed.query)
@@ -179,19 +238,34 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/":
             if not self._check_token(query):
-                body = "Forbidden: invalid or missing token".encode("utf-8")
-                self.send_response(403)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_bytes(403, "Forbidden: invalid or missing token".encode("utf-8"), "text/plain; charset=utf-8")
                 return
-            body = render_page(CONTROL_TOKEN).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_bytes(200, render_page(CONTROL_TOKEN).encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+        if parsed.path == "/manifest.webmanifest":
+            if not self._check_token(query):
+                self._send_json(403, {"error": "invalid token"})
+                return
+            self._send_bytes(200, render_manifest(CONTROL_TOKEN).encode("utf-8"), "application/manifest+json; charset=utf-8")
+            return
+
+        if parsed.path == "/sw.js":
+            # PWAインストール判定に必要なService Workerはトークン不要の公開アセットとして配信する
+            self._send_bytes(200, SERVICE_WORKER_SCRIPT.encode("utf-8"), "application/javascript; charset=utf-8")
+            return
+
+        if parsed.path in ("/icons/icon-192.png", "/icons/icon-512.png"):
+            # アイコン画像自体は機密情報を含まないため、トークン無しで配信する
+            icon_path = os.path.join(ICONS_DIR, os.path.basename(parsed.path))
+            try:
+                with open(icon_path, "rb") as f:
+                    icon_bytes = f.read()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self._send_bytes(200, icon_bytes, "image/png")
             return
 
         self.send_response(404)
