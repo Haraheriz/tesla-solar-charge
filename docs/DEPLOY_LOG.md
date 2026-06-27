@@ -13,6 +13,31 @@
 
 ---
 
+## 2026-06-27（マニュアル・オーバーライド機能 + PWA対応 + UI改善）
+
+**タグ：** `v0.2.0`
+
+**内容：** スマホから切替え可能なマニュアル・オーバーライド（フル充電モード）とPWA対応をラズパイへ初回フルセットアップし、デプロイ時に見つかった不具合・UI課題を修正してmainへ統合（[PR #2](https://github.com/Haraheriz/tesla-solar-charge/pull/2)）。
+
+**理由：**
+- `claude/solar-charging-control-app-2vjyvj`ブランチで開発済みだったマニュアル・オーバーライド機能（`control_server.py` / `override_state.py`）とPWA対応（マニフェスト・Service Worker・アイコン）が、ラズパイには一度も配置されていなかった（`tesla-override.service`未登録、`tesla_config.json`にCONTROL_PORT/CONTROL_TOKEN未設定）
+- 初回フルセットアップ後の動作確認で、オーバーライドON中に手動でTeslaアプリから充電電流を下げても、スクリプトが毎サイクルMAX_AMPSへ強制的に戻してしまう不具合を発見
+- 操作画面で、iPhoneのDynamic Islandに文字が隠れる・ボタンが左にずれる・ON/OFF表記が状態と結果のどちらを示すか曖昧、といったUI課題が見つかった
+
+**作業内容：**
+- `control_server.py` / `override_state.py` / `tesla_solar_charger.py`（オーバーライド対応版）/ `icons/icon-192.png` / `icons/icon-512.png` をラズパイへ転送
+- `tesla_config.json`に`CONTROL_PORT`（8090）と新規生成した`CONTROL_TOKEN`を追加
+- `/etc/systemd/system/tesla-override.service`を新規作成し`enable`・`start`、`tesla-charger.service`も再起動
+- Tailscaleをラズパイに導入し、`tailscale serve`でコントロールサーバーをtailnet内HTTPS公開（Funnelは意図的に無効のまま）。AndroidでのPWAインストールにHTTPSが必要なための対応
+- `tesla_solar_charger.py`のオーバーライド分岐を修正：充電停止中からの再開時のみMAX_AMPSを設定し、充電中は車両側の現在値（手動変更分）を維持するように変更
+- `control_server.py`の操作画面を改善：`env(safe-area-inset-*)`によるセーフエリア対応、iOS HIG/Material Design基準のフォントサイズ拡大、状態表示とボタンの役割分離（解決策A：状態は常に事実、ボタンは常に未来のアクションのみ）、WAI-ARIA対応（`role="status"` `aria-live` `aria-pressed`等）、中央揃えのレイアウト修正、ページタイトル・見出し・PWAマニフェストの表示名を「Tesla充電切替」に統一
+- `show_control_url.sh`を追加（`qrencode`導入）し、操作用URLとQRコードを端末に表示できるようにした
+- `claude/solar-charging-control-app-2vjyvj`をmainへマージし、上記の修正一式をコミットしてPR化
+
+**結果：** `tesla-proxy.service` / `tesla-charger.service` / `tesla-override.service`の3つすべて`active (running)`。HTTPS経由（`https://raspi4-12.taila049aa.ts.net/`）で200 OKを確認。手動変更した充電電流が次サイクルで上書きされないことを確認。
+
+---
+
 ## 2026-06-25（セキュリティ強化: TLS検証・CSRF対策・パス解決・ファイル権限）
 
 **タグ：** `v0.1.1`
