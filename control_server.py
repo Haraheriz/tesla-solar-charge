@@ -54,37 +54,60 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Tesla 充電コントロール</title>
+<title>Tesla充電切替</title>
 <link rel="manifest" href="/manifest.webmanifest?token=__TOKEN__">
 <link rel="icon" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" href="/icons/icon-192.png">
 <meta name="theme-color" content="#0b0f14">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Tesla充電">
+<meta name="apple-mobile-web-app-title" content="Tesla充電切替">
 <style>
+  :root { color-scheme: dark; }
+  * { -webkit-tap-highlight-color: transparent; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
-         background:#0b0f14; color:#e6edf3; margin:0; padding:24px;
+         background:#0b0f14; color:#e6edf3; margin:0;
+         /* iOSのDynamic Island/ノッチ、Androidのジェスチャーナビゲーション・カットアウトに
+            重ならないよう、固定24pxではなくセーフエリアの方を優先して確保する。 */
+         padding-top: max(24px, env(safe-area-inset-top));
+         padding-right: max(24px, env(safe-area-inset-right));
+         padding-bottom: max(24px, env(safe-area-inset-bottom));
+         padding-left: max(24px, env(safe-area-inset-left));
          display:flex; flex-direction:column; align-items:center; min-height:100vh; box-sizing:border-box; }
-  h1 { font-size:18px; font-weight:600; margin-bottom:4px; text-align:center; }
-  p.sub { color:#8b949e; font-size:13px; margin-top:0; margin-bottom:32px; text-align:center; max-width:280px; }
-  .status { font-size:15px; margin-bottom:24px; padding:8px 16px; border-radius:8px; background:#161b22; text-align:center; }
+  /* iOS Human Interface Guidelines の本文基準（約17pt）、Android Material Design の
+     body1（16sp）を下限の目安として、各要素のフォントサイズを引き上げている。 */
+  h1 { font-size:22px; font-weight:600; margin-bottom:6px; text-align:center; }
+  p.sub { color:#8b949e; font-size:16px; line-height:1.5; margin-top:0; margin-bottom:32px;
+          text-align:center; max-width:280px; margin-left:auto; margin-right:auto; }
+  /* 「現在のステータス」：常に事実（状態）のみを示す固定位置の表示。ボタンの外に置くことで
+     「状態の提示」と「未来のアクションの提示」を位置的に分離する（位置とテキストの相補関係）。 */
+  .status { font-size:17px; margin-bottom:24px; padding:10px 18px; border-radius:8px; background:#161b22; text-align:center; }
   .status.on { color:#3fb950; }
   .status.off { color:#8b949e; }
-  button#toggle { width:220px; height:220px; border-radius:50%; border:none; font-size:16px;
-                  font-weight:700; cursor:pointer; transition: background .2s; }
+  .status .label { color:#6e7681; font-weight:500; }
+  button#toggle { display:block; width:220px; height:220px; border-radius:50%; border:none; font-size:18px;
+                  line-height:1.3; padding:0 24px;
+                  font-weight:700; cursor:pointer; transition: background .2s; margin:0 auto; }
   button#toggle.off { background:#21262d; color:#e6edf3; }
   button#toggle.on { background:#238636; color:#ffffff; }
   button#toggle:disabled { opacity:0.5; }
-  .updated { margin-top:24px; font-size:12px; color:#6e7681; text-align:center; }
+  button#toggle:focus-visible { outline:3px solid #58a6ff; outline-offset:3px; }
+  .updated { margin-top:24px; font-size:13px; color:#6e7681; text-align:center; }
 </style>
 </head>
 <body>
-  <h1>Tesla 充電コントロール</h1>
-  <p class="sub">ONにすると太陽光の発電状況に関わらず、フル充電モードで動作します。</p>
-  <div class="status off" id="status">読み込み中...</div>
-  <button id="toggle" class="off" disabled>...</button>
-  <div class="updated" id="updated"></div>
+  <main>
+    <h1>Tesla充電切替</h1>
+    <p class="sub">ONにすると太陽光の発電状況に関わらず、フル充電モードで動作します。</p>
+    <!-- role="status" + aria-live="polite": 状態が変わったことを支援技術にも読み上げさせる -->
+    <div class="status off" id="status" role="status" aria-live="polite" aria-atomic="true">
+      <span class="label">現在のステータス：</span><span id="status-value">読み込み中...</span>
+    </div>
+    <!-- ボタン内テキストは常に「これを押すと何が起きるか（未来のアクション）」のみを示し、
+         現在の状態は上の.statusだけが伝える。aria-pressedで状態自体も支援技術に伝える。 -->
+    <button id="toggle" class="off" type="button" disabled aria-pressed="false" aria-describedby="status">...</button>
+    <div class="updated" id="updated" aria-hidden="true"></div>
+  </main>
 
 <script>
 const TOKEN = "__TOKEN__";
@@ -107,19 +130,24 @@ async function setOverride(enabled) {
 
 function render(state) {
   const statusEl = document.getElementById("status");
+  const statusValueEl = document.getElementById("status-value");
   const btn = document.getElementById("toggle");
   const updatedEl = document.getElementById("updated");
   btn.disabled = false;
   if (state.manual_override) {
-    statusEl.textContent = "フル充電モード：ON";
+    // .status側：現在の事実のみを示す（状態の提示）
+    statusValueEl.textContent = "フル充電モード（太陽光発電状況を無視）";
     statusEl.className = "status on";
-    btn.textContent = "OFFにする（太陽光優先に戻す）";
+    // button側：押すと起きる未来のアクションのみを示す（アクションの提示）。状態の文言とは混在させない。
+    btn.textContent = "太陽光追従モードに戻す";
     btn.className = "on";
+    btn.setAttribute("aria-pressed", "true");
   } else {
-    statusEl.textContent = "太陽光追従モード：通常稼働中";
+    statusValueEl.textContent = "太陽光追従モード（通常稼働中）";
     statusEl.className = "status off";
-    btn.textContent = "ONにする（フル充電）";
+    btn.textContent = "フル充電モードを開始する";
     btn.className = "off";
+    btn.setAttribute("aria-pressed", "false");
   }
   updatedEl.textContent = "最終更新: " + new Date().toLocaleTimeString("ja-JP");
 }
@@ -129,7 +157,7 @@ async function refresh() {
     const state = await fetchStatus();
     render(state);
   } catch (e) {
-    document.getElementById("status").textContent = "通信エラー";
+    document.getElementById("status-value").textContent = "通信エラー";
   }
 }
 
@@ -158,8 +186,8 @@ if ("serviceWorker" in navigator) {
 """
 
 MANIFEST_TEMPLATE: str = """{
-  "name": "Tesla 充電コントロール",
-  "short_name": "Tesla充電",
+  "name": "Tesla充電切替",
+  "short_name": "Tesla充電切替",
   "description": "太陽光発電の状況に関わらずフル充電モードを切替えるコントローラー",
   "start_url": "/?token=__TOKEN__",
   "scope": "/",

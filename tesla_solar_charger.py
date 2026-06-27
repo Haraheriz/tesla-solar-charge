@@ -372,7 +372,10 @@ def main() -> None:
                 raw_amps = MIN_AMPS
 
             if manual_override:
-                target_amps = MAX_AMPS
+                if charging_status != "Charging":
+                    target_amps = MAX_AMPS
+                else:
+                    target_amps = raw_amps
                 logger.info(f"演算状況（オーバーライド） → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
             else:
                 calc_base_amps = raw_amps if charging_status == "Charging" else 0
