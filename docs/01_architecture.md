@@ -78,6 +78,13 @@
 
 > **重要な制約（iOS/Android差異）：** iOS Safariの「ホーム画面に追加」は、平文HTTP・Service Worker無しでも `apple-touch-icon` と `apple-mobile-web-app-capable` 等のメタタグだけで機能する。一方、**Android Chromeは「インストール可能」と判定するために安全なコンテキスト（HTTPSまたは`localhost`）を要求する**ため、宅内LANの平文HTTP（`http://<ラズパイのIP>:8090/...`）ではService Workerの登録が静かに失敗し、Android側は正式なPWAインストール（ホーム画面追加は可能でも、スタンドアロン起動やインストールバナーは出ない）にはならない。Androidでも完全なPWA体験が必要な場合は、Tailscale等のVPN経由で到達可能なホスト名にTLS証明書を発行し、HTTPS経由でアクセスする構成を推奨する。
 
+#### TailscaleによるHTTPS化（Funnelは意図的に不採用）
+
+上記のAndroid制約に対応するため、ラズパイをTailscale（WireGuardベースのメッシュVPN）に参加させ、`tailscale serve --https=443 http://localhost:8090` でコントロールサーバーをHTTPS化している。Tailscale導入済みの場合、`tailscale status --self` から取得できるMagicDNSホスト名（`<ホスト名>.<tailnetドメイン>.ts.net`）でHTTPS証明書が自動発行され、Android Chromeでも正式なPWAインストールが可能になる。
+
+* **Serve（採用）：** tailnet（自分の管理する端末群）内からのみHTTPSアクセス可能。同じtailnetにスマートフォンを参加させればよく、外出先からでも宅外公開なしでアクセスできる。
+* **Funnel（不採用）：** tailnetの外、つまり公開インターネット上の誰でもアクセス可能になる機能。本システムの操作対象は車両の充電（フル充電モードのON/OFF）であり、防御線が`CONTROL_TOKEN`一本のみであることを踏まえ、トークン漏洩・総当たりのリスクが公開のメリットを上回ると判断し、意図的に有効化していない。宅外からの利用は、スマートフォン側にもTailscaleアプリを入れて同じtailnetに参加させることで、Funnelなしで同等のアクセスを実現する。
+
 ### 車両保護ロジック（Insomnia Defense / 不眠症防御アルゴリズム）
 
 本システムは、テスラ車両が正常に「スリープ（睡眠状態）」に移行できるようにするため、以下の2段階チェックを厳格に実行する。

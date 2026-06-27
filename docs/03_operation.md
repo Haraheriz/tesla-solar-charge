@@ -97,7 +97,16 @@ http://<ラズパイのIPアドレス>:8090/?token=<CONTROL_TOKEN>
 
 ```
 
-iPhoneのSafariなら共有メニューから「ホーム画面に追加」、AndroidのChromeなら「ホーム画面に追加」を選ぶと、アイコンタップだけでアプリのように開けるようになる（PWA対応により、専用アイコン付きでスタンドアロン表示される）。
+トークン入りURLを毎回手で組み立てる代わりに、同梱の `show_control_url.sh` を使うと、URLと端末上のQRコードを一度に表示できる。
+
+```bash
+ssh <ホスト名> "./tesla-solar-charge/show_control_url.sh"
+
+```
+
+`tesla_config.json` の `CONTROL_TOKEN` と、Tailscaleの自ホストMagicDNS名（`tailscale status --self` から取得）からURLを組み立て、`qrencode`（事前に `sudo apt-get install qrencode` が必要）でQRコードを端末に描画する。Tailscale未導入の環境では動作しないため、その場合は上記のIPアドレス形式のURLを直接使うこと。スマホでQRコードを読み取れば、トークンを手で入力せずそのままアクセスできる。
+
+URLが分かれば、iPhoneのSafariなら共有メニューから「ホーム画面に追加」、AndroidのChromeなら「ホーム画面に追加」を選ぶと、アイコンタップだけでアプリのように開けるようになる（PWA対応により、専用アイコン付きでスタンドアロン表示される）。
 
 > **iOS/Android差異の注意：** iOS Safariは平文HTTPでも「ホーム画面に追加」が機能する。一方、AndroidのChromeは正式なPWAインストール（Service Worker登録・スタンドアロン起動）にHTTPSまたは`localhost`を要求するため、宅内LANの平文HTTP（`http://<ラズパイのIP>:8090/...`）ではホーム画面への追加自体は可能でも、完全なPWA体験にはならない場合がある。Androidでも完全なPWA体験が必要な場合は、Tailscale等のVPN経由でTLS証明書付きのホスト名からアクセスする構成を推奨する。
 
@@ -111,7 +120,28 @@ iPhoneのSafariなら共有メニューから「ホーム画面に追加」、An
 
 * 宅外からアクセスする場合は、ルーターのポート開放ではなく **Tailscale等のVPN経由でのアクセスを推奨する**（`CONTROL_TOKEN` をURLに含めて宅外公開すると、漏洩時に第三者から充電を操作されるリスクがあるため）。
 * `CONTROL_TOKEN` は `openssl rand -hex 32` 等で生成した推測不可能な値を `tesla_config.json` に設定すること。
-* フル充電モードをONにしたまま放置すると、太陽光発電量に関わらず充電が継続する。出発後やOFF忘れに注意し、必要に応じて手動でOFFに戻すこと。
+* フル充電モードをONにしたまま放置すると、太陽光発電量に関わらず充電が継続する。OFFに戻し忘れたまま在宅・充電中の状態が続くと、太陽光の余剰に関係なく充電し続けるため、不要になったら手動でOFFに戻すこと。
+
+### `CONTROL_TOKEN` 漏洩時のローテーション手順
+
+URLを誤って共有してしまった、画面のスクリーンショットに含めてしまった等で `CONTROL_TOKEN` が漏洩した（あるいは漏洩した疑いがある）場合は、以下の手順で速やかに無効化する。
+
+1. **新しいトークンを生成：**
+```bash
+openssl rand -hex 32
+```
+
+2. **ラズパイ側の設定を更新：**
+`/home/<username>/tesla-solar-charge/tesla_config.json` の `CONTROL_TOKEN` を新しい値に書き換える。古いトークンを使ったリクエストはこの時点から即座に `403 Forbidden` になる。
+
+3. **コントロールサーバーを再起動：**
+```bash
+sudo systemctl restart tesla-override.service
+```
+（`control_server.py` はプロセス起動時に `tesla_config.json` を読み込む実装のため、ファイル更新だけでは反映されない。）
+
+4. **スマホ側の再設定：**
+古いトークン入りのブックマーク・ホーム画面アイコンは無効になるため削除し、`show_control_url.sh` で新しいURL・QRコードを表示してホーム画面に追加し直す。
 
 ---
 
