@@ -10,6 +10,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any
 
+from override_state import read_override
+
 # Windows環境での標準出力のエンコーディング問題を解決
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -275,7 +277,9 @@ def main() -> None:
 
     while True:
         now = time.localtime()
-        if not FORCE_RUN and not (7 <= now.tm_hour < 18):
+        manual_override: bool = read_override()
+
+        if not manual_override and not FORCE_RUN and not (7 <= now.tm_hour < 18):
             logger.info("--- 定期チェック開始 ---")
             logger.info(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
             logger.info("次の稼働チェックまで10分間スリープします...")
@@ -289,22 +293,26 @@ def main() -> None:
             headers["Authorization"] = f"Bearer {access_token}"
 
         logger.info("--- 定期チェック開始 ---")
-        house_power: Optional[int] = None
-        if FORCE_RUN:
-            user_input = input(
-                "[FORCE_RUNモード] 仮想の家庭消費電力(W)を入力（負の値＝売電中/余剰あり、空Enterで実測値を使用）: "
-            ).strip()
-            if user_input:
-                try:
-                    house_power = int(user_input)
-                except ValueError:
-                    logger.warning("数値として認識できなかったため、実測値を使用します。")
+        if manual_override:
+            logger.info("マニュアル・オーバーライド有効：太陽光の発電状況に関わらずフル充電モードで稼働します。")
 
-        if house_power is None:
-            house_power = get_remo_power()
+        house_power: Optional[int] = None
+        if not manual_override:
+            if FORCE_RUN:
+                user_input = input(
+                    "[FORCE_RUNモード] 仮想の家庭消費電力(W)を入力（負の値＝売電中/余剰あり、空Enterで実測値を使用）: "
+                ).strip()
+                if user_input:
+                    try:
+                        house_power = int(user_input)
+                    except ValueError:
+                        logger.warning("数値として認識できなかったため、実測値を使用します。")
+
             if house_power is None:
-                time.sleep(180)
-                continue
+                house_power = get_remo_power()
+                if house_power is None:
+                    time.sleep(180)
+                    continue
 
         try:
             v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
@@ -320,15 +328,19 @@ def main() -> None:
 
             vin = vehicles[0].get("vin", "")
             vehicle_state: str = vehicles[0].get("state", "")
-            logger.info(f"車両状態: 『{vehicle_state}』 (RemoE瞬時電力: {house_power} W)")
+            power_label: str = "オーバーライド中（太陽光は無視）" if manual_override else f"{house_power} W"
+            logger.info(f"車両状態: 『{vehicle_state}』 (RemoE瞬時電力: {power_label})")
 
             if vehicle_state in ["asleep", "offline"]:
-                if house_power >= -(MIN_AMPS * 200):
+                if not manual_override and house_power >= -(MIN_AMPS * 200):
                     logger.info(f"車両は就寝中、かつ余剰が{MIN_AMPS * 200}W未満のため、このまま寝かせます。")
                     time.sleep(180)
                     continue
                 else:
-                    logger.info(f"十分な余剰電力（{MIN_AMPS * 200}W以上）を検知したため、車両を起動します。")
+                    if manual_override:
+                        logger.info("マニュアル・オーバーライドのため、車両を起動します。")
+                    else:
+                        logger.info(f"十分な余剰電力（{MIN_AMPS * 200}W以上）を検知したため、車両を起動します。")
                     if not wake_up_vehicle(vin, headers):
                         time.sleep(180)
                         continue
@@ -359,11 +371,17 @@ def main() -> None:
             if raw_amps is None:
                 raw_amps = MIN_AMPS
 
-            calc_base_amps = raw_amps if charging_status == "Charging" else 0
-            adjustment_amps = int(-house_power / 200)
-            target_amps = calc_base_amps + adjustment_amps
-
-            logger.info(f"演算状況 → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
+            if manual_override:
+                if charging_status != "Charging":
+                    target_amps = MAX_AMPS
+                else:
+                    target_amps = raw_amps
+                logger.info(f"演算状況（オーバーライド） → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
+            else:
+                calc_base_amps = raw_amps if charging_status == "Charging" else 0
+                adjustment_amps = int(-house_power / 200)
+                target_amps = calc_base_amps + adjustment_amps
+                logger.info(f"演算状況 → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
 
             if target_amps < MIN_AMPS:
                 if charging_status == "Charging":
@@ -376,7 +394,10 @@ def main() -> None:
                     target_amps = MAX_AMPS
 
                 if charging_status != "Charging":
-                    logger.info(f"余剰電力（{target_amps}A分）を検知！充電を『再開』します。")
+                    if manual_override:
+                        logger.info(f"マニュアル・オーバーライドのため、充電を『再開』します（{target_amps}A）。")
+                    else:
+                        logger.info(f"余剰電力（{target_amps}A分）を検知！充電を『再開』します。")
                     proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_start", headers=headers, timeout=15)
                     time.sleep(5)
                     raw_amps = MIN_AMPS

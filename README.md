@@ -28,7 +28,11 @@ tesla-solar-charge/
 │   └── 03_operation.md
 │
 ├── tesla_solar_charger.py            # [共用] 充電制御メインスクリプト（両環境で直接実行可能）
+├── control_server.py                 # [共用] スマホ操作用コントロールサーバー（フル充電モードの切替UI）
+├── override_state.py                 # [共用] マニュアル・オーバーライド状態の共有読み書きモジュール
+├── icons/                             # [共用] PWA用アプリアイコン（icon-192.png, icon-512.png）
 ├── tesla_config.json                 # [共用] システム設定ファイル（各環境のトークン/パスを記載）
+├── override_state.json               # 【動線: スマホ → RPi】マニュアル・オーバーライドの現在状態（自動生成）
 │
 ├── poc/                               # [開発用] 本実装に至るまでの実証・検証スクリプト一式
 │                                     # (Tesla/Nature Remo APIの認証フローを個別に確認するための使い捨てコード。本番では使用しない)

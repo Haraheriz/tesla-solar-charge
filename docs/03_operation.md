@@ -83,7 +83,39 @@ python tesla_solar_charger.py --force-run
 
 ---
 
-## 3. トークン失効・更新時の「初回手動認証方式」復旧手順
+## 3. スマホからの「フル充電モード」切替（マニュアル・オーバーライド）
+
+太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電、出発前の追加充電など）に使う機能。`tesla-override.service` が宅内LAN上で軽量Webサーバーとして常駐しており、スマートフォンのブラウザからトークン付きURLにアクセスするだけでON/OFFを切替えられる。
+
+### 使い方
+
+1. **初回のみ：URLをブックマーク／ホーム画面に追加**
+ラズパイのIPアドレスと、`tesla_config.json` に設定した `CONTROL_TOKEN` を使って以下の形式のURLを開く。
+
+```text
+http://<ラズパイのIPアドレス>:8090/?token=<CONTROL_TOKEN>
+
+```
+
+iPhoneのSafariなら共有メニューから「ホーム画面に追加」、AndroidのChromeなら「ホーム画面に追加」を選ぶと、アイコンタップだけでアプリのように開けるようになる（PWA対応により、専用アイコン付きでスタンドアロン表示される）。
+
+> **iOS/Android差異の注意：** iOS Safariは平文HTTPでも「ホーム画面に追加」が機能する。一方、AndroidのChromeは正式なPWAインストール（Service Worker登録・スタンドアロン起動）にHTTPSまたは`localhost`を要求するため、宅内LANの平文HTTP（`http://<ラズパイのIP>:8090/...`）ではホーム画面への追加自体は可能でも、完全なPWA体験にはならない場合がある。Androidでも完全なPWA体験が必要な場合は、Tailscale等のVPN経由でTLS証明書付きのホスト名からアクセスする構成を推奨する。
+
+2. **トグルボタンをタップ：**
+画面中央の丸いボタンをタップすると「フル充電モード：ON」に切替わり、太陽光の余剰計算を無視して `MAX_AMPS` でのフル充電が始まる（車両が就寝中の場合は自動で起動する）。もう一度タップすると通常の太陽光追従モードに復帰する。
+
+3. **状態確認：**
+ページは5秒ごとに自動で状態を再取得するため、他の場所（PC等）から切替えた場合でも画面を開けば最新状態が反映される。
+
+### 注意点
+
+* 宅外からアクセスする場合は、ルーターのポート開放ではなく **Tailscale等のVPN経由でのアクセスを推奨する**（`CONTROL_TOKEN` をURLに含めて宅外公開すると、漏洩時に第三者から充電を操作されるリスクがあるため）。
+* `CONTROL_TOKEN` は `openssl rand -hex 32` 等で生成した推測不可能な値を `tesla_config.json` に設定すること。
+* フル充電モードをONにしたまま放置すると、太陽光発電量に関わらず充電が継続する。出発後やOFF忘れに注意し、必要に応じて手動でOFFに戻すこと。
+
+---
+
+## 4. トークン失効・更新時の「初回手動認証方式」復旧手順
 
 テスラのAPI認可トークン（`tesla_tokens.json`）が完全に失効した場合、あるいは初回認証を行う場合、Linux（ヘッドレス環境）からではブラウザセキュリティ（Private Network Access: PNA制限）により直接の認証着地がブロックされる。
 
@@ -131,7 +163,7 @@ sudo systemctl restart tesla-proxy.service tesla-charger.service
 
 ---
 
-## 4. 緊急時のトラブルシューティング（障害対応）
+## 5. 緊急時のトラブルシューティング（障害対応）
 
 ### 事象1：プロキシが `status=1/FAILURE` で即死を繰り返す
 
@@ -165,16 +197,17 @@ sudo systemctl restart tesla-proxy.service
 
 ---
 
-## 5. 運用管理コマンド クイックリファレンス（チートシート）
+## 6. 運用管理コマンド クイックリファレンス（チートシート）
 
 日常のメンテナンスで保守担当者が使用する、主要コマンドの一覧である。
 
 | 操作目的 | 実行コマンド |
 | --- | --- |
-| **全システムの現在の状態を見る** | `sudo systemctl status tesla-proxy.service tesla-charger.service` |
-| **全システムをまとめて起動する** | `sudo systemctl start tesla-proxy.service tesla-charger.service` |
-| **全システムを安全に完全停止する** | `sudo systemctl stop tesla-charger.service tesla-proxy.service` |
-| **設定変更後に一括リスタートする** | `sudo systemctl restart tesla-proxy.service tesla-charger.service` |
+| **全システムの現在の状態を見る** | `sudo systemctl status tesla-proxy.service tesla-charger.service tesla-override.service` |
+| **全システムをまとめて起動する** | `sudo systemctl start tesla-proxy.service tesla-charger.service tesla-override.service` |
+| **全システムを安全に完全停止する** | `sudo systemctl stop tesla-charger.service tesla-proxy.service tesla-override.service` |
+| **設定変更後に一括リスタートする** | `sudo systemctl restart tesla-proxy.service tesla-charger.service tesla-override.service` |
 | **プロキシ側の「生のエラー」を追跡する** | `sudo journalctl -u tesla-proxy.service -f --no-pager` |
 | **Python側の「システムエラー」を追跡する** | `sudo journalctl -u tesla-charger.service -f --no-pager` |
+| **スマホ操作用サーバーのログを追跡する** | `sudo journalctl -u tesla-override.service -f --no-pager` |
 | **資産フォルダ全体の権限状態を確認する** | `ls -la /home/<username>/tesla-solar-charge/` |
