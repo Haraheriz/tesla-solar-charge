@@ -11,6 +11,10 @@ GitHub: Haraheriz/tesla-solar-charge
 ## Commit messages
 - Follow global conventions (see ~/.codex/AGENTS.md)
 
+## 秘密ファイルの保護フック
+- `tesla_tokens.json` / `tesla_config.json` / `*.pem` へのReadを拒否するPreToolUseフックを、`.claude/settings.json`（Claude Code用）と `.codex/hooks.json`（Codex CLI用）にそれぞれ設定している
+- いずれも端末固有の設定として `.gitignore` 対象（Git管理対象外）。新しい端末でチェックアウトした場合は、このAGENTS.mdの記述を参考に手元で同様のフックを再設定すること
+
 ## この設定ファイル自体の管理（Git）
 
 このファイル（AGENTS.md）はリポジトリに含まれ Git で管理されています。

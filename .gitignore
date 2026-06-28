@@ -24,3 +24,7 @@ poc/.env
 
 # 6. ローカル環境専用メモ（IPアドレス・SSH接続情報等、環境依存・非公開）
 docs/LOCAL_ENV.md
+
+# 7. Codex CLI / Claude Code のローカル設定（端末固有のフック設定、非公開）
+.codex/
+.claude/settings.json
