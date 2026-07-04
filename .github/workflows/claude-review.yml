@@ -24,6 +24,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
           prompt: |
             この PR をレビューしてください。観点:
             - 正しさ: バグ、エッジケース、エラーハンドリングの欠落
@@ -32,6 +33,8 @@ jobs:
             - Tesla API / Nature Remo API の使い方の妥当性
             - 既存コードとの一貫性
 
-            指摘は日本語で、重要度の高い順に。問題がなければ簡潔に承認コメントを。
-            コメントは gh pr comment で PR に投稿してください。
-          claude_args: '--allowed-tools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
+            指摘は日本語で、重要度の高い順に。
+            行単位の指摘は mcp__github_inline_comment__create_inline_comment で、
+            総評は mcp__github_comment__update_claude_comment で投稿してください。
+            問題がなければ総評に簡潔な承認コメントだけを書いてください。
+          claude_args: '--allowed-tools "mcp__github_comment__update_claude_comment,mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"'
