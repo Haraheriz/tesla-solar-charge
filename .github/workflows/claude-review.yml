@@ -1,0 +1,37 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  claude-review:
+    # Draft PR はスキップ（ready_for_review で改めて発火する）
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            この PR をレビューしてください。観点:
+            - 正しさ: バグ、エッジケース、エラーハンドリングの欠落
+            - セキュリティ: 認証情報・トークン・秘密鍵の漏出（このリポジトリは
+              Tesla API のトークンや証明書を扱うため特に注意）
+            - Tesla API / Nature Remo API の使い方の妥当性
+            - 既存コードとの一貫性
+
+            指摘は日本語で、重要度の高い順に。問題がなければ簡潔に承認コメントを。
+            コメントは gh pr comment で PR に投稿してください。
+          claude_args: '--allowed-tools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"'
