@@ -58,8 +58,21 @@ CLIENT_ID: str = str(config.get("CLIENT_ID", ""))
 CLIENT_SECRET: str = str(config.get("CLIENT_SECRET", ""))
 DOMAIN: str = str(config.get("DOMAIN", "localhost:8000"))
 
-MIN_AMPS: int = int(config.get("MIN_AMPS", 3))
+MIN_AMPS: int = int(config.get("MIN_AMPS", 4))
 MAX_AMPS: int = int(config.get("MAX_AMPS", 48))
+
+# ヒステリシス用の開始閾値。充電開始・車両起動はSTART_AMPS以上の余剰を要求し、
+# 停止判定はMIN_AMPS未満で行う。開始直後は車両自身の消費で余剰が減るため、
+# 閾値が1本だと開始→即停止の発振が起きる。
+START_AMPS: int = int(config.get("START_AMPS", MIN_AMPS + 2))
+
+# 停止判定のデバウンス回数。余剰不足がこの回数連続したときだけ充電を停止する。
+STOP_DEBOUNCE_CYCLES: int = int(config.get("STOP_DEBOUNCE_CYCLES", 2))
+
+# Remo E瞬時電力の平滑化（1サイクル内のサンプル数と間隔秒）。
+# 冷蔵庫・雲などによる±数百Wの揺れをならして誤判定を減らす。
+REMO_SAMPLES: int = 3
+REMO_SAMPLE_INTERVAL_SEC: int = 10
 
 # 動作確認用：コマンドライン引数 --force-run または環境変数 FORCE_RUN=1 で
 # 夜間休止モード（7:00-18:00以外は停止）を無視して常時稼働させ、
@@ -127,6 +140,31 @@ def get_remo_power() -> Optional[int]:
     except Exception as e:
         logger.error(f"Nature Remo E 通信エラー: {e}")
     return None
+
+def get_remo_power_smoothed() -> Optional[int]:
+    """瞬時値を複数回サンプリングして平均する。取得できた分だけで平均し、全滅ならNone。"""
+    readings: list = []
+    for i in range(REMO_SAMPLES):
+        if i > 0:
+            time.sleep(REMO_SAMPLE_INTERVAL_SEC)
+        value = get_remo_power()
+        if value is not None:
+            readings.append(value)
+    if not readings:
+        return None
+    return round(sum(readings) / len(readings))
+
+def set_charging_amps(vin: str, headers: Dict[str, str], amps: int) -> bool:
+    """充電電流を設定する。5A未満はTesla APIの既知の癖で1回では反映されないことがあるため2回送信する。"""
+    url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/command/set_charging_amps"
+    attempts: int = 2 if amps < 5 else 1
+    result: bool = False
+    for i in range(attempts):
+        if i > 0:
+            time.sleep(2)
+        res = proxy_session.post(url, headers=headers, json={"charging_amps": amps}, timeout=15)
+        result = res.json().get("response", {}).get("result") is True
+    return result
 
 def save_tokens(acc: str, ref: Optional[str], exp_in: int) -> None:
     global token_expires_at
@@ -275,6 +313,9 @@ def main() -> None:
         logger.warning("FORCE_RUNモード：夜間休止モードを無視して常時稼働します（動作確認専用）。")
         logger.warning("サイクルごとに画面で仮想の家庭消費電力（W）を入力できます（空Enterで実測値を使用）。")
 
+    below_min_count: int = 0  # 停止デバウンス用：余剰不足が連続したサイクル数
+    night_charge_checked: bool = False  # 夜間休止入り時の充電停止チェックを1回だけ行うためのフラグ
+
     while True:
         now = time.localtime()
         manual_override: bool = read_override()
@@ -282,9 +323,33 @@ def main() -> None:
         if not manual_override and not FORCE_RUN and not (7 <= now.tm_hour < 18):
             logger.info("--- 定期チェック開始 ---")
             logger.info(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
+
+            # 夜間休止に入る最初のサイクルでのみ、充電中なら停止してから休止する。
+            # 充電中のまま休止に入ると、余剰の有無に関わらず朝まで系統充電が続いてしまうため。
+            # 2回目以降のサイクルでは車両へ問い合わせない（就寝中の車両を起こさないため）。
+            if not night_charge_checked:
+                night_charge_checked = True
+                try:
+                    if time.time() > token_expires_at and refresh_tesla_token():
+                        headers["Authorization"] = f"Bearer {access_token}"
+                    v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
+                    vehicles = v_res.json().get("response", [])
+                    if vehicles and vehicles[0].get("state") == "online":
+                        vin = vehicles[0].get("vin", "")
+                        s_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers=headers, timeout=10)
+                        if s_res.status_code == 200:
+                            night_charge_state = (s_res.json().get("response") or {}).get("charge_state", {})
+                            if str(night_charge_state.get("charging_state", "")) == "Charging":
+                                logger.info("夜間休止に入るため、進行中の充電を『一時停止』します。")
+                                proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_stop", headers=headers, timeout=15)
+                except Exception as e:
+                    logger.error(f"夜間休止前の充電状態確認でエラー: {e}")
+
             logger.info("次の稼働チェックまで10分間スリープします...")
             time.sleep(600)
             continue
+
+        night_charge_checked = False
 
         if time.time() > token_expires_at:
             if not refresh_tesla_token():
@@ -309,7 +374,7 @@ def main() -> None:
                         logger.warning("数値として認識できなかったため、実測値を使用します。")
 
             if house_power is None:
-                house_power = get_remo_power()
+                house_power = get_remo_power_smoothed()
                 if house_power is None:
                     time.sleep(180)
                     continue
@@ -329,18 +394,18 @@ def main() -> None:
             vin = vehicles[0].get("vin", "")
             vehicle_state: str = vehicles[0].get("state", "")
             power_label: str = "オーバーライド中（太陽光は無視）" if manual_override else f"{house_power} W"
-            logger.info(f"車両状態: 『{vehicle_state}』 (RemoE瞬時電力: {power_label})")
+            logger.info(f"車両状態: 『{vehicle_state}』 (RemoE平均電力: {power_label})")
 
             if vehicle_state in ["asleep", "offline"]:
-                if not manual_override and house_power >= -(MIN_AMPS * 200):
-                    logger.info(f"車両は就寝中、かつ余剰が{MIN_AMPS * 200}W未満のため、このまま寝かせます。")
+                if not manual_override and house_power >= -(START_AMPS * 200):
+                    logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * 200}W）未満のため、このまま寝かせます。")
                     time.sleep(180)
                     continue
                 else:
                     if manual_override:
                         logger.info("マニュアル・オーバーライドのため、車両を起動します。")
                     else:
-                        logger.info(f"十分な余剰電力（{MIN_AMPS * 200}W以上）を検知したため、車両を起動します。")
+                        logger.info(f"開始閾値以上の余剰電力（{START_AMPS * 200}W以上）を検知したため、車両を起動します。")
                     if not wake_up_vehicle(vin, headers):
                         time.sleep(180)
                         continue
@@ -371,11 +436,18 @@ def main() -> None:
             if raw_amps is None:
                 raw_amps = MIN_AMPS
 
+            if charging_status == "Disconnected":
+                below_min_count = 0
+                logger.info("充電ケーブルが未接続のため、充電コマンドの送信をスキップします。10分待機します。")
+                time.sleep(600)
+                continue
+
             if manual_override:
                 if charging_status != "Charging":
                     target_amps = MAX_AMPS
                 else:
-                    target_amps = raw_amps
+                    # 車両側で手動調整された電流は尊重しつつ、停止閾値未満には落とさない
+                    target_amps = max(raw_amps, MIN_AMPS)
                 logger.info(f"演算状況（オーバーライド） → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
             else:
                 calc_base_amps = raw_amps if charging_status == "Charging" else 0
@@ -383,33 +455,44 @@ def main() -> None:
                 target_amps = calc_base_amps + adjustment_amps
                 logger.info(f"演算状況 → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
 
-            if target_amps < MIN_AMPS:
-                if charging_status == "Charging":
-                    logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * 200}W）を下回りました。充電を『一時停止』します。")
-                    proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_stop", headers=headers, timeout=15)
+            if charging_status == "Charging":
+                if target_amps < MIN_AMPS:
+                    below_min_count += 1
+                    if below_min_count < STOP_DEBOUNCE_CYCLES:
+                        logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * 200}W）を下回りました（{below_min_count}/{STOP_DEBOUNCE_CYCLES}回目）。瞬時的な変動の可能性があるため充電を継続します。")
+                        if raw_amps > MIN_AMPS:
+                            logger.info(f"買電を抑えるため電流を最小値へ調整: {raw_amps}A → {MIN_AMPS}A")
+                            if set_charging_amps(vin, headers, MIN_AMPS):
+                                logger.info(f"遠隔調整成功: {MIN_AMPS}A に固定されました。")
+                    else:
+                        below_min_count = 0
+                        logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * 200}W）を{STOP_DEBOUNCE_CYCLES}サイクル連続で下回りました。充電を『一時停止』します。")
+                        proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_stop", headers=headers, timeout=15)
                 else:
-                    logger.info(f"充電停止中。余剰電力が{MIN_AMPS * 200}W以上回復するまで待機します。")
+                    below_min_count = 0
+                    if target_amps > MAX_AMPS:
+                        target_amps = MAX_AMPS
+                    if target_amps != raw_amps:
+                        logger.info(f"電流を変更調整: {raw_amps}A → {target_amps}A")
+                        if set_charging_amps(vin, headers, target_amps):
+                            logger.info(f"遠隔調整成功: {target_amps}A に固定されました。")
+                    else:
+                        logger.info(f"現在の {raw_amps}A のままでバランスが取れています。")
             else:
-                if target_amps > MAX_AMPS:
-                    target_amps = MAX_AMPS
-
-                if charging_status != "Charging":
+                below_min_count = 0
+                if target_amps < START_AMPS:
+                    logger.info(f"充電停止中。余剰電力が開始閾値（{START_AMPS}A分・{START_AMPS * 200}W）以上になるまで待機します。")
+                else:
+                    if target_amps > MAX_AMPS:
+                        target_amps = MAX_AMPS
                     if manual_override:
                         logger.info(f"マニュアル・オーバーライドのため、充電を『再開』します（{target_amps}A）。")
                     else:
-                        logger.info(f"余剰電力（{target_amps}A分）を検知！充電を『再開』します。")
+                        logger.info(f"開始閾値以上の余剰電力（{target_amps}A分）を検知！充電を『再開』します。")
                     proxy_session.post(f"{PROXY_HOST}/api/1/vehicles/{vin}/command/charge_start", headers=headers, timeout=15)
                     time.sleep(5)
-                    raw_amps = MIN_AMPS
-
-                if target_amps != raw_amps or charging_status != "Charging":
-                    logger.info(f"電流を変更調整: {raw_amps}A → {target_amps}A")
-                    cmd_url = f"{PROXY_HOST}/api/1/vehicles/{vin}/command/set_charging_amps"
-                    cmd_res = proxy_session.post(cmd_url, headers=headers, json={"charging_amps": target_amps}, timeout=15)
-                    if cmd_res.json().get("response", {}).get("result") is True:
+                    if set_charging_amps(vin, headers, target_amps):
                         logger.info(f"遠隔調整成功: {target_amps}A に固定されました。")
-                else:
-                    logger.info(f"現在の {raw_amps}A のままでバランスが取れています。")
 
         except Exception as e:
             logger.error(f"ループ内例外発生: {e}")
