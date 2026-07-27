@@ -164,11 +164,28 @@ class Result:
 
 
 def _load_module(tmp_path):
-    """tesla_solar_charger を、設定・ログ出力先をテスト用に向けて読み込む。
+    """tesla_solar_charger を、設定・ログ・トークンをテスト用に向けて読み込む。
 
     ログはRotatingFileHandlerが相対パスで開くため、import前にtmpへchdirしておく。
+
+    トークンファイルの用意が重要。main() は
+
+        if not os.path.exists(TOKEN_FILE) or refresh_token is None:
+            ... HTTPServer(('127.0.0.1', 8000)) を立てて認証コールバックを待つ ...
+
+    という初回認証フローを持っており、ファイルが無いと **永久にブロックする**。
+    tesla_tokens.json は .gitignore 済みなので開発機には在ってもCIには無い。
+    ここで tmp 上のダミーを指しておかないと、ローカルだけ通ってCIでハングする。
     """
     os.environ["TESLA_CONFIG_PATH"] = CI_CONFIG
+
+    token_file = tmp_path / "tesla_tokens.json"
+    token_file.write_text(
+        '{"access_token": "dummy", "refresh_token": "dummy", "token_expires_at": 0}',
+        encoding="utf-8",
+    )
+    os.environ["TESLA_TOKEN_PATH"] = str(token_file)
+
     previous_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
