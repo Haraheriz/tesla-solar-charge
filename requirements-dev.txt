@@ -1,0 +1,4 @@
+# テスト実行用の依存。本番（ラズパイ）には不要。
+# 本体は requests のみに依存しており、requirements.txt は置いていない。
+requests>=2.31.0
+pytest>=8.0.0

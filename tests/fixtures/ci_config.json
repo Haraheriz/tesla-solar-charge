@@ -1,0 +1,10 @@
+{
+  "REMO_ACCESS_TOKEN": "dummy-remo-token-for-tests",
+  "CLIENT_ID": "dummy-client-id-for-tests",
+  "CLIENT_SECRET": "dummy-client-secret-for-tests",
+  "DOMAIN": "localhost:8000",
+  "MIN_AMPS": 4,
+  "MAX_AMPS": 48,
+  "CONTROL_PORT": 8090,
+  "CONTROL_TOKEN": "dummy-control-token-for-tests"
+}

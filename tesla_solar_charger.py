@@ -90,9 +90,15 @@ REMO_SAMPLE_INTERVAL_SEC: int = 10
 # 「投げっぱなしで成功したことにする」と停止漏れがそのまま夜通しの系統充電になる。
 COMMAND_RETRIES: int = int(config.get("COMMAND_RETRIES", 3))
 
-# 満充電・ケーブル未接続などの「終端ステータス」を観測したあと、次に車両へ問い合わせるまでの待機秒。
-# この間は就寝中の車両をWake Upしない（無意味な叩き起こしとAPIレートリミットを防ぐ）。
+# 満充電・ケーブル未接続などの「終端ステータス」を観測したあと、次のサイクルまでの待機秒。
 TERMINAL_BACKOFF_SEC: int = int(config.get("TERMINAL_BACKOFF_SEC", 600))
+
+# 終端ステータスを観測してから、就寝中の車両をWake Upしてよいと再び判断するまでの秒数。
+# 必ず TERMINAL_BACKOFF_SEC より十分長くすること。同じ値にすると、待機明けの時点で
+# ちょうど期限切れになり抑止が一度も効かない（満充電の車を延々と叩き起こす）。
+# 満充電・ケーブル未接続が解消されるとき（乗車・充電上限の変更・ケーブル接続）は
+# 車両が自分からオンラインになるため、その場合は待たずに通常の問い合わせ経路に入る。
+TERMINAL_WAKE_SUPPRESS_SEC: int = int(config.get("TERMINAL_WAKE_SUPPRESS_SEC", 3600))
 
 # 夜間休止に入る際の充電停止確認を、成功するまで再試行する上限回数（1回=10分間隔）。
 # 無制限に再試行するとAPIレートリミット(429)を誘発するため上限を設ける。
@@ -669,7 +675,7 @@ def main() -> None:
                 # 以前は Disconnected 以外がこの分岐に入らず、満充電の車へ3分おきに開始命令を
                 # 送り続けていた（2026-07-15 の 03:28〜07:39 で60回）。
                 below_min_count = 0
-                skip_wake_until = time.time() + TERMINAL_BACKOFF_SEC
+                skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
                 reason_label = TERMINAL_STATUS_LABELS.get(charging_status, charging_status)
                 logger.info(
                     f"{reason_label}のため、充電コマンドの送信をスキップします。{TERMINAL_BACKOFF_SEC // 60}分待機します。"
@@ -686,7 +692,7 @@ def main() -> None:
             if charging_status not in (STATUS_CHARGING, STATUS_STOPPED):
                 # 未知のステータスに対して開始命令を投げるのは危険なので、安全側に倒して待機する。
                 below_min_count = 0
-                skip_wake_until = time.time() + TERMINAL_BACKOFF_SEC
+                skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
                 logger.warning(
                     f"未知の充電ステータス『{charging_status or '(空)'}』を受信しました。"
                     f"安全のためコマンドを送信せず{TERMINAL_BACKOFF_SEC // 60}分待機します。"

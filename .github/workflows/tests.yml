@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# 同じブランチで連続pushしたとき、古い実行はキャンセルする（private repoの実行時間節約）
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # 本番のラズパイと同じ系列に合わせる
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Compile check
+        # 構文エラーは実機へ持ち込む前にここで落とす
+        run: python -m py_compile tesla_solar_charger.py override_state.py control_server.py
+
+      - name: Run tests
+        # 充電制御ループを仮想時間・擬似Tesla APIで駆動する回帰テスト。
+        # 実APIには一切接続しない（tests/fixtures/ci_config.json はダミー値）。
+        run: python -m pytest
