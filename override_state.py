@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 # tesla_solar_charger.py（充電制御ループ）と control_server.py（スマホ操作用サーバー）の
 # 両プロセスがこのファイルを介して「マニュアル・オーバーライド」状態を共有する。
@@ -10,12 +10,26 @@ OVERRIDE_FILE: str = os.environ.get("TESLA_OVERRIDE_PATH", os.path.join(BASE_DIR
 
 
 def read_override() -> bool:
+    return read_override_state()[0]
+
+
+def read_override_state() -> Tuple[bool, float]:
+    """オーバーライドの有効・無効と、最後に切替えられたUNIX時刻を返す。
+
+    充電制御ループ側は updated_at を使って「フル充電モードが何時間続いているか」を
+    毎サイクル可視化する。ファイルが無い・壊れている場合は (False, 0.0) を返す。
+    """
     try:
         with open(OVERRIDE_FILE, "r", encoding="utf-8") as f:
             data: Dict[str, Any] = json.load(f)
-            return bool(data.get("manual_override", False))
+            enabled = bool(data.get("manual_override", False))
+            try:
+                updated_at = float(data.get("updated_at", 0.0))
+            except (TypeError, ValueError):
+                updated_at = 0.0
+            return enabled, updated_at
     except Exception:
-        return False
+        return False, 0.0
 
 
 def write_override(enabled: bool) -> None:
