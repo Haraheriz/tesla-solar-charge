@@ -8,6 +8,24 @@ GitHub: Haraheriz/tesla-solar-charge
 - Language: Python
 - Follow existing file structure and naming conventions
 
+## テスト
+
+充電制御ループを変更したら必ず実行する。
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+`tests/` は `main()` の常駐ループを**仮想時計と擬似Tesla API**で駆動する（実APIには接続しない）。数時間ぶんのサイクルが一瞬で回るため、「満充電の車にコマンドを送り続ける」「夜通し充電が止まらない」といった時間依存の不具合を検出できる。GitHub Actions（`.github/workflows/tests.yml`）が push / PR で自動実行する。
+
+### 守ること
+
+- **テストを gitignore 済みファイルに依存させない。** `tesla_config.json` / `tesla_tokens.json` / `*.pem` は開発機にしか無い。過去に、トークンファイルが在る開発機では通り、CIでのみ `main()` が初回OAuth認証フローに入りポート8000で無限ブロックした事例がある。設定は `TESLA_CONFIG_PATH` / `TESLA_TOKEN_PATH` でテスト用のダミーを指すこと。
+- **`poc/test_*.py` を pytest で実行しない。** あれは実APIを直接叩く手動確認用スクリプトである。`pytest.ini` の `testpaths = tests` で収集対象を限定しているので、この設定を外さないこと。
+- **Lint・型チェックのCIは意図的に導入していない。** 正しさが実機の挙動に依存するため。静的解析を増やす前に、まず回帰テストで再現できないかを検討する。
+- **実機でしか確認できない部分は実機で確認する。** テストが通っても本番のラズパイに反映しなければ挙動は変わらない（デプロイ手順は `docs/02_deploy.md`、運用確認は `docs/03_operation.md`）。
+
 ## Commit messages
 - Follow global conventions (see ~/.codex/AGENTS.md)
 
