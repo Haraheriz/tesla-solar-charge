@@ -477,6 +477,9 @@ def main() -> None:
             # 通信エラーや停止失敗があってもその夜は二度と確認しなかった。
             if not night_charge_checked and night_stop_attempts < NIGHT_STOP_MAX_ATTEMPTS:
                 night_stop_attempts += 1
+                logger.info(
+                    f"夜間休止前の充電状態を確認します（{night_stop_attempts}/{NIGHT_STOP_MAX_ATTEMPTS}回目）..."
+                )
                 try:
                     if time.time() > token_expires_at and refresh_tesla_token():
                         headers["Authorization"] = f"Bearer {access_token}"
@@ -513,6 +516,13 @@ def main() -> None:
                                         f"夜間休止前の充電停止に失敗しました（{night_stop_attempts}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再試行します。"
                                     )
                             else:
+                                # 停止操作が不要だったこと自体を残す。無言で済ませると
+                                # 「夜間チェックが本当に走ったのか」を後から追えない。
+                                night_status = str(night_charge_state.get("charging_state") or "") or "不明"
+                                logger.info(
+                                    f"車両は『{vehicle_state}』・充電状態『{night_status}』のため、"
+                                    "停止操作は不要と判断しました。"
+                                )
                                 night_charge_checked = True
                 except Exception as e:
                     logger.error(
