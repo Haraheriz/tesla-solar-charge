@@ -153,11 +153,66 @@ def test_開始コマンド失敗時は電流設定に進まない(run_loop):
 
 
 # ---------------------------------------------------------------------------
-# 夜間休止入口の停止確認
+# 夜間休止中の充電監視
+#
+# 2026-07-31〜08-01 の障害に対応する。当時の実装は休止に入った最初の1回で確認を
+# 打ち切っていたため、確認より後に始まった充電を朝まで検知できなかった。
+#
+#   07-31 18:07  夜間休止入り。充電中を検知して停止、停止を確認
+#   （以降、制御側のコマンドは一切なし）
+#   08-01 09:40  車両が満充電（Complete）で復帰
 # ---------------------------------------------------------------------------
 
-def test_夜間休止入口の停止失敗は確認できるまで再試行される(run_loop):
-    """当時は完了フラグを試行前に立てていたため、一晩に最大1回しか実行されなかった。"""
+def _resume_charging_once(at_sec):
+    """指定秒数が経過した最初の巡回で、車両側が勝手に充電を再開した状況を作る。"""
+    fired = {"done": False}
+
+    def _hook(elapsed, world):
+        if not fired["done"] and elapsed >= at_sec:
+            world["charging_state"] = "Charging"
+            fired["done"] = True
+
+    return _hook
+
+
+def test_夜間の停止後に再開した充電を検知して止める(run_loop):
+    """07-31 の再現。停止を確認した後も監視を続けなければ朝まで系統充電が続く。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 20},
+        start="2026-07-31 18:07:00",
+        budget_sec=6 * 3600,
+        # 21:07 ごろ、車両側のスケジュール充電などで充電が再開したとする
+        on_poll=_resume_charging_once(3 * 3600),
+    )
+    assert res.count("charge_stop") == 2, "再開された充電を止めていない"
+    assert res.world["charging_state"] == "Stopped"
+    assert res.has_log("夜間休止中に充電を検知しました")
+
+
+def test_夜間に開始された充電も検知して止める(run_loop):
+    """休止入りの時点で就寝中でも、その後の充電開始を見逃してはいけない。
+
+    07-28・07-29・07-30・08-01 の夜はいずれも 18:00 台に offline で、
+    当時はその1回の観測だけで『充電していない』と断定していた。
+    """
+    def plug_in_at_2200(elapsed, world):
+        if elapsed >= 4 * 3600:
+            world["vehicle_state"] = "online"
+            world["charging_state"] = "Charging"
+
+    res = run_loop(
+        world={"vehicle_state": "offline", "charging_state": "Disconnected", "amps": 4},
+        start="2026-07-20 18:00:00",
+        budget_sec=6 * 3600,
+        on_poll=plug_in_at_2200,
+    )
+    assert res.count("charge_stop") >= 1, "休止入り後に始まった充電を止めていない"
+    assert res.count("wake_up") == 0, "夜間に車両を起こしてはいけない"
+    assert res.world["charging_state"] == "Stopped"
+
+
+def test_夜間の停止失敗は確認できるまで再試行される(run_loop):
+    """停止できないまま黙って朝を迎えないこと。上限に達したらCRITICALで報告する。"""
     res = run_loop(
         world={
             "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
@@ -170,18 +225,51 @@ def test_夜間休止入口の停止失敗は確認できるまで再試行さ�
     assert res.has_log("確認できませんでした", level="CRITICAL")
 
 
-def test_夜間休止入口の停止成功後は再問い合わせしない(run_loop):
-    """就寝中の車両を無駄に起こさないため、確認できたらその夜はもう触らない。"""
+def test_夜間の停止試行には上限がある(run_loop):
+    """無制限に再試行するとレートリミット(429)を誘発するため、上限で打ち切る。"""
     res = run_loop(
-        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 20},
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "command_results": {"charge_stop": False},
+        },
         start="2026-07-20 18:00:00",
-        budget_sec=5400,
+        budget_sec=12 * 3600,
     )
-    assert res.count("charge_stop") == 1
-    assert res.world["charging_state"] == "Stopped"
+    # 1回の停止試行のなかで send_charge_command がさらにリトライするため、
+    # POST数ではなく「停止を試みた回数」で数える。
+    attempts = [m for m in res.messages() if "夜間休止中に充電を検知しました" in m]
+    assert len(attempts) == res.module.NIGHT_STOP_MAX_ATTEMPTS
 
 
-def test_車両リスト取得失敗時は夜間チェックを完了扱いにしない(run_loop):
+@pytest.mark.parametrize(
+    "failing_request",
+    [
+        # 起動時の1回だけ成功させ、以降のループ内取得を401で失敗させる
+        {"vehicle_list_ok_calls": 1, "vehicle_list_fail_http": 401},
+        {"charge_state_http": 401},
+    ],
+    ids=["vehicles", "charge_state"],
+)
+def test_夜間の401はトークン再取得を促す(run_loop, failing_request):
+    """失効を単なる取得失敗として扱うと、同じトークンで上限まで失敗し監視が止まる。
+
+    日中ループは401で `token_expires_at` を0に戻して次サイクルで取り直す。
+    夜間だけこの分岐が無いと、トークン失効という頻度の高い原因で
+    「一晩通した監視」が成立しなくなる。
+
+    夜間ブロックは車両リストと充電状態の2箇所で外部へ問い合わせる。片方だけ
+    直しても穴は塞がらないため、両方を同じ条件で検証する。
+    """
+    world = {"vehicle_state": "online", "charging_state": "Charging", "amps": 20}
+    world.update(failing_request)
+
+    res = run_loop(world=world, start="2026-07-20 18:00:00", budget_sec=3600)
+
+    assert res.has_log("アクセストークンの失効を検知", level="WARNING")
+    assert res.refresh_calls, "401を検知したのにトークンを取り直していない"
+
+
+def test_車両リスト取得失敗を充電していないと断定しない(run_loop):
     """通信不良を『充電していない』と誤断定すると朝まで系統充電が続きうる。"""
     res = run_loop(
         world={
@@ -192,9 +280,10 @@ def test_車両リスト取得失敗時は夜間チェックを完了扱いに�
         start="2026-07-20 18:00:00",
         budget_sec=5400,
     )
-    attempts = [m for m in res.messages() if "夜間休止前の充電状態を確認します" in m]
-    assert len(attempts) > 1, "取得失敗後に再確認していない"
-    assert res.has_log("車両リスト取得に失敗", level="WARNING")
+    warnings = [m for m in res.messages(level="WARNING") if "車両リスト取得に失敗" in m]
+    assert len(warnings) > 1, "取得失敗後に再確認していない"
+    assert not res.has_log("充電していないと判断"), "通信不良を充電なしと断定している"
+    assert res.has_log("確認できませんでした", level="CRITICAL")
 
 
 @pytest.mark.parametrize(
@@ -213,10 +302,20 @@ def test_夜間チェックは結果を必ずログに残す(run_loop, vehicle_s
         start="2026-07-20 18:00:00",
         budget_sec=2400,
     )
-    assert res.has_log("夜間休止前の充電状態を確認します")
     assert res.has_log(expected_log)
     assert res.count("charge_stop") == 0
     assert res.count("wake_up") == 0
+
+
+def test_夜間の観測ログは状況が変わったときだけ出す(run_loop):
+    """10分毎に同じ行を出すと一晩で約80行になり、本当に見たい変化が埋もれる。"""
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 10},
+        start="2026-07-20 18:00:00",
+        budget_sec=4 * 3600,
+    )
+    observations = [m for m in res.messages() if "充電していないと判断" in m]
+    assert len(observations) == 1, f"同じ観測を繰り返し記録している（{len(observations)}件）"
 
 
 # ---------------------------------------------------------------------------

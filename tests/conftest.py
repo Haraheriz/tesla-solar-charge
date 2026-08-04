@@ -93,7 +93,9 @@ class FakeSession:
             # 「最初のN回だけ成功させる」よう指定する。
             ok_calls = self.world.get("vehicle_list_ok_calls")
             if ok_calls is not None and self.vehicle_list_calls > ok_calls:
-                return FakeResponse(500, {})
+                # 失敗時のステータスは既定で500（通信障害）。401（トークン失効）など
+                # 扱いが分岐するケースは vehicle_list_fail_http で指定する。
+                return FakeResponse(self.world.get("vehicle_list_fail_http", 500), {})
             if self.world.get("vehicle_list_http", 200) != 200:
                 return FakeResponse(self.world["vehicle_list_http"], {})
             return FakeResponse(200, {"response": [
@@ -140,12 +142,14 @@ class CapturingHandler(logging.Handler):
 class Result:
     """1回のシミュレーション結果。テストはこれに対してアサーションする。"""
 
-    def __init__(self, commands, logs, override_writes, world, module):
+    def __init__(self, commands, logs, override_writes, world, module, refresh_calls=None):
         self.commands = commands
         self.logs = logs
         self.override_writes = override_writes
         self.world = world
         self.module = module
+        # トークンリフレッシュが呼ばれた時刻（仮想時計）の一覧
+        self.refresh_calls = refresh_calls if refresh_calls is not None else []
 
     def count(self, command):
         return self.commands.count(command)
@@ -249,6 +253,18 @@ def run_loop(tmp_path):
         module.refresh_token = "dummy-refresh-token"
         module.token_expires_at = start_epoch + 10 ** 6
 
+        # 実物の refresh_tesla_token() は auth.tesla.com へPOSTする。401検出の経路など
+        # リフレッシュを踏むテストで実APIを叩かないよう、必ず差し替えておく。
+        refresh_calls = []
+
+        def _fake_refresh():
+            refresh_calls.append(module.time.now)
+            module.access_token = "refreshed-access-token"
+            module.token_expires_at = module.time.now + 28800
+            return True
+
+        module.refresh_tesla_token = _fake_refresh
+
         # サイクルごとに world を変化させたい場合のフック（車両リスト取得時に呼ばれる）
         if on_poll:
             original_get = session.get
@@ -265,6 +281,8 @@ def run_loop(tmp_path):
         except StopSim:
             pass
 
-        return Result(session.commands, capture.records, override_state["writes"], world, module)
+        return Result(
+            session.commands, capture.records, override_state["writes"], world, module, refresh_calls
+        )
 
     return _run
