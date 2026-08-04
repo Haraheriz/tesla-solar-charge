@@ -513,7 +513,17 @@ def main() -> None:
                     vehicle = vehicles[0] if vehicles else {}
                     vehicle_state = str(vehicle.get("state", ""))
 
-                    if not vehicle:
+                    if v_res.status_code == 401:
+                        # 日中ループと同じ扱いにする。クライアント側の期限推定より早く
+                        # サーバー側で失効した場合（クロックずれ・失効の前倒し等）、
+                        # これを単なる取得失敗として扱うと同じ失効トークンで上限まで
+                        # 失敗し、その夜の監視が止まる。
+                        token_expires_at = 0.0
+                        night_stop_failures += 1
+                        logger.warning(
+                            f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
+                        )
+                    elif not vehicle:
                         # 車両リストが取れないうちは「充電していない」と断定できないため、次の巡回で再試行する。
                         night_stop_failures += 1
                         logger.warning(
@@ -529,7 +539,13 @@ def main() -> None:
                     else:
                         vin = vehicle.get("vin", "") or vin
                         s_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers=headers, timeout=10)
-                        if s_res.status_code != 200:
+                        if s_res.status_code == 401:
+                            token_expires_at = 0.0
+                            night_stop_failures += 1
+                            logger.warning(
+                                f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
+                            )
+                        elif s_res.status_code != 200:
                             night_stop_failures += 1
                             logger.warning(
                                 f"夜間休止中の充電状態取得に失敗しました (HTTP {s_res.status_code})（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再確認します。"

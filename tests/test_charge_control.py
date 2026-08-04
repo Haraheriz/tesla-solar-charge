@@ -241,6 +241,27 @@ def test_夜間の停止試行には上限がある(run_loop):
     assert len(attempts) == res.module.NIGHT_STOP_MAX_ATTEMPTS
 
 
+def test_夜間の401はトークン再取得を促す(run_loop):
+    """失効を単なる取得失敗として扱うと、同じトークンで上限まで失敗し監視が止まる。
+
+    日中ループは401で `token_expires_at` を0に戻して次サイクルで取り直す。
+    夜間だけこの分岐が無いと、トークン失効という頻度の高い原因で
+    「一晩通した監視」が成立しなくなる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            # 起動時の1回だけ成功させ、以降のループ内取得を401で失敗させる
+            "vehicle_list_ok_calls": 1,
+            "vehicle_list_fail_http": 401,
+        },
+        start="2026-07-20 18:00:00",
+        budget_sec=3600,
+    )
+    assert res.has_log("アクセストークンの失効を検知", level="WARNING")
+    assert res.refresh_calls, "401を検知したのにトークンを取り直していない"
+
+
 def test_車両リスト取得失敗を充電していないと断定しない(run_loop):
     """通信不良を『充電していない』と誤断定すると朝まで系統充電が続きうる。"""
     res = run_loop(
