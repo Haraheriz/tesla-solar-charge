@@ -241,23 +241,30 @@ def test_夜間の停止試行には上限がある(run_loop):
     assert len(attempts) == res.module.NIGHT_STOP_MAX_ATTEMPTS
 
 
-def test_夜間の401はトークン再取得を促す(run_loop):
+@pytest.mark.parametrize(
+    "failing_request",
+    [
+        # 起動時の1回だけ成功させ、以降のループ内取得を401で失敗させる
+        {"vehicle_list_ok_calls": 1, "vehicle_list_fail_http": 401},
+        {"charge_state_http": 401},
+    ],
+    ids=["vehicles", "charge_state"],
+)
+def test_夜間の401はトークン再取得を促す(run_loop, failing_request):
     """失効を単なる取得失敗として扱うと、同じトークンで上限まで失敗し監視が止まる。
 
     日中ループは401で `token_expires_at` を0に戻して次サイクルで取り直す。
     夜間だけこの分岐が無いと、トークン失効という頻度の高い原因で
     「一晩通した監視」が成立しなくなる。
+
+    夜間ブロックは車両リストと充電状態の2箇所で外部へ問い合わせる。片方だけ
+    直しても穴は塞がらないため、両方を同じ条件で検証する。
     """
-    res = run_loop(
-        world={
-            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
-            # 起動時の1回だけ成功させ、以降のループ内取得を401で失敗させる
-            "vehicle_list_ok_calls": 1,
-            "vehicle_list_fail_http": 401,
-        },
-        start="2026-07-20 18:00:00",
-        budget_sec=3600,
-    )
+    world = {"vehicle_state": "online", "charging_state": "Charging", "amps": 20}
+    world.update(failing_request)
+
+    res = run_loop(world=world, start="2026-07-20 18:00:00", budget_sec=3600)
+
     assert res.has_log("アクセストークンの失効を検知", level="WARNING")
     assert res.refresh_calls, "401を検知したのにトークンを取り直していない"
 
