@@ -242,6 +242,72 @@ def test_夜間の停止試行には上限がある(run_loop):
 
 
 @pytest.mark.parametrize(
+    "transient_failure",
+    [
+        # 起動時が1回目。夜間1サイクル目の取得（2回目）だけ失敗させる
+        {"vehicle_list_raise_on_calls": [2]},
+        {"vehicle_list_http_by_call": {2: 504}},
+    ],
+    ids=["read_timeout", "504"],
+)
+def test_夜間の単発の取得失敗はその場で取り直す(run_loop, transient_failure):
+    """巡回間隔は10分あるため、1回の失敗がそのまま10分の観測欠落になる。
+
+    2026-08-06 19:59 に車両リスト取得がタイムアウトし、その10分のあいだに
+    帰宅・接続・充電開始が起きて検知できなかった。
+
+    budget_sec は1サイクルぶんに満たない値にしてある。次の巡回を待たず
+    「同じサイクル内で」取り直して充電を検知できたことを、この予算で担保する。
+
+    再試行は `night_proxy_get()` に集約されており、車両リスト取得と
+    charge_state 取得の両方が同じ関数を経由する。
+    """
+    world = {"vehicle_state": "online", "charging_state": "Charging", "amps": 20}
+    world.update(transient_failure)
+
+    res = run_loop(world=world, start="2026-07-20 18:00:00", budget_sec=300)
+
+    assert res.has_log("すぐに再試行します", level="WARNING")
+    assert res.count("charge_stop") == 1, "同じサイクル内で取り直せていない"
+    assert res.world["charging_state"] == "Stopped"
+
+
+def test_夜間の再試行は即時1回までにとどめる(run_loop):
+    """無制限に投げ直すとレートリミットを誘発する。上限を定数として固定する。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            # 起動時の1回だけ成功させ、以降は常に5xxで失敗させる
+            "vehicle_list_ok_calls": 1,
+            "vehicle_list_fail_http": 503,
+        },
+        start="2026-07-20 18:00:00",
+        budget_sec=300,
+    )
+    assert res.module.NIGHT_GET_ATTEMPTS == 2
+    retries = [m for m in res.messages() if "すぐに再試行します" in m]
+    assert len(retries) == 1, f"1サイクルで再試行が {len(retries)} 回発生している"
+
+
+@pytest.mark.parametrize("status", [401, 408, 429])
+def test_夜間の再試行対象は通信エラーと5xxに限る(run_loop, status):
+    """401・408・429は即座に投げ直しても状況が変わらず、課金だけが増える。
+
+    500未満はTesla Fleet APIの課金対象である（docs/01_architecture.md 第3章③）。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "vehicle_list_ok_calls": 1,
+            "vehicle_list_fail_http": status,
+        },
+        start="2026-07-20 18:00:00",
+        budget_sec=300,
+    )
+    assert not res.has_log("すぐに再試行します"), f"HTTP {status} を再試行している"
+
+
+@pytest.mark.parametrize(
     "failing_request",
     [
         # 起動時の1回だけ成功させ、以降のループ内取得を401で失敗させる

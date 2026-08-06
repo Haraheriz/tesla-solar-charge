@@ -60,6 +60,10 @@ class FakeTime:
         return real_time.strftime(fmt, t if t is not None else real_time.localtime(self.now))
 
 
+class FakeReadTimeout(Exception):
+    """プロキシへの読み取りタイムアウト（requests の ReadTimeout 相当）。"""
+
+
 class FakeResponse:
     def __init__(self, status_code, payload):
         self.status_code = status_code
@@ -88,6 +92,16 @@ class FakeSession:
     def get(self, url, headers=None, timeout=None):
         if url.endswith("/api/1/vehicles"):
             self.vehicle_list_calls += 1
+            # 何回目の取得で失敗させるかを指定する。単発のタイムアウトや5xxからの
+            # 即時再試行を検証するために、呼び出し回数で撃ち分ける必要がある。
+            # 起動時の1回目もこの番号に含まれる。
+            if self.vehicle_list_calls in (self.world.get("vehicle_list_raise_on_calls") or []):
+                raise FakeReadTimeout(
+                    "HTTPSConnectionPool(host='localhost', port=4443): Read timed out. (read timeout=10)"
+                )
+            by_call = self.world.get("vehicle_list_http_by_call") or {}
+            if self.vehicle_list_calls in by_call:
+                return FakeResponse(by_call[self.vehicle_list_calls], {})
             # main() は起動時にも車両リストを取得し、失敗すると sys.exit(1) する。
             # ループ内の通信障害だけを再現したい場合は vehicle_list_ok_calls で
             # 「最初のN回だけ成功させる」よう指定する。
