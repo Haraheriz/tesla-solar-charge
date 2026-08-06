@@ -104,6 +104,10 @@ TERMINAL_WAKE_SUPPRESS_SEC: int = int(config.get("TERMINAL_WAKE_SUPPRESS_SEC", 3
 # 無制限に再試行するとAPIレートリミット(429)を誘発するため上限を設ける。
 NIGHT_STOP_MAX_ATTEMPTS: int = int(config.get("NIGHT_STOP_MAX_ATTEMPTS", 6))
 
+# 夜間休止中のGETを、通信エラー・5xxのときに即座に試行する回数（1回目を含む）。
+# 巡回間隔（10分）を待たずにその場で取り直すためのもの。
+NIGHT_GET_ATTEMPTS: int = int(config.get("NIGHT_GET_ATTEMPTS", 2))
+
 # 充電中を意味するステータス（このときだけ電流調整・停止判定を行う）
 STATUS_CHARGING: str = "Charging"
 # 充電可能だが止まっているステータス（余剰があれば開始を検討する）
@@ -374,6 +378,38 @@ def token_retry_wait_sec() -> int:
     return int(min(wait, TOKEN_RETRY_MAX_SEC))
 
 
+def night_proxy_get(url: str, headers: Dict[str, str]) -> Any:
+    """夜間休止中のGETを、通信エラーまたは5xxのとき即座に取り直す。
+
+    夜間の巡回間隔は10分あるため、1回の失敗がそのまま10分の観測欠落になる。
+    2026-08-06 19:59、車両リスト取得が読み取りタイムアウト（10秒）し、その10分の
+    あいだに帰宅・ケーブル接続・充電開始が起きて検知できなかった。上流（Tesla Fleet
+    API）の遅延は次の巡回まで続く性質のものではないため、その場で取り直せば埋まる。
+
+    再試行するのは通信エラーと5xxのみ。401（失効）・408（車両が応答しない）・
+    429（レートリミット）は原因が別で、即座に投げ直しても状況は変わらない。
+    加えて500未満は課金対象であり、無駄な再試行は費用に直結する
+    （`docs/01_architecture.md` 第3章③）。
+    """
+    attempts: int = max(1, NIGHT_GET_ATTEMPTS)
+    for attempt in range(1, attempts + 1):
+        is_last: bool = attempt == attempts
+        try:
+            res = proxy_session.get(url, headers=headers, timeout=10)
+        except Exception as e:
+            if is_last:
+                raise
+            logger.warning(
+                f"夜間休止中の取得に失敗しました（{attempt}/{attempts}回目）: {e}。すぐに再試行します。"
+            )
+            continue
+        if res.status_code < 500 or is_last:
+            return res
+        logger.warning(
+            f"夜間休止中の取得が HTTP {res.status_code} で失敗しました（{attempt}/{attempts}回目）。すぐに再試行します。"
+        )
+
+
 def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
     logger.info("車両へ起動命令（Wake Up）を送信します...")
     url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/wake_up"
@@ -508,7 +544,7 @@ def main() -> None:
                 try:
                     if time.time() > token_expires_at and refresh_tesla_token():
                         headers["Authorization"] = f"Bearer {access_token}"
-                    v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
+                    v_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles", headers)
                     vehicles = v_res.json().get("response") or [] if v_res.status_code == 200 else []
                     vehicle = vehicles[0] if vehicles else {}
                     vehicle_state = str(vehicle.get("state", ""))
@@ -538,7 +574,7 @@ def main() -> None:
                         )
                     else:
                         vin = vehicle.get("vin", "") or vin
-                        s_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers=headers, timeout=10)
+                        s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
                         if s_res.status_code == 401:
                             token_expires_at = 0.0
                             night_stop_failures += 1
