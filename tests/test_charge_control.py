@@ -441,6 +441,50 @@ def test_余剰を検知したら充電を開始する(run_loop):
     assert res.world["amps"] == 15, "余剰3000Wなら15A（200W/A）で開始するはず"
 
 
+def test_起動後に余剰を測り直してから開始を判断する(run_loop):
+    """起動には70秒以上かかる。その間に余剰が消えていれば充電を始めてはいけない。
+
+    2026-08-09 11:46 の再現。余剰1202Wで車両を起こし（ウェイクは¥2.75）、11:48に
+    6Aで充電を開始したが、11:51には1090Wの買電に転じており、11:55に自分で停止させた。
+    起動を決めた時点の値のまま開始を判断していたことが原因である。
+    """
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-09 11:46:00",
+        budget_sec=300,
+        # 1回目（起動の判断）は余剰1202W、2回目（起動後の判断）は買電500W
+        house_power=[-1202, 500],
+    )
+    assert res.count("wake_up") == 1, "開始閾値を超えているので起動自体は行う"
+    assert res.count("charge_start") == 0, "余剰が消えているのに充電を開始している"
+    assert res.has_log("起動後に余剰を測り直しました")
+
+
+def test_起動後の再測定に失敗したら充電を開始しない(run_loop):
+    """測れないまま古い値で開始するのは、測り直しを入れた意味が無い。"""
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-09 11:46:00",
+        budget_sec=300,
+        house_power=[-1202, None],
+    )
+    assert res.count("charge_start") == 0
+    assert res.has_log("起動後の余剰再測定に失敗しました", level="WARNING")
+
+
+def test_余剰が続いていれば起動後も充電を開始する(run_loop):
+    """測り直しは開始を妨げるためのものではない。余剰が続いていれば従来どおり開始する。"""
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-09 11:46:00",
+        budget_sec=120,
+        house_power=[-1202, -1300],
+    )
+    assert res.count("wake_up") == 1
+    assert res.count("charge_start") == 1
+    assert res.world["charging_state"] == "Charging"
+
+
 def test_余剰不足はデバウンスしてから停止する(run_loop):
     """雲による一瞬の落ち込みで停止・再開を繰り返さないための仕組み。"""
     res = run_loop(
