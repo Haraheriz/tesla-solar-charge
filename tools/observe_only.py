@@ -36,23 +36,32 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE, "tesla_config.json")
-TOKEN_FILE = os.path.join(BASE, "tesla_tokens.json")
-LOG_FILE = os.path.join(BASE, "observe_only.log")
-POWER_CSV = os.path.join(BASE, "observe_power.csv")
+# このファイルは tools/ に置かれるが、設定・トークン・証明書は本体と同じ場所
+# （リポジトリ／デプロイ先のルート）にある。__file__ 基準にすると tools/ を指してしまう。
+# 本体と同じく環境変数で上書きできる。**本体とトークンファイルを分けてはいけない。**
+# リフレッシュのたびにトークンが更新されるため、別々のファイルを持つと片方が失効する。
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_FILE = os.environ.get("TESLA_CONFIG_PATH", os.path.join(BASE_DIR, "tesla_config.json"))
+TOKEN_FILE = os.environ.get("TESLA_TOKEN_PATH", os.path.join(BASE_DIR, "tesla_tokens.json"))
+PROXY_CERT_PATH = os.environ.get("TESLA_CERT_PATH", os.path.join(BASE_DIR, "cert.pem"))
+LOG_FILE = os.path.join(BASE_DIR, "observe_only.log")
+POWER_CSV = os.path.join(BASE_DIR, "observe_power.csv")
 PROXY_HOST = "https://localhost:4443"
 AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
 
 SAMPLE_SEC = 60      # 電力の生データを取る間隔
 VEHICLE_SEC = 600    # 車両状態を問い合わせる間隔
 
+if not os.path.exists(CONFIG_FILE):
+    sys.exit("設定ファイル（%s）が見つかりません。" % CONFIG_FILE)
+
 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     config = json.load(f)
 
-CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
+# 本体（proxy_session.verify = cert.pem）と同じく自己署名証明書をピン留めして検証する。
+# 同じアクセストークンを載せる経路であり、検証を無効化する理由がない。
+CTX = ssl.create_default_context(cafile=PROXY_CERT_PATH)
+CTX.check_hostname = False  # 証明書のCNがlocalhostと一致しないため、ホスト名照合のみ外す
 
 
 def log(message):
@@ -112,6 +121,15 @@ def refresh_token():
                     body.get("expires_in", 28800))
         log("トークンをリフレッシュしました。")
         return True
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401):
+            # 本体が過去に踏んだ穴と同じ。401のまま29日間・6,357回リトライし続け、
+            # サービスは正常に見えていた。回復しない失敗は静かに繰り返さず止める。
+            log("[CRITICAL] リフレッシュトークンが失効しています（HTTP %s）。"
+                "観測を終了します。再認証は docs/03_operation.md 第4章。" % e.code)
+            sys.exit(1)
+        log("[ERROR] トークンのリフレッシュに失敗しました: HTTP %s" % e.code)
+        return False
     except Exception as e:
         log("[ERROR] トークンのリフレッシュに失敗しました: %s" % e)
         return False
