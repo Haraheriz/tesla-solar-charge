@@ -261,7 +261,20 @@ def run_loop(tmp_path):
 
         module.write_override = _write_override
 
-        module.get_remo_power_smoothed = lambda: house_power
+        # house_power はスカラーのほか、リストでも渡せる。1回の測定ごとに次の値へ進み、
+        # 使い切ったら最後の値を返し続ける。起動前後で余剰が変わる状況を再現するために要る。
+        power_sequence = list(house_power) if isinstance(house_power, (list, tuple)) else None
+        power_reads = []
+
+        def _read_power():
+            if power_sequence is None:
+                power_reads.append(house_power)
+                return house_power
+            index = min(len(power_reads), len(power_sequence) - 1)
+            power_reads.append(power_sequence[index])
+            return power_sequence[index]
+
+        module.get_remo_power_smoothed = _read_power
         module.load_tokens = lambda: True
         module.access_token = "dummy-access-token"
         module.refresh_token = "dummy-refresh-token"

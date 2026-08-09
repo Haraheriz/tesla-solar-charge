@@ -714,6 +714,23 @@ def main() -> None:
                         time.sleep(180)
                         continue
 
+                    if not manual_override:
+                        # 起動には最短でも70秒かかる（wake_up_vehicle 内の60秒待機を含む）。
+                        # その間に余剰は変わりうるため、開始判断は測り直した値で行う。
+                        # 測り直さないと、起動を決めた時点の値のまま充電を開始してしまう。
+                        # 2026-08-09 11:46、余剰1202Wで起動し11:48に6Aで開始したが、
+                        # 11:51には1090Wの買電に転じており、7分後に自分で停止させた。
+                        refreshed_power: Optional[int] = get_remo_power_smoothed()
+                        if refreshed_power is None:
+                            logger.warning("起動後の余剰再測定に失敗しました。次のサイクルで判断します。")
+                            time.sleep(180)
+                            continue
+                        if refreshed_power != house_power:
+                            logger.info(
+                                f"起動後に余剰を測り直しました: {house_power} W → {refreshed_power} W"
+                            )
+                        house_power = refreshed_power
+
             state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
             s_res = proxy_session.get(state_url, headers=headers, timeout=10)
 
