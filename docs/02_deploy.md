@@ -18,6 +18,7 @@
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
 ├── override_state.py          # [転送] マニュアル・オーバーライド状態の共有モジュール
+├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-192.png, icon-512.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 
@@ -146,6 +147,32 @@ Environment=PYTHONUNBUFFERED=1
 [Install]
 WantedBy=multi-user.target
 
+```
+
+### 2.5 自宅ウォールコネクターの設定（外出先での充電を制御しないために必要）
+
+`WALL_CONNECTOR_HOST` を設定しないと、システムは充電場所を区別せず、外出先の充電も停止・制御の対象にする（`docs/03_operation.md` の「外出先での充電を制御しない」を参照）。
+
+1. **IPアドレスを確認する。**Teslaアプリの充電器設定画面、またはルーターのDHCPクライアント一覧で調べる
+2. **ルーター側でDHCP予約を設定する。**アドレスが変わると判定不能に落ちるため、必ず固定する
+3. **ラズパイから到達できることを確認する。**Gen 3（Wi-Fi対応）でのみ応答する
+
+```bash
+curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/version
+curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
+```
+
+4. **`tesla_config.json` に設定する。**`WALL_CONNECTOR_SERIAL` は任意だが、設定しておくとIPアドレスが別の機器に割り当てられた場合に起動時のログで検知できる（`/api/1/version` の `serial_number` を転記する）
+
+```json
+"WALL_CONNECTOR_HOST": "192.168.8.162",
+"WALL_CONNECTOR_SERIAL": "E4A25003000840"
+```
+
+サービス起動後、ログに以下が出れば正しく紐づいている。
+
+```text
+[INFO] 自宅ウォールコネクター（192.168.8.162 / シリアル E4A25003000840）を確認しました。
 ```
 
 ### 3. スマホ操作用コントロールサーバー設定ファイルの配置

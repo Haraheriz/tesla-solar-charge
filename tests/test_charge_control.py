@@ -385,6 +385,236 @@ def test_夜間の観測ログは状況が変わったときだけ出す(run_loo
 
 
 # ---------------------------------------------------------------------------
+# 外出先での充電を制御対象から除外する
+#
+# 2026-08-07 20:44、外出先のスーパーチャージャーでの充電を10分の間に2回停止させ、
+# 21:05 に抜線されるまで、車両が再開するたびに停止させ続けた。
+#
+# 車両側のAPIには接続先充電器の識別子が存在しないため、自宅のウォールコネクターの
+# ローカルAPI（vehicle_connected）を第一の根拠にする。読み取れなかった場合のみ
+# charge_state の急速充電フィールドで補い、それでも断定できなければ従来動作に戻る。
+# ---------------------------------------------------------------------------
+
+def test_夜間に自宅ウォールコネクター未接続なら停止しない(run_loop):
+    """08-07 の再現。夜間の充電検知だけを根拠に止めると外出先の充電を妨害する。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-07 20:44:00",
+        budget_sec=3600,
+    )
+    assert res.count("charge_stop") == 0, "外出先の充電を停止させている"
+    assert res.world["charging_state"] == "Charging"
+    assert res.has_log("外出先での充電と判断して停止しません", level="ATTENTION")
+
+
+def test_夜間の外出先判定は再試行カウンタを消費しない(run_loop):
+    """通信の失敗ではないため、その夜の監視を打ち切らせてはいけない。
+
+    上限を消費すると、長時間の外出先充電のあいだに night_stop_exhausted が立ち、
+    帰宅後に始まった自宅の系統充電を朝まで止められなくなる。
+    """
+    def come_home_late(elapsed, world):
+        # 6サイクル（60分）を十分に超えた時点で帰宅し、自宅で充電を始める
+        if elapsed >= 3 * 3600:
+            world["wc_vehicle_connected"] = True
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-07 20:00:00",
+        budget_sec=5 * 3600,
+        on_poll=come_home_late,
+    )
+    assert not res.has_log("連続で確認できませんでした", level="CRITICAL"), \
+        "外出先判定でリトライ上限を消費している"
+    assert res.count("charge_stop") >= 1, "帰宅後の自宅充電を停止できていない"
+    assert res.world["charging_state"] == "Stopped"
+
+
+@pytest.mark.parametrize(
+    "charging_state, amps, house_power, forbidden",
+    [
+        # 充電中・余剰不足 → 本来ならデバウンス後に停止し、その手前で最小電流へ絞る
+        ("Charging", 20, 3000, ("charge_stop", "set_charging_amps")),
+        # 充電中・余剰あり → 本来なら目標値へ電流を変更する
+        ("Charging", 6, -8000, ("set_charging_amps",)),
+        # 停止中・余剰あり → 本来なら充電を開始する
+        ("Stopped", 4, -5000, ("charge_start",)),
+    ],
+    ids=["余剰不足での停止", "電流変更", "充電開始"],
+)
+def test_昼間の外出先では電流も停止も開始も送らない(
+    run_loop, charging_state, amps, house_power, forbidden
+):
+    """日中の3経路すべてを塞ぐ。急速充電中の車両への set_charging_amps は挙動が未確認である。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": charging_state, "amps": amps,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-07 13:00:00",
+        budget_sec=1800,
+        house_power=house_power,
+    )
+    for command in forbidden:
+        assert res.count(command) == 0, f"外出先で {command} を送っている"
+    assert res.has_log("外出先での充電と判断", level="ATTENTION")
+
+
+def test_フル充電モード中でも外出先ではコマンドを送らない(run_loop):
+    """オーバーライドの目的は自宅で太陽光を無視して充電することであり、外出先では意味を持たない。
+
+    従来はオーバーライド中も set_charging_amps が送信されていた。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 6,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-07 21:00:00",
+        budget_sec=1800,
+        override=True,
+    )
+    assert res.count("set_charging_amps") == 0
+    assert res.count("charge_stop") == 0
+
+
+@pytest.mark.parametrize(
+    "fallback_world",
+    [
+        {"fast_charger_present": True},
+        {"fast_charger_type": "Combo"},
+        {"charger_power": 120},
+    ],
+    ids=["fast_charger_present", "fast_charger_type", "charger_power"],
+)
+def test_ウォールコネクターが判定不能なら急速充電フィールドで判断する(run_loop, fallback_world):
+    """LAN障害でウォールコネクターを読めなくても、DC急速充電は止めない。
+
+    ここで読むフィールドは既に取得済みの charge_state に含まれるため、
+    Tesla API の呼び出し数は増えない。
+    """
+    world = {
+        "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+        "wc_raise": True,
+    }
+    world.update(fallback_world)
+    res = run_loop(world=world, start="2026-08-07 20:44:00", budget_sec=3600)
+    assert res.count("charge_stop") == 0
+    assert res.has_log("外出先での充電と判断して停止しません", level="ATTENTION")
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        {"wc_raise": True},
+        {"wc_http": 404},
+        {"wc_json_error": True},
+        {"wc_omit_field": True},
+        {"wc_vehicle_connected": None},
+    ],
+    ids=["接続例外", "HTTP404", "JSON解釈失敗", "キー欠落", "真偽値でない"],
+)
+def test_ウォールコネクターも急速充電フィールドも判定不能なら従来どおり停止する(run_loop, unreadable):
+    """判定できないことを理由に夜通しの系統充電を許してはいけない。
+
+    急速充電フィールドは実機のスーパーチャージャー接続時の値が未検証である。
+    期待どおりでなければここに落ちるため、未検証のまま実装してもデグレしない。
+    """
+    world = {"vehicle_state": "online", "charging_state": "Charging", "amps": 20}
+    world.update(unreadable)
+    res = run_loop(world=world, start="2026-08-07 20:44:00", budget_sec=1800)
+    assert res.count("charge_stop") >= 1, "判定不能なのに従来動作へ落ちていない"
+    assert res.world["charging_state"] == "Stopped"
+
+
+def test_ウォールコネクター未設定なら判定は行われない(run_loop):
+    """設定していない環境では全経路が従来どおり動くこと。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            # 設定が空なら、この値は参照されない
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-07 20:44:00",
+        budget_sec=1800,
+        wall_connector_host="",
+    )
+    assert res.wc_calls == [], "未設定なのにウォールコネクターへ問い合わせている"
+    assert res.count("charge_stop") >= 1
+    assert res.has_log("外出先の充電判定は行いません")
+
+
+def test_外出先判定のログに急速充電フィールドの実値を残す(run_loop):
+    """フォールバックが正しく効くかを後から検証するための実機データを取りこぼさない。
+
+    2026-08-10、テンフィールズファクトリーのFLASHで充電した際、これらの値が
+    ログに残っておらず検証の機会を逃した。判定が働いた場面では必ず書き出す。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 21,
+            "wc_vehicle_connected": False,
+            "fast_charger_present": True,
+            "fast_charger_type": "Combo",
+            "charger_power": 90,
+        },
+        start="2026-08-10 20:00:00",
+        budget_sec=1800,
+    )
+    assert res.has_log("fast_charger_present=True", level="ATTENTION")
+    assert res.has_log("fast_charger_type='Combo'", level="ATTENTION")
+    assert res.has_log("charger_power=90", level="ATTENTION")
+
+
+def test_シリアルが設定と一致しなければ判定を無効化する(run_loop):
+    """設定したIPが別の機器を指している。誤った機器の応答で在宅を判断させない。
+
+    このとき判定は行われず、全経路が従来どおりの動作に戻る。無効化したことは
+    ATTENTION で必ず可視化する（黙って従来動作に戻ると原因を追えない）。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_serial": "OTHERDEVICE000000",
+            # 別機器が「接続なし」を返しても、それを根拠に停止を見送ってはいけない
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-07 20:44:00",
+        budget_sec=1800,
+        wall_connector_serial="E4A25003000840",
+    )
+    assert res.has_log("シリアルが設定と一致しません", level="ATTENTION")
+    assert res.count("charge_stop") >= 1, "判定を無効化したのに従来動作へ戻っていない"
+    # 無効化後は毎サイクルの問い合わせも行わない（起動時の /api/1/version のみ）
+    assert all("vitals" not in url for url in res.wc_calls)
+
+
+def test_自宅ウォールコネクター接続中は従来どおり制御する(run_loop):
+    """自宅での挙動を変えていないこと（デグレ検出）。"""
+    night = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 20},
+        start="2026-08-07 20:44:00",
+        budget_sec=1800,
+    )
+    assert night.count("charge_stop") >= 1
+    assert night.has_log("充電の停止を確認しました")
+
+    day = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-07 10:00:00",
+        budget_sec=60,
+        house_power=-3000,
+    )
+    assert day.count("charge_start") == 1
+
+
+# ---------------------------------------------------------------------------
 # 異常なステータスに対する安全側の挙動
 # ---------------------------------------------------------------------------
 
