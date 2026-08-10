@@ -18,6 +18,7 @@
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
 ├── override_state.py          # [転送] マニュアル・オーバーライド状態の共有モジュール
+├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-192.png, icon-512.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 
@@ -88,7 +89,77 @@ chmod 700 /home/<username>/tesla-solar-charge/venv/bin/*
 
 ---
 
-## 5. 【Step 4】systemd へのサービス登録と自動常駐化
+## 5. 【Step 4】`tesla_config.json` の設定
+
+`tesla_config.json` は `.gitignore` 対象のため、リポジトリを取得しただけでは存在しない。**`tesla_config.json.template` をコピーして作成する。**
+
+```bash
+cp tesla_config.json.template tesla_config.json
+chmod 600 tesla_config.json
+```
+
+### 設定キー一覧
+
+**サービスを起動する前に、この表を上から確認すること。**「必須」のキーが未設定だと起動しないか、意図した制御が行われない。
+
+| キー | 必須 | 既定値 | 内容 |
+| --- | --- | --- | --- |
+| `CLIENT_ID` / `CLIENT_SECRET` | ○ | `""` | Tesla開発者ポータルで発行したアプリケーションの資格情報 |
+| `DOMAIN` | ○ | `localhost:8000` | OAuthのリダイレクト先ドメイン |
+| `REMO_ACCESS_TOKEN` | ○ | `""` | Nature Remo のアクセストークン（余剰電力の測定に使う） |
+| **`WALL_CONNECTOR_HOST`** | **○** | `""` | **自宅ウォールコネクター（Gen 3）のIPアドレス。未設定だと外出先の充電も制御対象になる**（下記） |
+| `WALL_CONNECTOR_SERIAL` | | `""` | 任意。設定するとIPアドレスが別の機器に変わった場合を起動時に検知できる |
+| `WALL_CONNECTOR_TIMEOUT_SEC` | | `5` | ウォールコネクターへのHTTPタイムアウト秒 |
+| `FAST_CHARGER_POWER_KW` | | `15` | 外出先判定のフォールバック閾値 |
+| `MIN_AMPS` | | `4` | 充電を維持する下限電流。これを下回ると停止する |
+| `MAX_AMPS` | | `48` | 上限電流。**充電設備とブレーカーの容量に合わせること** |
+| `START_AMPS` | | `MIN_AMPS + 2` | 充電開始・車両起動に要求する余剰（ヒステリシス用） |
+| `STOP_DEBOUNCE_CYCLES` | | `2` | 余剰不足が何サイクル続いたら停止するか |
+| `COMMAND_RETRIES` | | `3` | 充電コマンドのリトライ回数 |
+| `TERMINAL_BACKOFF_SEC` | | `600` | 満充電・ケーブル未接続を観測した後の待機秒 |
+| `TERMINAL_WAKE_SUPPRESS_SEC` | | `3600` | 同上の状態で車両を起こさない秒数。**必ず `TERMINAL_BACKOFF_SEC` より長くすること** |
+| `NIGHT_STOP_MAX_ATTEMPTS` | | `6` | 夜間の停止確認をあきらめるまでの回数 |
+| `NIGHT_GET_ATTEMPTS` | | `2` | 夜間のGETをその場で再試行する回数 |
+| `CONTROL_PORT` | | `8090` | スマホ操作用サーバーの待受ポート |
+| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。空だとサーバーは起動しない |
+
+### 自宅ウォールコネクターの設定
+
+**`WALL_CONNECTOR_HOST` を設定しないと、システムは充電している場所を区別しない。**スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる（`docs/03_operation.md` の「外出先での充電を制御しない」を参照）。
+
+対象は **Gen 3（Wi-Fi対応）に限る。**Gen 2 や、Wi-Fiを宅内LANに接続していない個体では応答しないため、この機能は利用できない。その場合は空のままにする（全経路が従来どおり動作する）。
+
+1. **IPアドレスを確認する。**Teslaアプリの充電器設定画面、またはルーターのDHCPクライアント一覧で調べる
+2. **ルーター側でDHCP予約を設定する。**アドレスが変わると判定不能に落ちるため、必ず固定する
+3. **ラズパイから到達できることを確認する。**
+
+```bash
+curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/version
+curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
+```
+
+4. **`tesla_config.json` に設定する。**`WALL_CONNECTOR_SERIAL` には `/api/1/version` の `serial_number` を転記する
+
+```json
+"WALL_CONNECTOR_HOST": "<ウォールコネクターのIP>",
+"WALL_CONNECTOR_SERIAL": "<シリアル番号>"
+```
+
+サービス起動後、ログに以下が出れば正しく紐づいている。
+
+```text
+[INFO] 自宅ウォールコネクター（<ウォールコネクターのIP> / シリアル <シリアル番号>）を確認しました。
+```
+
+未設定の場合は、起動時に次の行が出る。意図してそうしているのでなければ、上の手順で設定すること。
+
+```text
+[ATTENTION] 自宅ウォールコネクターが未設定のため、外出先の充電判定は行いません。スーパーチャージャー等での充電も停止・電流変更の対象になります。
+```
+
+---
+
+## 6. 【Step 5】systemd へのサービス登録と自動常駐化
 
 OS起動時に「プロキシ → 充電制御スクリプト」の順で安全にバックグラウンド連動起動させるため、システムマネージャへ登録を行う。
 
@@ -200,7 +271,7 @@ sudo systemctl start tesla-override.service
 
 ---
 
-## 6. 【Step 5】稼働・正常性確認チェック
+## 7. 【Step 6】稼働・正常性確認チェック
 
 デプロイが正常に完了したか、以下のコマンドで最終確認を行う。
 

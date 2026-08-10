@@ -5,6 +5,7 @@ tesla_solar_charger.main() は本来「無限ループ・実API・実時間」�
   * proxy_session  → 擬似Tesla APIプロキシ（FakeSession）
   * time           → 仮想時計（FakeTime）。sleepで時間が飛び、予算を超えたら停止
   * Remo / override_state / トークン → 差し替え
+  * wall_connector.wc_session → 自宅ウォールコネクターの擬似ローカルAPI（FakeWCSession）
 
 に置き換えることで、1回のテストで数時間ぶんのサイクルを一瞬で回す。
 
@@ -19,6 +20,8 @@ import os
 import time as real_time
 
 import pytest
+
+import wall_connector
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
@@ -65,11 +68,15 @@ class FakeReadTimeout(Exception):
 
 
 class FakeResponse:
-    def __init__(self, status_code, payload):
+    def __init__(self, status_code, payload, json_error=False):
         self.status_code = status_code
         self._payload = payload
+        # 本文がJSONとして解釈できない状況（ウォールコネクターの判定不能パターンのひとつ）
+        self._json_error = json_error
 
     def json(self):
+        if self._json_error:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self._payload
 
 
@@ -121,6 +128,11 @@ class FakeSession:
             return FakeResponse(200, {"response": {"charge_state": {
                 "charging_state": self.world["charging_state"],
                 "charge_current_request": self.world["amps"],
+                # 急速充電の判定に使うフィールド。既定は自宅のAC充電に相当する値で、
+                # ウォールコネクターを読めなかったときのフォールバックにのみ影響する。
+                "fast_charger_present": self.world.get("fast_charger_present", False),
+                "fast_charger_type": self.world.get("fast_charger_type", "<invalid>"),
+                "charger_power": self.world.get("charger_power", 0),
             }}})
         raise AssertionError(f"想定外のGET: {url}")
 
@@ -144,6 +156,61 @@ class FakeSession:
         return FakeResponse(200, {"response": {"result": True}})
 
 
+class FakeWCSession:
+    """自宅ウォールコネクターのローカルAPIに応答する擬似サーバー。
+
+    差し替えるのは wall_connector.wc_session そのものなので、判定を行う
+    read_vehicle_connected() / read_serial() の実装は本物が動く。JSON解釈失敗や
+    キー欠落といった「判定不能」の各パターンも、実際のコードで検証できる。
+
+    world のキー（すべて省略可。既定は「自宅のウォールコネクターに接続中」）::
+
+        wc_vehicle_connected  vitals の vehicle_connected（Noneで真偽値以外を再現）
+        wc_http               HTTPステータス（200以外なら判定不能）
+        wc_raise              True で接続例外（電源断・LAN障害を再現）
+        wc_json_error         True で本文がJSONとして解釈できない
+        wc_omit_field         True で vehicle_connected キー自体が無い
+        wc_serial             /api/1/version が返す serial_number
+    """
+
+    def __init__(self, world):
+        self.world = world
+        self.calls = []
+
+    def get(self, url, timeout=None):
+        self.calls.append(url)
+
+        if self.world.get("wc_raise"):
+            raise FakeReadTimeout(
+                "HTTPConnectionPool(host='192.0.2.1', port=80): Read timed out. (read timeout=5)"
+            )
+
+        status = self.world.get("wc_http", 200)
+        if status != 200:
+            return FakeResponse(status, {})
+        if self.world.get("wc_json_error"):
+            return FakeResponse(200, None, json_error=True)
+
+        if url.endswith("/api/1/version"):
+            return FakeResponse(200, {
+                "firmware_version": "26.18.0+gtest",
+                "part_number": "1457768-02-H",
+                "serial_number": self.world.get("wc_serial", "TESTWC0000000000"),
+            })
+
+        if url.endswith("/api/1/vitals"):
+            vitals = {
+                "contactor_closed": True,
+                "vehicle_current_a": 21.3,
+                "session_energy_wh": 9738.1,
+            }
+            if not self.world.get("wc_omit_field"):
+                vitals["vehicle_connected"] = self.world.get("wc_vehicle_connected", True)
+            return FakeResponse(200, vitals)
+
+        raise AssertionError(f"想定外のウォールコネクターGET: {url}")
+
+
 class CapturingHandler(logging.Handler):
     def __init__(self):
         super().__init__()
@@ -156,7 +223,8 @@ class CapturingHandler(logging.Handler):
 class Result:
     """1回のシミュレーション結果。テストはこれに対してアサーションする。"""
 
-    def __init__(self, commands, logs, override_writes, world, module, refresh_calls=None):
+    def __init__(self, commands, logs, override_writes, world, module, refresh_calls=None,
+                 wc_calls=None):
         self.commands = commands
         self.logs = logs
         self.override_writes = override_writes
@@ -164,6 +232,8 @@ class Result:
         self.module = module
         # トークンリフレッシュが呼ばれた時刻（仮想時計）の一覧
         self.refresh_calls = refresh_calls if refresh_calls is not None else []
+        # 自宅ウォールコネクターへ投げたURLの一覧
+        self.wc_calls = wc_calls if wc_calls is not None else []
 
     def count(self, command):
         return self.commands.count(command)
@@ -233,8 +303,15 @@ def run_loop(tmp_path):
         assert res.count("charge_start") == 0
     """
 
-    def _run(world, start, budget_sec, override=False, house_power=-3000, on_poll=None):
+    def _run(world, start, budget_sec, override=False, house_power=-3000, on_poll=None,
+             wall_connector_host=None, wall_connector_serial=None):
         module = _load_module(tmp_path)
+
+        # ci_config.json の値を上書きする。空文字を渡すと外出先判定そのものが無効になる。
+        if wall_connector_host is not None:
+            module.WALL_CONNECTOR_HOST = wall_connector_host
+        if wall_connector_serial is not None:
+            module.WALL_CONNECTOR_SERIAL = wall_connector_serial
 
         for handler in list(module.logger.handlers):
             module.logger.removeHandler(handler)
@@ -244,6 +321,15 @@ def run_loop(tmp_path):
 
         session = FakeSession(world)
         module.proxy_session = session
+
+        # 自宅ウォールコネクターへの実HTTPを止める。差し替えを忘れると
+        # ci_config.json の 192.0.2.1（RFC 5737 のドキュメント用アドレス）へ
+        # 毎サイクル接続を試み、テストが黙って遅くなる。
+        # tesla_solar_charger は read_vehicle_connected / read_serial を名前で
+        # import しているが、どちらも呼び出し時に wall_connector.wc_session を見るため、
+        # セッションを差し替えれば判定ロジック本体は本物が動く。
+        wc_session = FakeWCSession(world)
+        wall_connector.wc_session = wc_session
 
         start_epoch = real_time.mktime(real_time.strptime(start, "%Y-%m-%d %H:%M:%S"))
         module.time = FakeTime(start_epoch, budget_sec)
@@ -309,7 +395,8 @@ def run_loop(tmp_path):
             pass
 
         return Result(
-            session.commands, capture.records, override_state["writes"], world, module, refresh_calls
+            session.commands, capture.records, override_state["writes"], world, module,
+            refresh_calls, wc_session.calls
         )
 
     return _run

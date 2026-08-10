@@ -11,6 +11,13 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from override_state import read_override_state, write_override
+from wall_connector import (
+    WC_CONNECTED,
+    WC_NOT_CONNECTED,
+    WC_UNKNOWN,
+    read_serial,
+    read_vehicle_connected,
+)
 
 # Windows環境での標準出力のエンコーディング問題を解決
 if hasattr(sys.stdout, "reconfigure"):
@@ -107,6 +114,31 @@ NIGHT_STOP_MAX_ATTEMPTS: int = int(config.get("NIGHT_STOP_MAX_ATTEMPTS", 6))
 # 夜間休止中のGETを、通信エラー・5xxのときに即座に試行する回数（1回目を含む）。
 # 巡回間隔（10分）を待たずにその場で取り直すためのもの。
 NIGHT_GET_ATTEMPTS: int = int(config.get("NIGHT_GET_ATTEMPTS", 2))
+
+# 自宅のTesla Wall Connector (Gen 3) のIPアドレス。空なら外出先判定を行わない
+# （設定していない環境では全経路が従来どおりの動作になる）。
+# DHCPでアドレスが変わると判定不能に落ちるため、ルーター側でIPを予約すること。
+WALL_CONNECTOR_HOST: str = str(config.get("WALL_CONNECTOR_HOST", ""))
+WALL_CONNECTOR_TIMEOUT_SEC: float = float(config.get("WALL_CONNECTOR_TIMEOUT_SEC", 5))
+
+# 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
+WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
+
+# ウォールコネクターを読めなかったときのフォールバック閾値（kW）。
+# 自宅の上限は MAX_AMPS(48A) × 200V = 9.6kW であり、これを超える給電は
+# 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
+FAST_CHARGER_POWER_KW: float = float(config.get("FAST_CHARGER_POWER_KW", 15))
+
+# 充電している場所の判定結果。
+SITE_HOME: str = "home"
+SITE_AWAY: str = "away"
+SITE_UNKNOWN: str = "unknown"
+
+# 起動時のシリアル照合に失敗した場合に False にして、以降の判定を行わなくする。
+wall_connector_available: bool = True
+
+# 直近のウォールコネクター読み取り結果。状態が変わったときだけログへ残すために持つ。
+wall_connector_last_state: str = ""
 
 # 充電中を意味するステータス（このときだけ電流調整・停止判定を行う）
 STATUS_CHARGING: str = "Charging"
@@ -410,6 +442,76 @@ def night_proxy_get(url: str, headers: Dict[str, str]) -> Any:
         )
 
 
+def describe_fast_charger(charge_state: Dict[str, Any]) -> str:
+    """急速充電フィールドの実値を、ログに残せる1行にまとめる。
+
+    これらの値は実機の急速充電器接続時のものが未検証である（公式APIドキュメントが
+    参照できない状態が続いている）。判定が働いた場面で必ず書き出しておかないと、
+    フォールバックが正しく効くかを後から検証する手段が無い。
+
+    2026-08-10、テンフィールズファクトリーのFLASHで充電した際のログにこれらの値が
+    残っておらず、実機データを取り逃した。
+    """
+    return (
+        f"fast_charger_present={charge_state.get('fast_charger_present')!r} "
+        f"fast_charger_type={charge_state.get('fast_charger_type')!r} "
+        f"fast_charger_brand={charge_state.get('fast_charger_brand')!r} "
+        f"charger_power={charge_state.get('charger_power')!r} "
+        f"conn_charge_cable={charge_state.get('conn_charge_cable')!r}"
+    )
+
+
+def classify_charging_site(charge_state: Dict[str, Any]) -> str:
+    """いま充電している場所が自宅かどうかを判定する。
+
+    第一の根拠は自宅のウォールコネクターである。宅内LANから到達できること自体が
+    「自宅の充電器である」ことの証明になるため、vehicle_connected をそのまま使える。
+    車両が Charging を報告しているのに false なら、その充電は自宅ではない。
+
+    ウォールコネクターを読めなかったときは、引数で渡された charge_state で補う。
+    これは既に取得済みのレスポンスであり、追加のAPI呼び出しも課金も発生しない。
+    急速充電と断定できなければ SITE_UNKNOWN を返し、呼び出し側は従来どおり動作する
+    （フィールドの実値は未検証のため、期待どおりでなくてもデグレしない）。
+    """
+    global wall_connector_last_state
+
+    if WALL_CONNECTOR_HOST and wall_connector_available:
+        state: str = read_vehicle_connected(WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC)
+
+        # 読めなくなったことを必ず顕在化させる。起動時の確認は通過しているため、
+        # ここで黙っていると「外出先の充電を止めてしまう」従来の挙動へ痕跡なしに
+        # 退行する。毎サイクル出すと3分毎に同じ行が並ぶため、変化したときだけ残す。
+        if state != wall_connector_last_state:
+            if state == WC_UNKNOWN:
+                logger.warning(
+                    f"自宅ウォールコネクター（{WALL_CONNECTOR_HOST}）を読み取れなくなりました。"
+                    "外出先かどうかを判定できないため、急速充電フィールドで補います。"
+                    "断定できない場合は従来どおり停止・電流制御を行います。"
+                )
+            elif wall_connector_last_state == WC_UNKNOWN:
+                logger.info("自宅ウォールコネクターの読み取りが回復しました。")
+            wall_connector_last_state = state
+
+        if state == WC_CONNECTED:
+            return SITE_HOME
+        if state == WC_NOT_CONNECTED:
+            return SITE_AWAY
+
+    if charge_state.get("fast_charger_present") is True:
+        return SITE_AWAY
+
+    charger_type: str = str(charge_state.get("fast_charger_type") or "")
+    if charger_type and charger_type != "<invalid>":
+        return SITE_AWAY
+
+    charger_power: Any = charge_state.get("charger_power")
+    if isinstance(charger_power, (int, float)) and not isinstance(charger_power, bool):
+        if charger_power > FAST_CHARGER_POWER_KW:
+            return SITE_AWAY
+
+    return SITE_UNKNOWN
+
+
 def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
     logger.info("車両へ起動命令（Wake Up）を送信します...")
     url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/wake_up"
@@ -491,6 +593,42 @@ def main() -> None:
 
     vin: str = (vehicles[0] or {}).get("vin", "")
     logger.info(f"対象車両 (VIN: {vin}) を捕捉。常駐ループ稼働を開始します。")
+
+    # どの物理個体に紐づいているかを起動のたびにログへ残す。設定を間違えたまま
+    # 「外出先判定が効いているつもり」になる状態を、サービス再起動時に顕在化させる。
+    global wall_connector_available
+    if not WALL_CONNECTOR_HOST:
+        # INFO では毎サイクルのログに埋もれる。判定が無効であることは「異常ではないが
+        # 人間の注意を向けたい事実」そのものであり、設定漏れに気づけないと
+        # スーパーチャージャーでの充電を停止させる従来の挙動に戻る。
+        log_attention(
+            "自宅ウォールコネクターが未設定のため、外出先の充電判定は行いません。"
+            "スーパーチャージャー等での充電も停止・電流変更の対象になります。"
+            "（設定方法は docs/02_deploy.md の『tesla_config.json の設定』を参照）"
+        )
+    else:
+        serial: Optional[str] = read_serial(WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC)
+        if serial is None:
+            # 起動時点で読めなくても機能は無効化しない。LANやWC側の一時的な不調で
+            # 恒久的に判定を諦めるのは過剰であり、毎サイクルの判定は独立して再試行される。
+            logger.warning(
+                f"自宅ウォールコネクター（{WALL_CONNECTOR_HOST}）を読み取れませんでした。"
+                "各サイクルで再試行します。"
+            )
+        elif WALL_CONNECTOR_SERIAL and serial != WALL_CONNECTOR_SERIAL:
+            # 設定されたIPが別の機器を指している。誤った機器の応答で
+            # 「自宅にいる／いない」を判断させないため、判定そのものを止める。
+            wall_connector_available = False
+            log_attention(
+                f"自宅ウォールコネクターのシリアルが設定と一致しません"
+                f"（設定: {WALL_CONNECTOR_SERIAL} / 応答: {serial}）。"
+                "外出先の充電判定を無効化します。IPアドレスの設定を確認してください。"
+            )
+        else:
+            logger.info(
+                f"自宅ウォールコネクター（{WALL_CONNECTOR_HOST} / シリアル {serial}）を確認しました。"
+            )
+
     print("-------------------------------------------------------------------------")
 
     if FORCE_RUN:
@@ -590,7 +728,29 @@ def main() -> None:
                             night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
                             night_status = str(night_charge_state.get("charging_state") or "")
                             prev_charging_status = night_status
-                            if night_status == STATUS_CHARGING:
+                            night_site: str = (
+                                classify_charging_site(night_charge_state)
+                                if night_status == STATUS_CHARGING else SITE_UNKNOWN
+                            )
+                            if night_status == STATUS_CHARGING and night_site == SITE_AWAY:
+                                # 自宅のウォールコネクターに繋がっていない。利用者が意図した
+                                # 外出先の充電であり、止めてはいけない。
+                                #
+                                # ここで night_stop_failures を加算しないこと。通信の失敗では
+                                # ないため、リトライ上限（NIGHT_STOP_MAX_ATTEMPTS）を消費させると
+                                # 長い外出先充電のあいだにその夜の監視が打ち切られ、帰宅後の
+                                # 自宅充電を止められなくなる。
+                                night_stop_failures = 0
+                                # 状況が変わったので、帰宅後に停止したときは必ずログへ残す。
+                                night_last_observation = ""
+                                # 抑制せず毎サイクル出す。「意図して停止を見送っている」ことを
+                                # 利用者に見せ続ける（フル充電モードの継続通知と同じ扱い）。
+                                log_attention(
+                                    "夜間休止中に充電を検知しましたが、自宅のウォールコネクターに"
+                                    "接続されていないため、外出先での充電と判断して停止しません。"
+                                    f" [{describe_fast_charger(night_charge_state)}]"
+                                )
+                            elif night_status == STATUS_CHARGING:
                                 # 状況が変わったので、次に停止を確認できたときは必ずログへ残す。
                                 night_last_observation = ""
                                 logger.info(
@@ -807,6 +967,23 @@ def main() -> None:
                 continue
 
             skip_wake_until = 0.0
+
+            # ここは charging_status が Charging か Stopped に絞り込まれた後であり、
+            # この1点で電流の絞り込み・デバウンス停止・電流変更・充電開始の4経路すべてを塞げる。
+            #
+            # フル充電モードの判定より前に置く。オーバーライドの目的は「自宅で太陽光を
+            # 無視して充電する」ことであり外出先では意味を持たない。従来はオーバーライド中も
+            # set_charging_amps が送信されており、急速充電中の車両がこれをどう扱うかは
+            # 未確認のままだった。この不確かな送信を残す利点がない。
+            if classify_charging_site(charge_state) == SITE_AWAY:
+                below_min_count = 0
+                log_attention(
+                    "自宅のウォールコネクターに接続されていないため、外出先での充電と判断し、"
+                    "電流調整・停止・開始のいずれも行いません。"
+                    f" [{describe_fast_charger(charge_state)}]"
+                )
+                time.sleep(180)
+                continue
 
             if manual_override:
                 if charging_status != STATUS_CHARGING:
