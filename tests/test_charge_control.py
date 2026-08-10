@@ -552,6 +552,27 @@ def test_ウォールコネクター未設定なら判定は行われない(run_
     assert res.has_log("外出先の充電判定は行いません", level="ATTENTION")
 
 
+def test_稼働中に読み取れなくなったら警告を残す(run_loop):
+    """起動時の確認を通過した後で読めなくなる経路がある。黙って従来動作へ戻さない。
+
+    ここで無言だと「外出先の充電を止めてしまう」挙動へ痕跡なしに退行する。
+    ただし毎サイクル出すと3分毎に同じ行が並ぶため、状態が変わったときだけ残す。
+    """
+    def wc_dies_then_recovers(elapsed, world):
+        world["wc_raise"] = 600 <= elapsed < 2400
+
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 20},
+        start="2026-08-10 10:00:00",
+        budget_sec=3600,
+        house_power=-6000,
+        on_poll=wc_dies_then_recovers,
+    )
+    warnings = [m for m in res.messages(level="WARNING") if "読み取れなくなりました" in m]
+    assert len(warnings) == 1, f"状態変化のたびに1回だけ出すこと（{len(warnings)}件）"
+    assert res.has_log("読み取りが回復しました")
+
+
 def test_外出先判定のログに急速充電フィールドの実値を残す(run_loop):
     """フォールバックが正しく効くかを後から検証するための実機データを取りこぼさない。
 

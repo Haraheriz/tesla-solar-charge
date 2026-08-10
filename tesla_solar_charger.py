@@ -11,7 +11,13 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from override_state import read_override_state, write_override
-from wall_connector import WC_CONNECTED, WC_NOT_CONNECTED, read_serial, read_vehicle_connected
+from wall_connector import (
+    WC_CONNECTED,
+    WC_NOT_CONNECTED,
+    WC_UNKNOWN,
+    read_serial,
+    read_vehicle_connected,
+)
 
 # Windows環境での標準出力のエンコーディング問題を解決
 if hasattr(sys.stdout, "reconfigure"):
@@ -130,6 +136,9 @@ SITE_UNKNOWN: str = "unknown"
 
 # 起動時のシリアル照合に失敗した場合に False にして、以降の判定を行わなくする。
 wall_connector_available: bool = True
+
+# 直近のウォールコネクター読み取り結果。状態が変わったときだけログへ残すために持つ。
+wall_connector_last_state: str = ""
 
 # 充電中を意味するステータス（このときだけ電流調整・停止判定を行う）
 STATUS_CHARGING: str = "Charging"
@@ -464,8 +473,25 @@ def classify_charging_site(charge_state: Dict[str, Any]) -> str:
     急速充電と断定できなければ SITE_UNKNOWN を返し、呼び出し側は従来どおり動作する
     （フィールドの実値は未検証のため、期待どおりでなくてもデグレしない）。
     """
+    global wall_connector_last_state
+
     if WALL_CONNECTOR_HOST and wall_connector_available:
         state: str = read_vehicle_connected(WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC)
+
+        # 読めなくなったことを必ず顕在化させる。起動時の確認は通過しているため、
+        # ここで黙っていると「外出先の充電を止めてしまう」従来の挙動へ痕跡なしに
+        # 退行する。毎サイクル出すと3分毎に同じ行が並ぶため、変化したときだけ残す。
+        if state != wall_connector_last_state:
+            if state == WC_UNKNOWN:
+                logger.warning(
+                    f"自宅ウォールコネクター（{WALL_CONNECTOR_HOST}）を読み取れなくなりました。"
+                    "外出先かどうかを判定できないため、急速充電フィールドで補います。"
+                    "断定できない場合は従来どおり停止・電流制御を行います。"
+                )
+            elif wall_connector_last_state == WC_UNKNOWN:
+                logger.info("自宅ウォールコネクターの読み取りが回復しました。")
+            wall_connector_last_state = state
+
         if state == WC_CONNECTED:
             return SITE_HOME
         if state == WC_NOT_CONNECTED:
