@@ -547,7 +547,9 @@ def test_ウォールコネクター未設定なら判定は行われない(run_
     )
     assert res.wc_calls == [], "未設定なのにウォールコネクターへ問い合わせている"
     assert res.count("charge_stop") >= 1
-    assert res.has_log("外出先の充電判定は行いません")
+    # 安全機能が無効であることは INFO に埋もれさせない。設定漏れに気づけないと
+    # スーパーチャージャーでの充電を停止させる従来の挙動に戻る。
+    assert res.has_log("外出先の充電判定は行いません", level="ATTENTION")
 
 
 def test_外出先判定のログに急速充電フィールドの実値を残す(run_loop):

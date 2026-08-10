@@ -16,6 +16,21 @@
 5. [デプロイ履歴](./docs/DEPLOY_LOG.md)
    - ラズパイへの本番デプロイを行った際の簡易記録
 
+## 設定
+
+`tesla_config.json` に設定を書く。このファイルは認証情報を含むため `.gitignore` 対象であり、リポジトリを取得しただけでは存在しない。**`tesla_config.json.template` をコピーして作成する。**
+
+```bash
+cp tesla_config.json.template tesla_config.json
+chmod 600 tesla_config.json
+```
+
+**キーの一覧と既定値は [デプロイ手順書の「`tesla_config.json` の設定」](./docs/02_deploy.md) にある。**必須のキーはTesla・Nature Remoの認証情報のほか、次の1つがある。
+
+* **`WALL_CONNECTOR_HOST`** — 自宅のTesla Wall Connector（Gen 3）のIPアドレス。**未設定だとシステムは充電している場所を区別せず、スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる。**車両側のAPIには接続先の充電器を識別する情報が存在しないため、宅内LANのウォールコネクターを読むことでのみ「自宅で充電しているか」を判定できる。Gen 2 やWi-Fi未接続の個体では利用できないため、その場合は空のままにする（従来どおりの動作になる）
+
+未設定のまま起動した場合は、起動時に `ATTENTION` ログで通知される。
+
 ## テスト
 
 充電制御ループの回帰テストを `tests/` に置いている。実行:

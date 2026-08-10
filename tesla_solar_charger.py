@@ -572,7 +572,14 @@ def main() -> None:
     # 「外出先判定が効いているつもり」になる状態を、サービス再起動時に顕在化させる。
     global wall_connector_available
     if not WALL_CONNECTOR_HOST:
-        logger.info("自宅ウォールコネクターが未設定のため、外出先の充電判定は行いません。")
+        # INFO では毎サイクルのログに埋もれる。判定が無効であることは「異常ではないが
+        # 人間の注意を向けたい事実」そのものであり、設定漏れに気づけないと
+        # スーパーチャージャーでの充電を停止させる従来の挙動に戻る。
+        log_attention(
+            "自宅ウォールコネクターが未設定のため、外出先の充電判定は行いません。"
+            "スーパーチャージャー等での充電も停止・電流変更の対象になります。"
+            "（設定方法は docs/02_deploy.md の『tesla_config.json の設定』を参照）"
+        )
     else:
         serial: Optional[str] = read_serial(WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC)
         if serial is None:
