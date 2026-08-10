@@ -587,7 +587,7 @@ def test_シリアルが設定と一致しなければ判定を無効化する(r
         },
         start="2026-08-07 20:44:00",
         budget_sec=1800,
-        wall_connector_serial="E4A25003000840",
+        wall_connector_serial="HOMEWC0000000000",
     )
     assert res.has_log("シリアルが設定と一致しません", level="ATTENTION")
     assert res.count("charge_stop") >= 1, "判定を無効化したのに従来動作へ戻っていない"

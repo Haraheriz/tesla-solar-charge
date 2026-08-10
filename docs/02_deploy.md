@@ -165,14 +165,14 @@ curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
 4. **`tesla_config.json` に設定する。**`WALL_CONNECTOR_SERIAL` は任意だが、設定しておくとIPアドレスが別の機器に割り当てられた場合に起動時のログで検知できる（`/api/1/version` の `serial_number` を転記する）
 
 ```json
-"WALL_CONNECTOR_HOST": "192.168.8.162",
-"WALL_CONNECTOR_SERIAL": "E4A25003000840"
+"WALL_CONNECTOR_HOST": "<ウォールコネクターのIP>",
+"WALL_CONNECTOR_SERIAL": "<シリアル番号>"
 ```
 
 サービス起動後、ログに以下が出れば正しく紐づいている。
 
 ```text
-[INFO] 自宅ウォールコネクター（192.168.8.162 / シリアル E4A25003000840）を確認しました。
+[INFO] 自宅ウォールコネクター（<ウォールコネクターのIP> / シリアル <シリアル番号>）を確認しました。
 ```
 
 ### 3. スマホ操作用コントロールサーバー設定ファイルの配置
