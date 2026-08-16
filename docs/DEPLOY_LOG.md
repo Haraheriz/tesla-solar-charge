@@ -44,7 +44,7 @@
 | 08-09 | 自宅で充電中：`vehicle_connected: true` / `contactor_closed: true` / `vehicle_current_a: 21.3` |
 | 08-10 | 車両不在：`vehicle_connected: false` / `evse_state: 1`（充電中は `11`）/ `prox_v: 0.0`（同 `1.5`） |
 
-**08-10、テンフィールズファクトリーのFLASHでの充電：** 妨害は起きなかったが、**回避策が効いたというより条件が揃わなかっただけ**である。
+**08-10、テンフィールズファクトリーのFLASHでの充電：** 妨害は起きなかった。**フル充電モードをONにしていたためである。回避策は設計どおり機能した。**
 
 ```text
 12:24:24  Disconnected                                    ← 接続前
@@ -54,7 +54,14 @@
 12:40:28  Disconnected                                    ← 以降ずっと未接続
 ```
 
-DC充電中が `Charging` として見えたのは2サイクルのみで、残りは終端ステータスの `Disconnected` だった。その2サイクルでも、オーバーライド中の目標値 `max(raw_amps, MIN_AMPS)` が車両の現在値と一致したため送信がスキップされた。**`charge_current_request` が4A未満だったなら、急速充電中の車両に `set_charging_amps` を送っていた。**
+**停止は起こりえなかった。**理由は2つあり、どちらか一方でも成立する。
+
+1. オーバーライド中は夜間休止そのものを迂回するため、夜間監視の停止経路に入らない
+2. 日中経路でも、オーバーライド中の目標値は `max(raw_amps, MIN_AMPS)` で**常に `MIN_AMPS` 以上**になる。停止分岐の条件は `target_amps < MIN_AMPS` であり、構造上ここへ到達しない
+
+**条件次第だったのは `set_charging_amps` の送信だけである。**当日の `charge_current_request` は 21A で `MIN_AMPS`(4) 以上だったため、目標値 `max(21, 4) = 21` が車両の現在値と一致し、送信がスキップされた。**4A未満であれば、急速充電中の車両へ電流指定を送っていた。**
+
+なお `charge_current_request` が `null` で返る場合は `MIN_AMPS` で代替されるため（`tesla_solar_charger.py` の `raw_amps` 初期化）、目標値も 4A となって一致し、結果的に送信されない。急速充電中にこのフィールドが `null` になるかは未確認である。
 
 **作業内容：**
 - `wall_connector.py` を新設。`/api/1/vitals` と `/api/1/version` を読み、例外を外に出さず3値（接続あり／なし／判定不能）を返す
