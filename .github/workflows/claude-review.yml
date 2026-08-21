@@ -33,8 +33,24 @@ jobs:
             - Tesla API / Nature Remo API の使い方の妥当性
             - 既存コードとの一貫性
 
+            差分の外にあるファイルも Read / Glob / Grep で読めます。変更行だけを見て
+            判断せず、呼び出し元・呼び出し先・関連するテスト・docs/ の記述まで
+            確認したうえで指摘してください。「diff範囲外なので確認していない」で
+            済ませないこと。設計の意図は docs/ と AGENTS.md に書かれています。
+
+            テストの実行はこのジョブの役目ではありません。同じ PR に対して
+            tests.yml が python -m pytest を実行します。テストを走らせようとせず、
+            「実行できなかった」という但し書きも不要です。読解で確かめられることに
+            集中し、テストコード自体の妥当性（旧挙動を仕様として固定していないか、
+            検出力が足りているか）は積極的に見てください。
+
             指摘は日本語で、重要度の高い順に。
             行単位の指摘は mcp__github_inline_comment__create_inline_comment で、
             総評は mcp__github_comment__update_claude_comment で投稿してください。
             問題がなければ総評に簡潔な承認コメントだけを書いてください。
-          claude_args: '--allowed-tools "mcp__github_comment__update_claude_comment,mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"'
+          # Read / Glob / Grep は読み取り専用で、コードを実行しない。差分の外を
+          # 読めるようにするのが目的である（呼び出し元、既存のテスト、docs/ の記述）。
+          # テストの実行（pytest）は意図的に許可していない。このリポジトリは公開で
+          # あり、pytest はリポジトリ内の任意のコードを実行するため。テストは
+          # tests.yml が同じ PR に対して実行する。
+          claude_args: '--allowed-tools "mcp__github_comment__update_claude_comment,mcp__github_inline_comment__create_inline_comment,Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*)"'
