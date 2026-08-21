@@ -896,6 +896,25 @@ def main() -> None:
                     )
                     time.sleep(TERMINAL_BACKOFF_SEC)
                     continue
+
+                if prev_charging_status == "Disconnected" and read_wall_connector() == WC_NOT_CONNECTED:
+                    # ケーブルが自宅に繋がっていない。起こしても Disconnected を読み直すだけで、
+                    # 充電は始められない。ケーブルを挿せば車両は自らオンラインになり、
+                    # 課金されない車両リストで検知できるため、確認のために起こす必要がない。
+                    #
+                    # 抑止のタイマー（skip_wake_until）には手を入れず、毎サイクル
+                    # ウォールコネクターに問い合わせ直す。決め打ちの長さで盲目区間を作らないため。
+                    # 読み取れなければこの条件は成立せず、従来どおり1時間ごとに起こす。
+                    #
+                    # 2026-08-12、フル充電モードが37時間ONのまま、ケーブル未接続の車を
+                    # 約71分ごとに13回起動していた（約¥36）。オーバーライド中は下の
+                    # 余剰チェックを迂回するため、抑止が切れるたびに必ず起こしていた。
+                    logger.info(
+                        "自宅の充電器にケーブルが接続されていないため、車両を起こしません。"
+                    )
+                    time.sleep(TERMINAL_BACKOFF_SEC)
+                    continue
+
                 if not manual_override and house_power >= -(START_AMPS * 200):
                     logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * 200}W）未満のため、このまま寝かせます。")
                     time.sleep(180)

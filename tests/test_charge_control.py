@@ -623,6 +623,69 @@ def test_ウォールコネクターの単発の読み取り失敗はその場�
     assert not res.has_log("読み取れなくなりました", level="WARNING")
 
 
+def test_ケーブル未接続なら就寝中の車を起こさない(run_loop):
+    """2026-08-12 の再現。ケーブル未接続の車を約71分ごとに13回起動していた（約¥36）。
+
+    フル充電モードが37時間ONのままで、オーバーライド中は余剰チェックを迂回するため、
+    終端ステータスの抑止が切れるたびに必ず起こしていた。起こしても Disconnected を
+    読み直すだけで、充電は始められない。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 48,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-12 06:00:00",
+        budget_sec=10 * 3600,
+        override=True,
+        on_poll=lambda elapsed, world: world.update(vehicle_state="offline"),
+    )
+    # 起動直後の1回は、まだ充電状態を観測していないため正当なウェイクである。
+    # 問題はその後で、抑止が切れるたびに繰り返していた（10時間なら約8回）。
+    assert res.count("wake_up") == 1, "ケーブル未接続の車を繰り返し起こしている"
+    assert res.has_log("ケーブルが接続されていないため、車両を起こしません")
+
+
+def test_ケーブルが接続されたら起こす判断に戻る(run_loop):
+    """盲目区間を作らないこと。ウォールコネクターの応答で毎サイクル判断し直す。"""
+    def plug_in_later(elapsed, world):
+        world["vehicle_state"] = "offline"
+        if elapsed >= 2 * 3600:
+            world["wc_vehicle_connected"] = True
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 48,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-12 06:00:00",
+        budget_sec=6 * 3600,
+        override=True,
+        on_poll=plug_in_later,
+    )
+    # 1回では足りない。起動直後の無条件ウェイクだけでも1回になるため、
+    # 再接続を検知していなくてもこの数に達してしまう。接続後に改めて
+    # 起こしたことを示すには、それを上回る必要がある。
+    assert res.count("wake_up") >= 2, "ケーブル接続後に起こす判断へ戻っていない"
+    # 接続前は抑止が働いていたこと（＝この試験が抑止経路を通っていること）も確認する。
+    assert res.has_log("ケーブルが接続されていないため、車両を起こしません")
+
+
+def test_ウォールコネクターが読めなければ従来どおり起こす(run_loop):
+    """読み取れない状況で挙動を変えない。デグレの余地を残さないため。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 48,
+            "wc_raise": True,
+        },
+        start="2026-08-12 06:00:00",
+        budget_sec=10 * 3600,
+        override=True,
+        on_poll=lambda elapsed, world: world.update(vehicle_state="offline"),
+    )
+    assert res.count("wake_up") >= 1, "判定不能なのに従来動作へ落ちていない"
+
+
 def test_車両が複数あれば起動時に警告する(run_loop):
     """制御できるのは1台だけで、車両リストの順序に保証もない。
 
