@@ -135,6 +135,50 @@ python tesla_solar_charger.py --force-run
 
 ---
 
+## 2.5 読み取り専用の観測ツール（`tools/observe_only.py`）
+
+制御ログは平滑化後の値を1サイクルにつき1点しか残さない。窓長や閾値を変えたときの影響を後から検証できないため、電力の生データを別途記録する手段として用意してある。**車両へコマンドは一切送らない。**
+
+* 60秒間隔で系統電力・メーター更新時刻・車両状態を `observe_power.csv` へ追記する
+* 600秒間隔で車両状態を問い合わせる（`online` のときだけ `vehicle_data` を叩く）
+
+### 常用しない
+
+**Tesla API の課金が発生する。**制御ループとは独立して車両を問い合わせるためである。
+
+| | 実績 |
+| --- | --- |
+| 稼働期間 | 2026-08-09 22:55 〜 08-18（8.92日） |
+| `vehicle_data` の推定回数 | 約660回 |
+| 費用 | **約¥190（¥21/日）** |
+
+同期間の制御ループ自体の実績は約¥15/日であり、**観測ツールを動かすと費用が倍以上になる。**必要な期間だけ動かし、目的を果たしたら止めること。
+
+### 起動と停止
+
+```bash
+sudo systemctl start tesla-observer.service     # 開始
+systemctl is-active tesla-observer.service      # 状態確認
+sudo systemctl stop tesla-observer.service      # 停止
+```
+
+**`enable` してはいけない。**再起動のたびに自動で動き出し、費用が継続する。既定では `disabled` にしてある。
+
+```bash
+systemctl is-enabled tesla-observer.service     # disabled であること
+```
+
+記録先は `observe_power.csv`（追記）と `observe_only.log`。CSVは停止しても消えないため、再開すれば続きから追記される。
+
+### 過去の稼働で分かったこと
+
+2026-08-09〜18 の12,700サンプルから、以下が確定した。
+
+* **スマートメーターの更新間隔は中央値61秒**（60秒が95%）。制御ループの平滑化窓は `REMO_SAMPLES(3) × REMO_SAMPLE_INTERVAL_SEC(10)` ＝ 20秒しかなく、**大半は同一の値を3回平均している。**窓を広げる案は、複数の更新をまたぐのに120〜180秒を要し、制御サイクル（180秒）の全部を消費するため採れない
+* **余剰が開始閾値を超えた81区間のうち58%が2分以内に終息していた。**3分サイクルで模擬すると、開始条件を満たす86サイクルのうち2サイクル連続を要求すれば39回（45%）まで減る
+
+---
+
 ## 3. スマホからの「フル充電モード」切替（マニュアル・オーバーライド）
 
 太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電、出発前の追加充電など）に使う機能。`tesla-override.service` が宅内LAN上で軽量Webサーバーとして常駐しており、スマートフォンのブラウザからトークン付きURLにアクセスするだけでON/OFFを切替えられる。
@@ -663,6 +707,8 @@ VIN自体は、ウォールコネクターと車両のあいだのCP線を流れ
 | 操作目的 | 実行コマンド |
 | --- | --- |
 | **全システムの現在の状態を見る** | `sudo systemctl status tesla-proxy.service tesla-charger.service tesla-override.service` |
+| **観測ツールを起動する（費用が増える）** | `sudo systemctl start tesla-observer.service` |
+| **観測ツールを停止する** | `sudo systemctl stop tesla-observer.service` |
 | **全システムをまとめて起動する** | `sudo systemctl start tesla-proxy.service tesla-charger.service tesla-override.service` |
 | **全システムを安全に完全停止する** | `sudo systemctl stop tesla-charger.service tesla-proxy.service tesla-override.service` |
 | **設定変更後に一括リスタートする** | `sudo systemctl restart tesla-proxy.service tesla-charger.service tesla-override.service` |

@@ -250,7 +250,17 @@ WantedBy=multi-user.target
 
 ```
 
-### 4. サービスの有効化と即時起動コマンド
+### 4. 観測ツール用設定ファイルの配置（任意）
+
+`tools/observe_only.py` を使う場合のみ配置する。**`enable` しないこと**（Tesla APIの課金が継続するため。詳細は `docs/03_operation.md` の「読み取り専用の観測ツール」）。
+
+```bash
+sudo nano /etc/systemd/system/tesla-observer.service
+```
+
+定義は `docs/01_architecture.md` 第7章④を参照。配置後は `sudo systemctl daemon-reload` のみ実行し、次項の一括 `enable` の対象には含めない。
+
+### 5. サービスの有効化と即時起動コマンド
 
 ファイルを配置後、システムに認識させて一気に起動する。
 
