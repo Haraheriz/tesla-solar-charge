@@ -11,13 +11,7 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from override_state import read_override_state, write_override
-from wall_connector import (
-    WC_CONNECTED,
-    WC_NOT_CONNECTED,
-    WC_UNKNOWN,
-    read_serial,
-    read_vehicle_connected,
-)
+from wall_connector import WC_NOT_CONNECTED, WC_UNKNOWN, read_serial, read_vehicle_connected
 
 # Windows環境での標準出力のエンコーディング問題を解決
 if hasattr(sys.stdout, "reconfigure"):
@@ -121,6 +115,10 @@ NIGHT_GET_ATTEMPTS: int = int(config.get("NIGHT_GET_ATTEMPTS", 2))
 WALL_CONNECTOR_HOST: str = str(config.get("WALL_CONNECTOR_HOST", ""))
 WALL_CONNECTOR_TIMEOUT_SEC: float = float(config.get("WALL_CONNECTOR_TIMEOUT_SEC", 5))
 
+# ウォールコネクターを読めなかったときに、その場で取り直す回数（1回目を含む）。
+# 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
+WALL_CONNECTOR_ATTEMPTS: int = int(config.get("WALL_CONNECTOR_ATTEMPTS", 2))
+
 # 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
 WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 
@@ -129,8 +127,10 @@ WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 # 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
 FAST_CHARGER_POWER_KW: float = float(config.get("FAST_CHARGER_POWER_KW", 15))
 
-# 充電している場所の判定結果。
-SITE_HOME: str = "home"
+# 充電している場所の判定結果。「自宅である」という値は持たない。
+# 自宅の充電器に何かが繋がっていることは分かっても、それが制御対象の車である保証が
+# ないため（ローカルAPIはVINを返さない）。断定できるのは「外出先である」ことだけで、
+# それ以外はすべて SITE_UNKNOWN として従来どおりの動作に戻す。
 SITE_AWAY: str = "away"
 SITE_UNKNOWN: str = "unknown"
 
@@ -461,54 +461,69 @@ def describe_fast_charger(charge_state: Dict[str, Any]) -> str:
     )
 
 
-def classify_charging_site(charge_state: Dict[str, Any]) -> str:
-    """いま充電している場所が自宅かどうかを判定する。
+def read_wall_connector() -> str:
+    """自宅ウォールコネクターの接続状態を読む。状態が変わったときだけログへ残す。
 
-    第一の根拠は自宅のウォールコネクターである。宅内LANから到達できること自体が
-    「自宅の充電器である」ことの証明になるため、vehicle_connected をそのまま使える。
-    車両が Charging を報告しているのに false なら、その充電は自宅ではない。
-
-    ウォールコネクターを読めなかったときは、引数で渡された charge_state で補う。
-    これは既に取得済みのレスポンスであり、追加のAPI呼び出しも課金も発生しない。
-    急速充電と断定できなければ SITE_UNKNOWN を返し、呼び出し側は従来どおり動作する
-    （フィールドの実値は未検証のため、期待どおりでなくてもデグレしない）。
+    起動時の確認はループに入る前の1回きりである。稼働中に読めなくなったことを
+    黙って見過ごすと、「外出先の充電を止めてしまう」従来の挙動へ痕跡なしに退行する。
+    毎サイクル出すと3分毎に同じ行が並ぶため、変化したときだけ記録する。
     """
     global wall_connector_last_state
 
-    if WALL_CONNECTOR_HOST and wall_connector_available:
-        state: str = read_vehicle_connected(WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC)
+    if not WALL_CONNECTOR_HOST or not wall_connector_available:
+        return WC_UNKNOWN
 
-        # 読めなくなったことを必ず顕在化させる。起動時の確認は通過しているため、
-        # ここで黙っていると「外出先の充電を止めてしまう」従来の挙動へ痕跡なしに
-        # 退行する。毎サイクル出すと3分毎に同じ行が並ぶため、変化したときだけ残す。
-        if state != wall_connector_last_state:
-            if state == WC_UNKNOWN:
-                logger.warning(
-                    f"自宅ウォールコネクター（{WALL_CONNECTOR_HOST}）を読み取れなくなりました。"
-                    "外出先かどうかを判定できないため、急速充電フィールドで補います。"
-                    "断定できない場合は従来どおり停止・電流制御を行います。"
-                )
-            elif wall_connector_last_state == WC_UNKNOWN:
-                logger.info("自宅ウォールコネクターの読み取りが回復しました。")
-            wall_connector_last_state = state
+    state: str = read_vehicle_connected(
+        WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+    )
+    if state != wall_connector_last_state:
+        if state == WC_UNKNOWN:
+            logger.warning(
+                f"自宅ウォールコネクター（{WALL_CONNECTOR_HOST}）を読み取れなくなりました。"
+                "自宅で充電していないことを確認できないため、外出先かどうかの判定ができません。"
+            )
+        elif wall_connector_last_state == WC_UNKNOWN:
+            logger.info("自宅ウォールコネクターの読み取りが回復しました。")
+        wall_connector_last_state = state
+    return state
 
-        if state == WC_CONNECTED:
-            return SITE_HOME
-        if state == WC_NOT_CONNECTED:
-            return SITE_AWAY
 
+def classify_charging_site(charge_state: Dict[str, Any]) -> str:
+    """外出先での充電だと断定できるかを返す。SITE_AWAY か SITE_UNKNOWN。
+
+    「自宅である」とは断定しない。自宅の充電器に何かが繋がっていることは分かっても、
+    それが制御対象の車である保証がないため（ローカルAPIはVINを返さない）。
+    2台目や来客のEVが自宅の充電器を使っている場合、それを自宅での充電と読み違える。
+
+    根拠の強い順に評価する。車両自身の charge_state を先に見るのが重要で、
+    これは車両ごとの情報なので、別の車が自宅の充電器を使っていても影響を受けない。
+    """
+    # 1. 自宅の充電設備はACである。DC急速充電を検知したなら自宅ではありえない。
+    #    場所を直接判定しているのではなく、設備の性質から自宅を排除している。
+    #    この論法が成立するのはDCのときだけで、ACでは何も言えない。
     if charge_state.get("fast_charger_present") is True:
-        return SITE_AWAY
-
-    charger_type: str = str(charge_state.get("fast_charger_type") or "")
-    if charger_type and charger_type != "<invalid>":
         return SITE_AWAY
 
     charger_power: Any = charge_state.get("charger_power")
     if isinstance(charger_power, (int, float)) and not isinstance(charger_power, bool):
+        # 閾値の根拠は MAX_AMPS である。MAX_AMPS を変更したら見直すこと。
         if charger_power > FAST_CHARGER_POWER_KW:
             return SITE_AWAY
 
+    # fast_charger_type は判定に使わない。自宅のAC充電で 'ACSingleWireCAN' を返すため、
+    # 「空でも <invalid> でもなければ外出先」という否定形の判定は必ず一致してしまう。
+    # 2026-08-13・14・18 に、自宅で充電中の車を3回「外出先」と誤判定した。
+    # 肯定形（既知のDC種別のみ一致）にする案も採らない。観測できたDC側の値は
+    # 'Tesla' の1件だけで、それは同じ場面で fast_charger_present=True が立っており
+    # 判定材料として何も足さない。未観測の値を並べれば、誤って外出先と判定する側に倒れる。
+
+    # 2. 自宅の充電器に何も繋がっていないなら、いま充電中の車は自宅にいない。
+    #    これは所有台数に関係なく成立する。
+    #    逆に「繋がっている」は根拠にしない。それが制御対象の車とは限らないため。
+    if read_wall_connector() == WC_NOT_CONNECTED:
+        return SITE_AWAY
+
+    # 3. 断定できない。呼び出し側は従来どおり動作する。
     return SITE_UNKNOWN
 
 
@@ -593,6 +608,19 @@ def main() -> None:
 
     vin: str = (vehicles[0] or {}).get("vin", "")
     logger.info(f"対象車両 (VIN: {vin}) を捕捉。常駐ループ稼働を開始します。")
+
+    if len(vehicles) > 1:
+        # 制御できるのは1台だけで、車両リストの順序に保証もない。どちらを制御しているかを
+        # 起動のたびに明示しないと、対象が入れ替わっても気づけない。
+        # 判定にも影響する。ウォールコネクターの vehicle_connected は「何らかの車が
+        # 繋がっている」しか答えないため、2台目が自宅の充電器を使っていると、
+        # 外出先での充電を自宅と読み違える（docs/03_operation.md の
+        # 「既知の制約：複数の車両に対応していない」を参照）。
+        log_attention(
+            f"アカウントに車両が{len(vehicles)}台あります。本システムは1台のみに対応しており、"
+            f"VIN {vin} だけを制御します。他の車両は制御されず、"
+            "自宅の充電器を別の車が使っている間は外出先の判定も正しく行えません。"
+        )
 
     # どの物理個体に紐づいているかを起動のたびにログへ残す。設定を間違えたまま
     # 「外出先判定が効いているつもり」になる状態を、サービス再起動時に顕在化させる。

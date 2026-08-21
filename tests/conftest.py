@@ -119,9 +119,11 @@ class FakeSession:
                 return FakeResponse(self.world.get("vehicle_list_fail_http", 500), {})
             if self.world.get("vehicle_list_http", 200) != 200:
                 return FakeResponse(self.world["vehicle_list_http"], {})
-            return FakeResponse(200, {"response": [
-                {"vin": "TESTVIN0000000000", "state": self.world["vehicle_state"]}
-            ]})
+            fleet = [{"vin": "TESTVIN0000000000", "state": self.world["vehicle_state"]}]
+            # 複数所有の再現。制御対象は先頭のみで、2台目以降は無視される。
+            for i in range(self.world.get("extra_vehicles", 0)):
+                fleet.append({"vin": f"TESTVIN{i + 1:011d}", "state": "asleep"})
+            return FakeResponse(200, {"response": fleet})
         if "vehicle_data" in url:
             if self.world.get("charge_state_http", 200) != 200:
                 return FakeResponse(self.world["charge_state_http"], {})
@@ -171,6 +173,7 @@ class FakeWCSession:
         wc_json_error         True で本文がJSONとして解釈できない
         wc_omit_field         True で vehicle_connected キー自体が無い
         wc_serial             /api/1/version が返す serial_number
+        wc_fail_first         最初のN回の呼び出しだけ失敗させる（再試行の検証用）
     """
 
     def __init__(self, world):
@@ -179,6 +182,11 @@ class FakeWCSession:
 
     def get(self, url, timeout=None):
         self.calls.append(url)
+
+        # 最初のN回だけ失敗させる。その場での取り直しが効いているかを見るため。
+        fail_first = self.world.get("wc_fail_first", 0)
+        if fail_first and len(self.calls) <= fail_first:
+            raise FakeReadTimeout("transient")
 
         if self.world.get("wc_raise"):
             raise FakeReadTimeout(

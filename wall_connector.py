@@ -33,7 +33,7 @@ WC_UNKNOWN: str = "unknown"
 wc_session = requests.Session()
 
 
-def _get_json(host: str, path: str, timeout: float) -> Optional[Dict[str, Any]]:
+def _get_json_once(host: str, path: str, timeout: float) -> Optional[Dict[str, Any]]:
     """ウォールコネクターのローカルAPIを1回読む。読めなければ None を返す。
 
     以下はすべて「読めなかった」として同じ None に畳む。呼び出し側が
@@ -61,12 +61,30 @@ def _get_json(host: str, path: str, timeout: float) -> Optional[Dict[str, Any]]:
     return data
 
 
-def read_vehicle_connected(host: str, timeout: float = 5.0) -> str:
+def _get_json(host: str, path: str, timeout: float, attempts: int = 2) -> Optional[Dict[str, Any]]:
+    """読めなければその場で取り直す。夜間の night_proxy_get() と同じ考え方。
+
+    2026-08-11〜18 の運用で、読み取り失敗が週4回発生した。定常時の応答は
+    15〜42ms（ping平均13.6ms・ロス0%）であり、タイムアウトが短すぎるのではなく
+    一過性の失敗である。制御サイクルは昼3分・夜10分あるため、次のサイクルまで
+    持ち越すと、その間ずっと外出先の判定ができない。
+
+    相手は宅内LANの機器で課金もないが、無制限には繰り返さない。応答しなくなった
+    ウォールコネクターを叩き続けても回復しないため。
+    """
+    for _ in range(max(attempts, 1)):
+        data = _get_json_once(host, path, timeout)
+        if data is not None:
+            return data
+    return None
+
+
+def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
     """自宅のウォールコネクターに車両が接続されているかを3値で返す。
 
     例外は外に出さない。判定できない場合はすべて WC_UNKNOWN になる。
     """
-    vitals = _get_json(host, "/api/1/vitals", timeout)
+    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
     if vitals is None:
         return WC_UNKNOWN
 
@@ -80,12 +98,12 @@ def read_vehicle_connected(host: str, timeout: float = 5.0) -> str:
     return WC_CONNECTED if connected else WC_NOT_CONNECTED
 
 
-def read_serial(host: str, timeout: float = 5.0) -> Optional[str]:
+def read_serial(host: str, timeout: float = 5.0, attempts: int = 2) -> Optional[str]:
     """/api/1/version の serial_number を返す。読めなければ None。
 
     起動時に1回だけ呼び、どの物理個体に紐づいているかをログへ残すために使う。
     """
-    version = _get_json(host, "/api/1/version", timeout)
+    version = _get_json(host, "/api/1/version", timeout, attempts)
     if version is None:
         return None
     serial = version.get("serial_number")

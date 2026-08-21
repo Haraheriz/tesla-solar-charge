@@ -488,10 +488,9 @@ def test_フル充電モード中でも外出先ではコマンドを送らな�
     "fallback_world",
     [
         {"fast_charger_present": True},
-        {"fast_charger_type": "Combo"},
         {"charger_power": 120},
     ],
-    ids=["fast_charger_present", "fast_charger_type", "charger_power"],
+    ids=["fast_charger_present", "charger_power"],
 )
 def test_ウォールコネクターが判定不能なら急速充電フィールドで判断する(run_loop, fallback_world):
     """LAN障害でウォールコネクターを読めなくても、DC急速充電は止めない。
@@ -550,6 +549,93 @@ def test_ウォールコネクター未設定なら判定は行われない(run_
     # 安全機能が無効であることは INFO に埋もれさせない。設定漏れに気づけないと
     # スーパーチャージャーでの充電を停止させる従来の挙動に戻る。
     assert res.has_log("外出先の充電判定は行いません", level="ATTENTION")
+
+
+def test_自宅のAC充電を外出先と誤判定しない(run_loop):
+    """2026-08-13・14・18 の再現。自宅で充電中の車を3回「外出先」と誤判定した。
+
+    fast_charger_type は自宅のAC充電で 'ACSingleWireCAN' を返す。かつての実装は
+    「空でも <invalid> でもなければ外出先」という否定形だったため、必ず一致した。
+    08-18 07:12 には48A・10,671W買電中の充電に対して制御を見送り、絞り込みが
+    3分23秒遅れて約0.50kWhを余計に買電した。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 48,
+            # ウォールコネクターが読めない瞬間に誤判定が起きていた
+            "wc_raise": True,
+            "fast_charger_present": False,
+            "fast_charger_type": "ACSingleWireCAN",
+            "charger_power": 9,
+        },
+        start="2026-08-18 07:12:00",
+        budget_sec=1200,
+        house_power=10671,
+    )
+    assert not res.has_log("外出先での充電と判断", level="ATTENTION"), "自宅の充電を外出先と誤判定している"
+    assert res.count("set_charging_amps") >= 1, "自宅の充電が制御されていない"
+
+
+def test_自宅の充電器が別の車で埋まっていても急速充電は外出先と判定する(run_loop):
+    """2台所有、または来客のEVが自宅の充電器を使っている場合。
+
+    ウォールコネクターの vehicle_connected は「何らかの車が繋がっている」しか
+    答えないため、これを先に見ると外出先の急速充電を自宅と読み違える。
+    車両自身の charge_state を先に評価することで、自宅の充電器の状態に関わらず
+    DC急速充電を判別できる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 21,
+            # 別の車が自宅の充電器に接続中
+            "wc_vehicle_connected": True,
+            # 制御対象の車はスーパーチャージャーにいる（2026-08-18 18:52 の実測値）
+            "fast_charger_present": True,
+            "fast_charger_type": "Tesla",
+            "charger_power": 55,
+        },
+        start="2026-08-18 18:52:00",
+        budget_sec=1800,
+    )
+    assert res.count("charge_stop") == 0, "外出先の急速充電を停止させている"
+    assert res.has_log("外出先での充電と判断して停止しません", level="ATTENTION")
+
+
+def test_ウォールコネクターの単発の読み取り失敗はその場で取り直す(run_loop):
+    """2026-08-11〜18 の運用で読み取り失敗が週4回発生した。定常時の応答は15〜42msで、
+    タイムアウトが短いのではなく一過性である。次のサイクルまで持ち越すと、
+    その間ずっと外出先の判定ができない。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+            # 起動時の /api/1/version の1回目だけ失敗させる
+            "wc_fail_first": 1,
+        },
+        start="2026-08-18 20:00:00",
+        budget_sec=1200,
+    )
+    assert res.count("charge_stop") == 0, "取り直しが効かず外出先を判定できていない"
+    assert not res.has_log("読み取れなくなりました", level="WARNING")
+
+
+def test_車両が複数あれば起動時に警告する(run_loop):
+    """制御できるのは1台だけで、車両リストの順序に保証もない。
+
+    どちらを制御しているかを明示しないと、対象が入れ替わっても気づけない。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "extra_vehicles": 1,
+        },
+        start="2026-08-18 10:00:00",
+        budget_sec=60,
+        house_power=-6000,
+    )
+    assert res.has_log("車両が2台あります", level="ATTENTION")
+    assert res.has_log("TESTVIN0000000000")
 
 
 def test_稼働中に読み取れなくなったら警告を残す(run_loop):
