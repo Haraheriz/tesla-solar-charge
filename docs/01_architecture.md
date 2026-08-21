@@ -316,3 +316,31 @@ WantedBy=multi-user.target
 ```
 
 `tesla-charger.service` とは独立して起動・停止できる（`Requires=`の依存関係なし）。コントロールサーバーが落ちていても充電制御自体は通常運転を継続する。
+
+### ④ 読み取り専用の観測ツール用：`/etc/systemd/system/tesla-observer.service`
+
+**常用しない。**必要なときだけ手動で起動する。`enable` してはいけない（下記の理由）。
+
+```ini
+[Unit]
+Description=Tesla Solar Charger Read-Only Observer (manual start only)
+Requires=tesla-proxy.service
+After=network.target tesla-proxy.service
+
+[Service]
+Type=simple
+User=<username>
+WorkingDirectory=/home/<username>/tesla-solar-charge
+ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python tools/observe_only.py
+Restart=on-failure
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+`tools/observe_only.py` は車両へコマンドを送らないが、**車両状態を10分ごとに独立して問い合わせるため Tesla API の課金が発生する。**2026-08-09〜18 の8.92日で `vehicle_data` を約660回呼び、約¥190（¥21/日）を消費した。同期間の制御ループ自体の実績は約¥15/日であり、**観測ツールを動かすと費用が倍以上になる。**
+
+そのため `enable` せず、`systemctl start` で明示的に起動したときだけ動く状態にしてある。`Restart=on-failure` は異常終了時の復帰のためで、`systemctl stop` した場合は再起動しない。
