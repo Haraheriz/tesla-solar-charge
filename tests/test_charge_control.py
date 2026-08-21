@@ -599,6 +599,9 @@ def test_自宅の充電器が別の車で埋まっていても急速充電は�
     )
     assert res.count("charge_stop") == 0, "外出先の急速充電を停止させている"
     assert res.has_log("外出先での充電と判断して停止しません", level="ATTENTION")
+    # 自宅の充電器は「接続あり」を返している。それを理由として記録すると事実と反する。
+    assert res.has_log("急速充電器での充電を検知したため", level="ATTENTION")
+    assert not res.has_log("ウォールコネクターに接続されていないため", level="ATTENTION")
 
 
 def test_ウォールコネクターの単発の読み取り失敗はその場で取り直す(run_loop):

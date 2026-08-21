@@ -488,8 +488,13 @@ def read_wall_connector() -> str:
     return state
 
 
-def classify_charging_site(charge_state: Dict[str, Any]) -> str:
-    """外出先での充電だと断定できるかを返す。SITE_AWAY か SITE_UNKNOWN。
+def classify_charging_site(charge_state: Dict[str, Any]) -> Tuple[str, str]:
+    """外出先での充電だと断定できるかを、判定と理由の組で返す。
+
+    理由を返すのは、ログで断定した根拠と実際の根拠を食い違わせないためである。
+    根拠1で確定した場合、自宅のウォールコネクターは読んでいない。にもかかわらず
+    「接続されていないため」と記録すると、2台目や来客のEVが接続中の場面で
+    事実と反する行が残り、原因調査を誤らせる。
 
     「自宅である」とは断定しない。自宅の充電器に何かが繋がっていることは分かっても、
     それが制御対象の車である保証がないため（ローカルAPIはVINを返さない）。
@@ -502,13 +507,13 @@ def classify_charging_site(charge_state: Dict[str, Any]) -> str:
     #    場所を直接判定しているのではなく、設備の性質から自宅を排除している。
     #    この論法が成立するのはDCのときだけで、ACでは何も言えない。
     if charge_state.get("fast_charger_present") is True:
-        return SITE_AWAY
+        return SITE_AWAY, "急速充電器での充電を検知したため、"
 
     charger_power: Any = charge_state.get("charger_power")
     if isinstance(charger_power, (int, float)) and not isinstance(charger_power, bool):
         # 閾値の根拠は MAX_AMPS である。MAX_AMPS を変更したら見直すこと。
         if charger_power > FAST_CHARGER_POWER_KW:
-            return SITE_AWAY
+            return SITE_AWAY, f"給電が{FAST_CHARGER_POWER_KW}kWを超えており自宅の設備では不可能なため、"
 
     # fast_charger_type は判定に使わない。自宅のAC充電で 'ACSingleWireCAN' を返すため、
     # 「空でも <invalid> でもなければ外出先」という否定形の判定は必ず一致してしまう。
@@ -521,10 +526,10 @@ def classify_charging_site(charge_state: Dict[str, Any]) -> str:
     #    これは所有台数に関係なく成立する。
     #    逆に「繋がっている」は根拠にしない。それが制御対象の車とは限らないため。
     if read_wall_connector() == WC_NOT_CONNECTED:
-        return SITE_AWAY
+        return SITE_AWAY, "自宅のウォールコネクターに接続されていないため、"
 
     # 3. 断定できない。呼び出し側は従来どおり動作する。
-    return SITE_UNKNOWN
+    return SITE_UNKNOWN, ""
 
 
 def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
@@ -635,7 +640,9 @@ def main() -> None:
             "（設定方法は docs/02_deploy.md の『tesla_config.json の設定』を参照）"
         )
     else:
-        serial: Optional[str] = read_serial(WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC)
+        serial: Optional[str] = read_serial(
+            WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+        )
         if serial is None:
             # 起動時点で読めなくても機能は無効化しない。LANやWC側の一時的な不調で
             # 恒久的に判定を諦めるのは過剰であり、毎サイクルの判定は独立して再試行される。
@@ -756,9 +763,9 @@ def main() -> None:
                             night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
                             night_status = str(night_charge_state.get("charging_state") or "")
                             prev_charging_status = night_status
-                            night_site: str = (
+                            night_site, night_site_reason = (
                                 classify_charging_site(night_charge_state)
-                                if night_status == STATUS_CHARGING else SITE_UNKNOWN
+                                if night_status == STATUS_CHARGING else (SITE_UNKNOWN, "")
                             )
                             if night_status == STATUS_CHARGING and night_site == SITE_AWAY:
                                 # 自宅のウォールコネクターに繋がっていない。利用者が意図した
@@ -774,8 +781,8 @@ def main() -> None:
                                 # 抑制せず毎サイクル出す。「意図して停止を見送っている」ことを
                                 # 利用者に見せ続ける（フル充電モードの継続通知と同じ扱い）。
                                 log_attention(
-                                    "夜間休止中に充電を検知しましたが、自宅のウォールコネクターに"
-                                    "接続されていないため、外出先での充電と判断して停止しません。"
+                                    f"夜間休止中に充電を検知しましたが、{night_site_reason}"
+                                    "外出先での充電と判断して停止しません。"
                                     f" [{describe_fast_charger(night_charge_state)}]"
                                 )
                             elif night_status == STATUS_CHARGING:
@@ -1003,10 +1010,11 @@ def main() -> None:
             # 無視して充電する」ことであり外出先では意味を持たない。従来はオーバーライド中も
             # set_charging_amps が送信されており、急速充電中の車両がこれをどう扱うかは
             # 未確認のままだった。この不確かな送信を残す利点がない。
-            if classify_charging_site(charge_state) == SITE_AWAY:
+            site, site_reason = classify_charging_site(charge_state)
+            if site == SITE_AWAY:
                 below_min_count = 0
                 log_attention(
-                    "自宅のウォールコネクターに接続されていないため、外出先での充電と判断し、"
+                    f"{site_reason}外出先での充電と判断し、"
                     "電流調整・停止・開始のいずれも行いません。"
                     f" [{describe_fast_charger(charge_state)}]"
                 )

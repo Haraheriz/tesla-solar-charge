@@ -522,9 +522,11 @@ GET http://<WALL_CONNECTOR_HOST>/api/1/vitals → vehicle_connected
 外出先と判断している間は、毎サイクル `ATTENTION` を出す。無言で見送ると「システムが動いていないのか、意図して見送っているのか」を区別できないため、抑制していない。
 
 ```text
-[ATTENTION] 夜間休止中に充電を検知しましたが、自宅のウォールコネクターに接続されていないため、外出先での充電と判断して停止しません。 [fast_charger_present=True fast_charger_type='Combo' fast_charger_brand='<invalid>' charger_power=90 conn_charge_cable='SAE']
+[ATTENTION] 夜間休止中に充電を検知しましたが、急速充電器での充電を検知したため、外出先での充電と判断して停止しません。 [fast_charger_present=True fast_charger_type='Tesla' fast_charger_brand='' charger_power=55 conn_charge_cable='SAE']
 [ATTENTION] 自宅のウォールコネクターに接続されていないため、外出先での充電と判断し、電流調整・停止・開始のいずれも行いません。 [fast_charger_present=False ...]
 ```
+
+**どちらの根拠で外出先と判断したかが文面に現れる。**根拠1（急速充電の検知）で確定した場合、自宅のウォールコネクターは読んでいない。2台目や来客のEVが接続中の場面で「接続されていないため」と記録すると事実と反するため、根拠ごとに文面を変えている。
 
 **行末の角括弧には、急速充電フィールドの実値を毎回書き出している。**これらの値は未検証であり（前述）、判定が働いた場面で記録しておかないと、フォールバックが正しく効くかを後から検証する手段が無い。2026-08-10、テンフィールズファクトリーのFLASHで充電した際、これらの値がログに残っておらず実機データを取り逃した。外出先での充電後は、この行を確認して値を蓄積すること。
 
