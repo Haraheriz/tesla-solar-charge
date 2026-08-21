@@ -856,9 +856,9 @@ def test_起動後に余剰を測り直してから開始を判断する(run_loo
     res = run_loop(
         world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
         start="2026-08-09 11:46:00",
-        budget_sec=300,
-        # 1回目（起動の判断）は余剰1202W、2回目（起動後の判断）は買電500W
-        house_power=[-1202, 500],
+        budget_sec=600,
+        # 1・2回目で起動を判断（デバウンス）、3回目（起動後の判断）は買電500W
+        house_power=[-1202, -1202, 500],
     )
     assert res.count("wake_up") == 1, "開始閾値を超えているので起動自体は行う"
     assert res.count("charge_start") == 0, "余剰が消えているのに充電を開始している"
@@ -870,8 +870,8 @@ def test_起動後の再測定に失敗したら充電を開始しない(run_loo
     res = run_loop(
         world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
         start="2026-08-09 11:46:00",
-        budget_sec=300,
-        house_power=[-1202, None],
+        budget_sec=600,
+        house_power=[-1202, -1202, None],
     )
     assert res.count("charge_start") == 0
     assert res.has_log("起動後の余剰再測定に失敗しました", level="WARNING")
@@ -882,12 +882,55 @@ def test_余剰が続いていれば起動後も充電を開始する(run_loop):
     res = run_loop(
         world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
         start="2026-08-09 11:46:00",
-        budget_sec=120,
-        house_power=[-1202, -1300],
+        budget_sec=400,
+        house_power=[-1202, -1202, -1300],
     )
     assert res.count("wake_up") == 1
     assert res.count("charge_start") == 1
     assert res.world["charging_state"] == "Charging"
+
+
+def test_一過性の余剰では就寝中の車を起こさない(run_loop):
+    """開始閾値の超過は58%が2分以内に終息する（2026-08-09〜18、81区間中47件）。
+
+    1サンプルで起こすと、消えた余剰のために最も単価の高いコマンド（¥2.75）を
+    費やすことになる。2026-08-13 12:42、余剰2236Wで起動したが12:47には1198Wへ
+    落ちており、充電を開始できないままウェイクだけが無駄になった。
+    """
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-13 12:42:00",
+        budget_sec=600,
+        # 1回目だけ余剰があり、次のサイクルでは消えている
+        house_power=[-2236, 500],
+    )
+    assert res.count("wake_up") == 0, "一過性の余剰で車両を起こしている"
+    assert res.has_log("次のサイクルでも続いていれば車両を起動します")
+
+
+def test_オーバーライド中はデバウンスせずに起こす(run_loop):
+    """利用者が意図して起こしている。余剰の継続を待つ理由がない。"""
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-13 12:42:00",
+        budget_sec=300,
+        override=True,
+    )
+    assert res.count("wake_up") == 1
+
+
+def test_平滑化のサンプル数は1である(run_loop):
+    """スマートメーターの更新間隔は中央値61秒で、20秒の窓は同じ値を3回平均していた。
+
+    窓を広げる案は採れない。複数の更新をまたぐには120〜180秒を要し、制御サイクル
+    （180秒）のほぼ全部を占めるため。値を戻すなら、この前提から検討し直すこと。
+    """
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 15:00:00",
+        budget_sec=60,
+    )
+    assert res.module.REMO_SAMPLES == 1
 
 
 def test_余剰不足はデバウンスしてから停止する(run_loop):
