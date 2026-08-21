@@ -908,6 +908,34 @@ def test_一過性の余剰では就寝中の車を起こさない(run_loop):
     assert res.has_log("次のサイクルでも続いていれば車両を起動します")
 
 
+def test_余剰の観測が途切れたら連続回数を数え直す(run_loop):
+    """「2サイクル連続」は本当に連続でなければならない。
+
+    かつては continue する経路の多くがカウンタをリセットしておらず、
+    1時間前の1回と新しい1回が合算されて連続とみなされる余地があった。
+    それではこのデバウンスが防ごうとしている一過性のウェイクが別経路で再発する。
+    """
+    def interrupt_middle_cycle(elapsed, world):
+        # 2サイクル目だけ、車両が自発的にオンラインになり充電開始処理中だったとする
+        if 100 <= elapsed < 300:
+            world["vehicle_state"] = "online"
+            world["charging_state"] = "Starting"
+        else:
+            world["vehicle_state"] = "asleep"
+            world["charging_state"] = "Stopped"
+
+    res = run_loop(
+        world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},
+        start="2026-08-13 12:00:00",
+        budget_sec=500,
+        house_power=-3000,
+        on_poll=interrupt_middle_cycle,
+    )
+    assert res.count("wake_up") == 0, "途切れた観測を合算して起こしている"
+    # 3サイクル目も「1/2回目」であること（2回目に進んでいない）
+    assert len([m for m in res.messages() if "1/2回目）。一過性" in m]) == 2
+
+
 def test_オーバーライド中はデバウンスせずに起こす(run_loop):
     """利用者が意図して起こしている。余剰の継続を待つ理由がない。"""
     res = run_loop(

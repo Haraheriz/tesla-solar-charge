@@ -248,7 +248,11 @@ def get_remo_power() -> Optional[int]:
     return None
 
 def get_remo_power_smoothed() -> Optional[int]:
-    """瞬時値を複数回サンプリングして平均する。取得できた分だけで平均し、全滅ならNone。"""
+    """瞬時値を REMO_SAMPLES 回サンプリングして平均する。全滅なら None。
+
+    既定は1回（単発取得）である。スマートメーターの更新間隔が中央値61秒であり、
+    10秒間隔で複数回読んでも同じ値が返るため（REMO_SAMPLES の定義を参照）。
+    """
     readings: list = []
     for i in range(REMO_SAMPLES):
         if i > 0:
@@ -719,6 +723,16 @@ def main() -> None:
         now = time.localtime()
         manual_override, override_updated_at = read_override_state()
 
+        # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
+        # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
+        # 直前の値を引き継ぐ。
+        #
+        # continue する経路を列挙してリセットを書き足す方式は採らない。この関数には
+        # 早期 continue が10箇所以上あり、経路が増えたときに漏れる。実際、抑止中・
+        # ケーブル未接続・終端ステータス・不明ステータスの4経路が漏れており、
+        # 1時間前の1回と新しい1回が合算されて「2サイクル連続」と誤認しえた。
+        wake_surplus_streak, wake_surplus_count = wake_surplus_count, 0
+
         if not manual_override and not FORCE_RUN and not (7 <= now.tm_hour < 18):
             logger.info("--- 定期チェック開始 ---")
             logger.info(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
@@ -937,16 +951,15 @@ def main() -> None:
                     continue
 
                 if not manual_override and house_power >= -(START_AMPS * 200):
-                    wake_surplus_count = 0
                     logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * 200}W）未満のため、このまま寝かせます。")
                     time.sleep(180)
                     continue
-                elif not manual_override and wake_surplus_count + 1 < WAKE_DEBOUNCE_CYCLES:
+                elif not manual_override and wake_surplus_streak + 1 < WAKE_DEBOUNCE_CYCLES:
                     # 一過性の余剰でウェイクを費やさない。開始閾値の超過は58%が2分以内に
                     # 終息するため、1サンプルで起こすと消えた余剰のために最も高い
                     # コマンドを送ることになる（2026-08-13 12:42 に実際に起きた）。
                     # オーバーライド中は利用者が意図して起こしているので待たない。
-                    wake_surplus_count += 1
+                    wake_surplus_count = wake_surplus_streak + 1
                     logger.info(
                         f"開始閾値以上の余剰を検知しました（{wake_surplus_count}/{WAKE_DEBOUNCE_CYCLES}回目）。"
                         "一過性の可能性があるため、次のサイクルでも続いていれば車両を起動します。"
@@ -954,7 +967,6 @@ def main() -> None:
                     time.sleep(180)
                     continue
                 else:
-                    wake_surplus_count = 0
                     if manual_override:
                         logger.info("マニュアル・オーバーライドのため、車両を起動します。")
                     else:
@@ -1056,8 +1068,6 @@ def main() -> None:
                 continue
 
             skip_wake_until = 0.0
-            # 車両が起きて通常の制御に入った。就寝中に数えた連続回数は持ち越さない。
-            wake_surplus_count = 0
 
             # ここは charging_status が Charging か Stopped に絞り込まれた後であり、
             # この1点で電流の絞り込み・デバウンス停止・電流変更・充電開始の4経路すべてを塞げる。
