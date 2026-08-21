@@ -81,10 +81,29 @@ START_AMPS: int = int(config.get("START_AMPS", MIN_AMPS + 2))
 # 停止判定のデバウンス回数。余剰不足がこの回数連続したときだけ充電を停止する。
 STOP_DEBOUNCE_CYCLES: int = int(config.get("STOP_DEBOUNCE_CYCLES", 2))
 
-# Remo E瞬時電力の平滑化（1サイクル内のサンプル数と間隔秒）。
-# 冷蔵庫・雲などによる±数百Wの揺れをならして誤判定を減らす。
-REMO_SAMPLES: int = 3
-REMO_SAMPLE_INTERVAL_SEC: int = 10
+# Remo E瞬時電力のサンプル数と間隔秒。
+#
+# 1 にしてある。平滑化のつもりで3回×10秒（20秒の窓）で平均していたが、
+# 2026-08-09〜18 の12,055回の観測で、スマートメーターの更新間隔は中央値61秒
+# （95%が60秒）と確定した。20秒の窓は大半が1回の更新に収まり、同じ値を3回
+# 平均しているにすぎない。情報は増えず、1サイクルにつき20秒とAPI 2回分を
+# 費やしていた。
+#
+# 窓を広げる案は採れない。複数の更新をまたぐには120〜180秒を要し、
+# 制御サイクル（180秒）のほぼ全部を占める。平滑化が要るなら、サイクルを
+# またいで直近N回の値を使う別の設計にすること。
+REMO_SAMPLES: int = int(config.get("REMO_SAMPLES", 1))
+REMO_SAMPLE_INTERVAL_SEC: int = int(config.get("REMO_SAMPLE_INTERVAL_SEC", 10))
+
+# 就寝中の車両を起こす判断に要求する、余剰が開始閾値以上だった連続サイクル数。
+#
+# 開始閾値を超えた余剰の58%は2分以内に終息する（2026-08-09〜18、81区間中47件）。
+# 1サンプルで起こすと、消えた余剰のためにウェイク（¥2.75、最も単価が高い）を
+# 費やすことになる。2026-08-13 12:42 に実際にそうなった。
+#
+# 既に online の車の充電開始は遅らせない。そちらの誤発火は約¥0.3であり、
+# 3分の遅れと引き合わない。
+WAKE_DEBOUNCE_CYCLES: int = int(config.get("WAKE_DEBOUNCE_CYCLES", 2))
 
 # 充電コマンド（charge_start / charge_stop / set_charging_amps）のリトライ回数。
 # Tesla APIは車両が通信圏外・スリープ移行中などで HTTP 408 や result=false を頻繁に返すため、
@@ -229,7 +248,11 @@ def get_remo_power() -> Optional[int]:
     return None
 
 def get_remo_power_smoothed() -> Optional[int]:
-    """瞬時値を複数回サンプリングして平均する。取得できた分だけで平均し、全滅ならNone。"""
+    """瞬時値を REMO_SAMPLES 回サンプリングして平均する。全滅なら None。
+
+    既定は1回（単発取得）である。スマートメーターの更新間隔が中央値61秒であり、
+    10秒間隔で複数回読んでも同じ値が返るため（REMO_SAMPLES の定義を参照）。
+    """
     readings: list = []
     for i in range(REMO_SAMPLES):
         if i > 0:
@@ -671,6 +694,8 @@ def main() -> None:
         logger.warning("サイクルごとに画面で仮想の家庭消費電力（W）を入力できます（空Enterで実測値を使用）。")
 
     below_min_count: int = 0  # 停止デバウンス用：余剰不足が連続したサイクル数
+    # ウェイク判断のデバウンス用：余剰が開始閾値以上だった連続サイクル数
+    wake_surplus_count: int = 0
     # 夜間休止中、「充電していない」ことを確認できなかった連続回数。
     # 確認できた時点で0に戻すため、通信が正常な夜は上限に達しない。
     night_stop_failures: int = 0
@@ -697,6 +722,16 @@ def main() -> None:
     while True:
         now = time.localtime()
         manual_override, override_updated_at = read_override_state()
+
+        # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
+        # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
+        # 直前の値を引き継ぐ。
+        #
+        # continue する経路を列挙してリセットを書き足す方式は採らない。この関数には
+        # 早期 continue が10箇所以上あり、経路が増えたときに漏れる。実際、抑止中・
+        # ケーブル未接続・終端ステータス・不明ステータスの4経路が漏れており、
+        # 1時間前の1回と新しい1回が合算されて「2サイクル連続」と誤認しえた。
+        wake_surplus_streak, wake_surplus_count = wake_surplus_count, 0
 
         if not manual_override and not FORCE_RUN and not (7 <= now.tm_hour < 18):
             logger.info("--- 定期チェック開始 ---")
@@ -917,6 +952,18 @@ def main() -> None:
 
                 if not manual_override and house_power >= -(START_AMPS * 200):
                     logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * 200}W）未満のため、このまま寝かせます。")
+                    time.sleep(180)
+                    continue
+                elif not manual_override and wake_surplus_streak + 1 < WAKE_DEBOUNCE_CYCLES:
+                    # 一過性の余剰でウェイクを費やさない。開始閾値の超過は58%が2分以内に
+                    # 終息するため、1サンプルで起こすと消えた余剰のために最も高い
+                    # コマンドを送ることになる（2026-08-13 12:42 に実際に起きた）。
+                    # オーバーライド中は利用者が意図して起こしているので待たない。
+                    wake_surplus_count = wake_surplus_streak + 1
+                    logger.info(
+                        f"開始閾値以上の余剰を検知しました（{wake_surplus_count}/{WAKE_DEBOUNCE_CYCLES}回目）。"
+                        "一過性の可能性があるため、次のサイクルでも続いていれば車両を起動します。"
+                    )
                     time.sleep(180)
                     continue
                 else:
