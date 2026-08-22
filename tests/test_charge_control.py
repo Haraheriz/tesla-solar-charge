@@ -1221,6 +1221,85 @@ def test_夜間は太陽光追従モードで動かない(run_loop):
 # 補助関数
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 設定値の検証（起動時に1か所で行う）
+# ---------------------------------------------------------------------------
+
+def test_下限を下回る設定は既定値へ戻して知らせる(run_loop):
+    """REMO_SAMPLES に 0 を書くと、以前は1回も測定せず制御が無言で止まっていた。
+
+    使う側の関数に保険が無かったためで、症状はログに何も出ない「動いているのに
+    何もしない」状態だった。既定値へ戻したうえで、戻したことを必ず残す。
+    """
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"REMO_SAMPLES": 0},
+    )
+    assert res.has_log("設定 REMO_SAMPLES", level="ATTENTION")
+    assert res.module.REMO_SAMPLES == 1
+    # 既定値で動いているので、制御そのものは通常どおり行われる。
+    assert res.count("set_charging_amps") >= 1
+
+
+def test_数値として読めない設定も既定値へ戻す(run_loop):
+    """以前は import 時に ValueError で落ち、systemd の再起動ループになっていた。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"COMMAND_RETRIES": "three"},
+    )
+    assert res.has_log("設定 COMMAND_RETRIES", level="ATTENTION")
+    assert res.module.COMMAND_RETRIES == 3
+
+
+@pytest.mark.parametrize("key", ["STOP_DEBOUNCE_CYCLES", "WAKE_DEBOUNCE_CYCLES"])
+def test_0を無効の意味で使えるキーは戻さない(run_loop, key):
+    """このキーに限り 0 は「デバウンスしない」という有効な指定である。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={key: 0},
+    )
+    assert not res.has_log(f"設定 {key}", level="ATTENTION")
+    assert getattr(res.module, key) == 0
+
+
+def test_キーどうしの関係も検査する(run_loop):
+    """個々の下限では表せない関係。コメントに書かれているだけで強制されていなかった。
+
+    抑止期間が待機間隔以下だと、待機明けにちょうど期限切れになり抑止が一度も効かない。
+    """
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Complete", "amps": 48},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"TERMINAL_BACKOFF_SEC": 600, "TERMINAL_WAKE_SUPPRESS_SEC": 600},
+    )
+    assert res.has_log("TERMINAL_WAKE_SUPPRESS_SEC", level="ATTENTION")
+    assert res.module.TERMINAL_WAKE_SUPPRESS_SEC > res.module.TERMINAL_BACKOFF_SEC
+
+
+def test_開始閾値が停止閾値以下なら引き上げる(run_loop):
+    """閾値が1本になると開始→即停止の発振が起きる。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Stopped", "amps": 4},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"MIN_AMPS": 4, "START_AMPS": 4},
+    )
+    assert res.has_log("設定 START_AMPS", level="ATTENTION")
+    assert res.module.START_AMPS > res.module.MIN_AMPS
+
+
 def test_format_duration(run_loop, tmp_path):
     res = run_loop(
         world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 4},

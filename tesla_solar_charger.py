@@ -10,6 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
+from config_loader import Settings
 from override_state import read_away_probe_state, read_override_state, write_override
 from wall_connector import (
     WC_DELIVERING,
@@ -78,16 +79,20 @@ CLIENT_ID: str = str(config.get("CLIENT_ID", ""))
 CLIENT_SECRET: str = str(config.get("CLIENT_SECRET", ""))
 DOMAIN: str = str(config.get("DOMAIN", "localhost:8000"))
 
-MIN_AMPS: int = int(config.get("MIN_AMPS", 4))
-MAX_AMPS: int = int(config.get("MAX_AMPS", 48))
+settings = Settings(config, log_attention)
+
+MIN_AMPS: int = settings.integer("MIN_AMPS", 4, minimum=1)
+MAX_AMPS: int = settings.integer("MAX_AMPS", 48, minimum=1)
 
 # ヒステリシス用の開始閾値。充電開始・車両起動はSTART_AMPS以上の余剰を要求し、
 # 停止判定はMIN_AMPS未満で行う。開始直後は車両自身の消費で余剰が減るため、
 # 閾値が1本だと開始→即停止の発振が起きる。
-START_AMPS: int = int(config.get("START_AMPS", MIN_AMPS + 2))
+START_AMPS: int = settings.integer("START_AMPS", MIN_AMPS + 2, minimum=1)
 
 # 停止判定のデバウンス回数。余剰不足がこの回数連続したときだけ充電を停止する。
-STOP_DEBOUNCE_CYCLES: int = int(config.get("STOP_DEBOUNCE_CYCLES", 2))
+# 0 はデバウンスなし（1サイクルで停止）を意味する。値域の中の1値に「無効」の意味を
+# 載せているため、下限を 0 にしてよいキーであることをここに明記しておく。
+STOP_DEBOUNCE_CYCLES: int = settings.integer("STOP_DEBOUNCE_CYCLES", 2, minimum=0)
 
 # Remo E瞬時電力のサンプル数と間隔秒。
 #
@@ -100,8 +105,8 @@ STOP_DEBOUNCE_CYCLES: int = int(config.get("STOP_DEBOUNCE_CYCLES", 2))
 # 窓を広げる案は採れない。複数の更新をまたぐには120〜180秒を要し、
 # 制御サイクル（180秒）のほぼ全部を占める。平滑化が要るなら、サイクルを
 # またいで直近N回の値を使う別の設計にすること。
-REMO_SAMPLES: int = int(config.get("REMO_SAMPLES", 1))
-REMO_SAMPLE_INTERVAL_SEC: int = int(config.get("REMO_SAMPLE_INTERVAL_SEC", 10))
+REMO_SAMPLES: int = settings.integer("REMO_SAMPLES", 1, minimum=1)
+REMO_SAMPLE_INTERVAL_SEC: int = settings.integer("REMO_SAMPLE_INTERVAL_SEC", 10, minimum=1)
 
 # 就寝中の車両を起こす判断に要求する、余剰が開始閾値以上だった連続サイクル数。
 #
@@ -111,40 +116,41 @@ REMO_SAMPLE_INTERVAL_SEC: int = int(config.get("REMO_SAMPLE_INTERVAL_SEC", 10))
 #
 # 既に online の車の充電開始は遅らせない。そちらの誤発火は約¥0.3であり、
 # 3分の遅れと引き合わない。
-WAKE_DEBOUNCE_CYCLES: int = int(config.get("WAKE_DEBOUNCE_CYCLES", 2))
+# 0 はデバウンスなし（1サイクルで起こす）を意味する。STOP_DEBOUNCE_CYCLES と同様。
+WAKE_DEBOUNCE_CYCLES: int = settings.integer("WAKE_DEBOUNCE_CYCLES", 2, minimum=0)
 
 # 充電コマンド（charge_start / charge_stop / set_charging_amps）のリトライ回数。
 # Tesla APIは車両が通信圏外・スリープ移行中などで HTTP 408 や result=false を頻繁に返すため、
 # 「投げっぱなしで成功したことにする」と停止漏れがそのまま夜通しの系統充電になる。
-COMMAND_RETRIES: int = int(config.get("COMMAND_RETRIES", 3))
+COMMAND_RETRIES: int = settings.integer("COMMAND_RETRIES", 3, minimum=1)
 
 # 満充電・ケーブル未接続などの「終端ステータス」を観測したあと、次のサイクルまでの待機秒。
-TERMINAL_BACKOFF_SEC: int = int(config.get("TERMINAL_BACKOFF_SEC", 600))
+TERMINAL_BACKOFF_SEC: int = settings.integer("TERMINAL_BACKOFF_SEC", 600, minimum=1)
 
 # 終端ステータスを観測してから、就寝中の車両をWake Upしてよいと再び判断するまでの秒数。
 # 必ず TERMINAL_BACKOFF_SEC より十分長くすること。同じ値にすると、待機明けの時点で
 # ちょうど期限切れになり抑止が一度も効かない（満充電の車を延々と叩き起こす）。
 # 満充電・ケーブル未接続が解消されるとき（乗車・充電上限の変更・ケーブル接続）は
 # 車両が自分からオンラインになるため、その場合は待たずに通常の問い合わせ経路に入る。
-TERMINAL_WAKE_SUPPRESS_SEC: int = int(config.get("TERMINAL_WAKE_SUPPRESS_SEC", 3600))
+TERMINAL_WAKE_SUPPRESS_SEC: int = settings.integer("TERMINAL_WAKE_SUPPRESS_SEC", 3600, minimum=1)
 
 # 夜間休止に入る際の充電停止確認を、成功するまで再試行する上限回数（1回=10分間隔）。
 # 無制限に再試行するとAPIレートリミット(429)を誘発するため上限を設ける。
-NIGHT_STOP_MAX_ATTEMPTS: int = int(config.get("NIGHT_STOP_MAX_ATTEMPTS", 6))
+NIGHT_STOP_MAX_ATTEMPTS: int = settings.integer("NIGHT_STOP_MAX_ATTEMPTS", 6, minimum=1)
 
 # 夜間休止中のGETを、通信エラー・5xxのときに即座に試行する回数（1回目を含む）。
 # 巡回間隔（10分）を待たずにその場で取り直すためのもの。
-NIGHT_GET_ATTEMPTS: int = int(config.get("NIGHT_GET_ATTEMPTS", 2))
+NIGHT_GET_ATTEMPTS: int = settings.integer("NIGHT_GET_ATTEMPTS", 2, minimum=1)
 
 # 自宅のTesla Wall Connector (Gen 3) のIPアドレス。空なら外出先判定を行わない
 # （設定していない環境では全経路が従来どおりの動作になる）。
 # DHCPでアドレスが変わると判定不能に落ちるため、ルーター側でIPを予約すること。
 WALL_CONNECTOR_HOST: str = str(config.get("WALL_CONNECTOR_HOST", ""))
-WALL_CONNECTOR_TIMEOUT_SEC: float = float(config.get("WALL_CONNECTOR_TIMEOUT_SEC", 5))
+WALL_CONNECTOR_TIMEOUT_SEC: float = settings.number("WALL_CONNECTOR_TIMEOUT_SEC", 5, minimum=0.1)
 
 # ウォールコネクターを読めなかったときに、その場で取り直す回数（1回目を含む）。
 # 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
-WALL_CONNECTOR_ATTEMPTS: int = int(config.get("WALL_CONNECTOR_ATTEMPTS", 2))
+WALL_CONNECTOR_ATTEMPTS: int = settings.integer("WALL_CONNECTOR_ATTEMPTS", 2, minimum=1)
 
 # 「外出先の充電記録」が有効なとき、ケーブル未接続の車両データを読み直す間隔（秒）。
 #
@@ -160,7 +166,7 @@ WALL_CONNECTOR_ATTEMPTS: int = int(config.get("WALL_CONNECTOR_ATTEMPTS", 2))
 # 出発の直前や充電器の前では変更できないからである。
 #
 # ここが決めるのは有効時の間隔だけである。0以下は指定できない（無効化はフラグ側が担う）。
-DISCONNECTED_PROBE_INTERVAL_SEC: int = int(config.get("DISCONNECTED_PROBE_INTERVAL_SEC", 600))
+DISCONNECTED_PROBE_INTERVAL_SEC: int = settings.integer("DISCONNECTED_PROBE_INTERVAL_SEC", 600, minimum=1)
 
 # 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
 WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
@@ -168,7 +174,37 @@ WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 # ウォールコネクターを読めなかったときのフォールバック閾値（kW）。
 # 自宅の上限は MAX_AMPS(48A) × 200V = 9.6kW であり、これを超える給電は
 # 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
-FAST_CHARGER_POWER_KW: float = float(config.get("FAST_CHARGER_POWER_KW", 15))
+FAST_CHARGER_POWER_KW: float = settings.number("FAST_CHARGER_POWER_KW", 15, minimum=1)
+
+# キーどうしの関係は、個々の下限では表せない。以下はいずれもコメントとして
+# 書かれていながら強制されておらず、破ったときの症状が分かりにくいものである。
+if MAX_AMPS < MIN_AMPS:
+    log_attention(
+        f"設定 MAX_AMPS（{MAX_AMPS}）が MIN_AMPS（{MIN_AMPS}）を下回っています。"
+        f"MAX_AMPS を {MIN_AMPS} として起動します。"
+    )
+    MAX_AMPS = MIN_AMPS
+
+if START_AMPS <= MIN_AMPS:
+    # 開始と停止の閾値が同じだと、開始した直後に車両自身の消費で余剰が減り、
+    # 開始→即停止の発振が起きる（START_AMPS の定義を参照）。
+    log_attention(
+        f"設定 START_AMPS（{START_AMPS}）が MIN_AMPS（{MIN_AMPS}）以下です。"
+        "開始と停止の閾値が重なると発振するため、"
+        f"START_AMPS を {MIN_AMPS + 2} として起動します。"
+    )
+    START_AMPS = MIN_AMPS + 2
+
+if TERMINAL_WAKE_SUPPRESS_SEC <= TERMINAL_BACKOFF_SEC:
+    # 同じ値にすると、待機明けの時点でちょうど期限切れになり抑止が一度も効かない
+    # （満充電の車を延々と起こす。TERMINAL_WAKE_SUPPRESS_SEC の定義を参照）。
+    log_attention(
+        f"設定 TERMINAL_WAKE_SUPPRESS_SEC（{TERMINAL_WAKE_SUPPRESS_SEC}）が "
+        f"TERMINAL_BACKOFF_SEC（{TERMINAL_BACKOFF_SEC}）以下です。"
+        "この関係では車両を起こさない抑止が一度も効かないため、"
+        f"{TERMINAL_BACKOFF_SEC * 6} として起動します。"
+    )
+    TERMINAL_WAKE_SUPPRESS_SEC = TERMINAL_BACKOFF_SEC * 6
 
 # 充電している場所の判定結果。「自宅である」という値は持たない。
 # 自宅の充電器に何かが繋がっていることは分かっても、それが制御対象の車である保証が
@@ -473,7 +509,8 @@ def night_proxy_get(url: str, headers: Dict[str, str]) -> Any:
     加えて500未満は課金対象であり、無駄な再試行は費用に直結する
     （`docs/01_architecture.md` 第3章③）。
     """
-    attempts: int = max(1, NIGHT_GET_ATTEMPTS)
+    # 下限は Settings が保証している（config_loader.py）。ここでは再検査しない。
+    attempts: int = NIGHT_GET_ATTEMPTS
     for attempt in range(1, attempts + 1):
         is_last: bool = attempt == attempts
         try:

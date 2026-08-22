@@ -9,6 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Any, Dict
 
+from config_loader import Settings
 from override_state import read_away_probe, read_override, write_away_probe, write_override
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -40,7 +41,13 @@ if not os.path.exists(CONFIG_FILE):
 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
     config: Dict[str, Any] = json.load(f)
 
-CONTROL_PORT: int = int(config.get("CONTROL_PORT", 8090))
+# 数値の設定は充電制御側と同じ入口を通す。片方だけ素の config.get に戻ると、
+# 「設定を読む場所は1か所」という前提がまた崩れる。
+settings = Settings(config, logger.warning)
+
+# 0 は「OSに空きポートを割り当てさせる」を意味してしまい、
+# スマホのホーム画面から開けなくなる。下限を1にする。
+CONTROL_PORT: int = settings.integer("CONTROL_PORT", 8090, minimum=1)
 CONTROL_TOKEN: str = str(config.get("CONTROL_TOKEN", ""))
 
 if not CONTROL_TOKEN:

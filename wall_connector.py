@@ -86,7 +86,10 @@ def _get_json(host: str, path: str, timeout: float, attempts: int = 2) -> Option
     """
     global retry_saved_count
 
-    for attempt in range(1, max(attempts, 1) + 1):
+    # attempts の下限は呼び出し側が保証する（tesla_solar_charger.py の Settings）。
+    # ここで max() で丸め直さない。丸めると、設定が効いていないことが誰にも見えなくなる。
+    # 0 以下を渡された場合は1回も読まず、判定不能（WC_UNKNOWN）へ落ちる。
+    for attempt in range(1, attempts + 1):
         data = _get_json_once(host, path, timeout)
         if data is not None:
             if attempt > 1:

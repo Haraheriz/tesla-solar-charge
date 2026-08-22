@@ -15,6 +15,7 @@ tesla_solar_charger.main() は本来「無限ループ・実API・実時間」�
 """
 import importlib.util
 import itertools
+import json
 import logging
 import os
 import time as real_time
@@ -277,7 +278,7 @@ class Result:
         return self.commands[len(self.commands) - self.commands[::-1].index(command):]
 
 
-def _load_module(tmp_path):
+def _load_module(tmp_path, config_overrides=None):
     """tesla_solar_charger を、設定・ログ・トークンをテスト用に向けて読み込む。
 
     ログはRotatingFileHandlerが相対パスで開くため、import前にtmpへchdirしておく。
@@ -291,7 +292,16 @@ def _load_module(tmp_path):
     tesla_tokens.json は .gitignore 済みなので開発機には在ってもCIには無い。
     ここで tmp 上のダミーを指しておかないと、ローカルだけ通ってCIでハングする。
     """
-    os.environ["TESLA_CONFIG_PATH"] = CI_CONFIG
+    if config_overrides:
+        # 設定値ごとの起動時挙動を見るために、CI用の設定へ差分を当てた一時ファイルを作る。
+        with open(CI_CONFIG, encoding="utf-8") as f:
+            merged = json.load(f)
+        merged.update(config_overrides)
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+        os.environ["TESLA_CONFIG_PATH"] = str(config_path)
+    else:
+        os.environ["TESLA_CONFIG_PATH"] = CI_CONFIG
 
     token_file = tmp_path / "tesla_tokens.json"
     token_file.write_text(
@@ -330,8 +340,17 @@ def run_loop(tmp_path):
     """
 
     def _run(world, start, budget_sec, override=False, house_power=-3000, on_poll=None,
-             wall_connector_host=None, wall_connector_serial=None):
-        module = _load_module(tmp_path)
+             wall_connector_host=None, wall_connector_serial=None, config_overrides=None):
+        # 設定の検証は import 時に走る。モジュール読み込みより後にハンドラーを付けると
+        # その行を取り逃すため、先にルートロガーへ付けておく（SolarCharger ロガーは
+        # 既定で propagate するので、ルートに付けた時点で拾える）。
+        capture = CapturingHandler()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(capture)
+        try:
+            module = _load_module(tmp_path, config_overrides)
+        finally:
+            root_logger.removeHandler(capture)
 
         # ci_config.json の値を上書きする。空文字を渡すと外出先判定そのものが無効になる。
         if wall_connector_host is not None:
@@ -341,7 +360,6 @@ def run_loop(tmp_path):
 
         for handler in list(module.logger.handlers):
             module.logger.removeHandler(handler)
-        capture = CapturingHandler()
         module.logger.addHandler(capture)
         module.logger.setLevel(logging.INFO)
 
