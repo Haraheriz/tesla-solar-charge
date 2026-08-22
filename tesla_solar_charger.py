@@ -18,6 +18,7 @@ from wall_connector import (
     read_delivering,
     read_serial,
     read_vehicle_connected,
+    take_retry_saved,
 )
 
 # Windows環境での標準出力のエンコーディング問題を解決
@@ -521,6 +522,7 @@ def read_wall_connector() -> str:
     state: str = read_vehicle_connected(
         WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
     )
+    report_wall_connector_retries()
     if state != wall_connector_last_state:
         if state == WC_UNKNOWN:
             logger.warning(
@@ -531,6 +533,24 @@ def read_wall_connector() -> str:
             logger.info("自宅ウォールコネクターの読み取りが回復しました。")
         wall_connector_last_state = state
     return state
+
+
+def report_wall_connector_retries() -> None:
+    """1回目の読み取りに失敗し、取り直しで復帰した回数をログへ出す。
+
+    PR #21 で attempts=2 の再試行を入れて以降、1回目の失敗はどこにも現れなくなった。
+    その再試行の根拠は「2026-08-11〜18 に読み取り失敗が週4回」という実測であり、
+    黙って救い続けると、悪化に気づけるのは「2回とも失敗する」ようになってからになる。
+
+    読み取りを行う経路すべてから、その直後に呼ぶこと。カウンタはモジュール共有で、
+    どこかで読み捨てるとその分の失敗が消える。
+    """
+    saved: int = take_retry_saved()
+    if saved:
+        logger.warning(
+            f"自宅ウォールコネクターの1回目の読み取りに失敗し、その場の取り直しで復帰しました（{saved}回）。"
+            "頻度が上がるようならLANまたはウォールコネクター側を確認してください。"
+        )
 
 
 def home_charger_delivering() -> bool:
@@ -544,6 +564,7 @@ def home_charger_delivering() -> bool:
     state: str = read_delivering(
         WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
     )
+    report_wall_connector_retries()
     return state == WC_DELIVERING
 
 
@@ -702,6 +723,7 @@ def main() -> None:
         serial: Optional[str] = read_serial(
             WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
         )
+        report_wall_connector_retries()
         if serial is None:
             # 起動時点で読めなくても機能は無効化しない。LANやWC側の一時的な不調で
             # 恒久的に判定を諦めるのは過剰であり、毎サイクルの判定は独立して再試行される。

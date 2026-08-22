@@ -354,6 +354,9 @@ def run_loop(tmp_path):
         # セッションを差し替えれば判定ロジック本体は本物が動く。
         wc_session = FakeWCSession(world)
         wall_connector.wc_session = wc_session
+        # 取り直し回数はモジュール共有のカウンタである。前のテストの分を持ち越すと
+        # 「取り直しで復帰した」ログが別のテストで出てしまう。
+        wall_connector.retry_saved_count = 0
 
         start_epoch = real_time.mktime(real_time.strptime(start, "%Y-%m-%d %H:%M:%S"))
         module.time = FakeTime(start_epoch, budget_sec)

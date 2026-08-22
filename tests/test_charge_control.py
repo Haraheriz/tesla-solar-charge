@@ -623,6 +623,37 @@ def test_ウォールコネクターの単発の読み取り失敗はその場�
     assert not res.has_log("読み取れなくなりました", level="WARNING")
 
 
+def test_取り直しで復帰したことを記録する(run_loop):
+    """再試行が1回目の失敗を隠したままにしないこと。
+
+    PR #21 の根拠は「2026-08-11〜18 に読み取り失敗が週4回」という実測だった。
+    黙って救い続けると、悪化に気づけるのは「2回とも失敗する」ようになってからになる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+            "wc_fail_first": 1,
+        },
+        start="2026-08-18 20:00:00",
+        budget_sec=1200,
+    )
+    assert res.has_log("その場の取り直しで復帰しました", level="WARNING")
+
+
+def test_取り直しが不要なら何も記録しない(run_loop):
+    """正常時に週何行も増やさないこと。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-18 20:00:00",
+        budget_sec=1200,
+    )
+    assert not res.has_log("その場の取り直しで復帰しました")
+
+
 def test_ケーブル未接続なら就寝中の車を起こさない(run_loop):
     """2026-08-12 の再現。ケーブル未接続の車を約71分ごとに13回起動していた（約¥36）。
 
