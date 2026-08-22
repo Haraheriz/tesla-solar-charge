@@ -11,7 +11,14 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from override_state import read_override_state, write_override
-from wall_connector import WC_NOT_CONNECTED, WC_UNKNOWN, read_serial, read_vehicle_connected
+from wall_connector import (
+    WC_DELIVERING,
+    WC_NOT_CONNECTED,
+    WC_UNKNOWN,
+    read_delivering,
+    read_serial,
+    read_vehicle_connected,
+)
 
 # Windows環境での標準出力のエンコーディング問題を解決
 if hasattr(sys.stdout, "reconfigure"):
@@ -511,6 +518,20 @@ def read_wall_connector() -> str:
     return state
 
 
+def home_charger_delivering() -> bool:
+    """自宅の充電器がいま給電しているか。判定できなければ False を返す。
+
+    False に倒すのは、判断できないときに従来の挙動を変えないためである。
+    この関数は待機の長さを短くしてよいかの判断にしか使わない。
+    """
+    if not WALL_CONNECTOR_HOST or not wall_connector_available:
+        return False
+    state: str = read_delivering(
+        WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+    )
+    return state == WC_DELIVERING
+
+
 def classify_charging_site(charge_state: Dict[str, Any]) -> Tuple[str, str]:
     """外出先での充電だと断定できるかを、判定と理由の組で返す。
 
@@ -1003,8 +1024,27 @@ def main() -> None:
                 time.sleep(3600)
                 continue
             elif s_res.status_code != 200:
-                logger.warning(f"車両データ取得エラー (HTTP {s_res.status_code})。10分待機します。")
-                time.sleep(600)
+                # 車両データを読めない間は電流を動かせない。待機の長さは
+                # 「見えないことの代償」で決める。給電中なら、絞り込めない1分が
+                # そのまま買電になるためである。
+                #
+                # 2026-08-22 07:01:35、46A・買電9,579W のまま408を受け、600秒待機した。
+                # 絞り込み（46A→4A）は 07:11:40 まで遅れ、その間に約1.4kWhを
+                # 余計に買電した。408 は 08-02 以降29件あり、うち15件が7時台に集中する。
+                # 夜間休止が明けた直後は、車が自ら充電を始めている可能性が最も高く、
+                # かつ408が最も出やすい。
+                #
+                # 408 をその場で投げ直すことはしない（night_proxy_get の判断と同じで、
+                # 車両が応答しない状況は即座には変わらず、500未満は課金対象である）。
+                # ここで変えるのは再試行の有無ではなく、次に見るまでの長さだけである。
+                #
+                # 判定は自宅のウォールコネクターで行う。課金がなく、宅内LANで28msで
+                # 読める。読めない場合・給電していない場合は従来どおり10分待つ。
+                wait_sec = 180 if home_charger_delivering() else 600
+                logger.warning(
+                    f"車両データ取得エラー (HTTP {s_res.status_code})。{wait_sec // 60}分待機します。"
+                )
+                time.sleep(wait_sec)
                 continue
 
             response_json = s_res.json().get("response")

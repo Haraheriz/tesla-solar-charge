@@ -178,6 +178,8 @@ class FakeWCSession:
         wc_omit_field         True で vehicle_connected キー自体が無い
         wc_serial             /api/1/version が返す serial_number
         wc_fail_first         最初のN回の呼び出しだけ失敗させる（再試行の検証用）
+        wc_contactor_closed   vitals の contactor_closed（給電中かの判定に使う）
+        wc_omit_contactor     True で contactor_closed キー自体が無い
     """
 
     def __init__(self, world):
@@ -212,10 +214,14 @@ class FakeWCSession:
 
         if url.endswith("/api/1/vitals"):
             vitals = {
-                "contactor_closed": True,
+                # 給電中かの判定に使う。既定は「給電中」。ケーブルが挿さったまま
+                # 充電していない状態を再現するには wc_contactor_closed=False を渡す。
+                "contactor_closed": self.world.get("wc_contactor_closed", True),
                 "vehicle_current_a": 21.3,
                 "session_energy_wh": 9738.1,
             }
+            if self.world.get("wc_omit_contactor"):
+                del vitals["contactor_closed"]
             if not self.world.get("wc_omit_field"):
                 vitals["vehicle_connected"] = self.world.get("wc_vehicle_connected", True)
             return FakeResponse(200, vitals)

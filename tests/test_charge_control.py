@@ -841,6 +841,64 @@ def test_responseが無い応答でも制御周期を守る(run_loop):
     assert cycles <= 12, f"周期を守れていない（{cycles}回）"
 
 
+def test_給電中に車両データを読めなければ待機を短くする(run_loop):
+    """2026-08-22 07:01:35 の再現。46A・買電9,579W のまま408を受け、600秒待機した。
+
+    絞り込み（46A→4A）は 07:11:40 まで遅れ、その間に約1.4kWhを余計に買電した。
+    給電中は「見えない1分」がそのまま買電になるため、次に見るまでを短くする。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 46,
+            "charge_state_http": 408,
+            "wc_contactor_closed": True,
+        },
+        start="2026-08-22 07:01:00",
+        budget_sec=1800,
+        house_power=9579,
+    )
+    assert res.has_log("3分待機します", level="WARNING")
+    assert not res.has_log("10分待機します", level="WARNING")
+
+
+@pytest.mark.parametrize("world_extra, label", [
+    ({"wc_contactor_closed": False}, "給電していない"),
+    ({"wc_raise": True}, "読み取れない"),
+    ({"wc_omit_contactor": True}, "contactor_closedが無い"),
+])
+def test_給電していなければ従来どおり10分待つ(run_loop, world_extra, label):
+    """判定できない場合に挙動を変えない。デグレの余地を残さないため。"""
+    world = {
+        "vehicle_state": "online", "charging_state": "Charging", "amps": 46,
+        "charge_state_http": 408,
+    }
+    world.update(world_extra)
+    res = run_loop(
+        world=world,
+        start="2026-08-22 07:01:00",
+        budget_sec=1800,
+        house_power=9579,
+    )
+    assert res.has_log("10分待機します", level="WARNING"), label
+    assert not res.has_log("3分待機します", level="WARNING"), label
+
+
+def test_ウォールコネクター未設定なら待機の短縮も行わない(run_loop):
+    """未設定の環境では全経路が従来どおりであること。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 46,
+            "charge_state_http": 408,
+        },
+        start="2026-08-22 07:01:00",
+        budget_sec=1800,
+        house_power=9579,
+        wall_connector_host="",
+    )
+    assert res.has_log("10分待機します", level="WARNING")
+    assert res.wc_calls == [], "未設定なのにウォールコネクターを読んでいる"
+
+
 def test_開始処理中はコマンドを重ねない(run_loop):
     res = run_loop(
         world={"vehicle_state": "online", "charging_state": "Starting", "amps": 16},

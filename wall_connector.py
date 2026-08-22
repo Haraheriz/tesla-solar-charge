@@ -27,6 +27,10 @@ WC_CONNECTED: str = "connected"
 WC_NOT_CONNECTED: str = "not_connected"
 WC_UNKNOWN: str = "unknown"
 
+# 給電しているかの判定結果。読めなければ WC_UNKNOWN を返す。
+WC_DELIVERING: str = "delivering"
+WC_NOT_DELIVERING: str = "not_delivering"
+
 # tesla_solar_charger.py の proxy_session / cloud_session とは用途が異なるため独立させる。
 # proxy_session は自己署名証明書をピン留めしたTesla プロキシ専用であり、
 # 宅内の平文HTTPとは無関係。テストではこの変数ごと差し替える。
@@ -96,6 +100,33 @@ def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2) -
         return WC_UNKNOWN
 
     return WC_CONNECTED if connected else WC_NOT_CONNECTED
+
+
+def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
+    """自宅の充電器がいま給電しているかを3値で返す。
+
+    vehicle_connected（ケーブルが挿さっているか）とは別の問いである。ケーブルが
+    挿さったまま充電していない状態が通常であり、そのとき contactor_closed は false、
+    vehicle_current_a は 0.0 になる（2026-08-23 に実機で確認）。
+
+    用途は「車両データを読めない時間の代償がいま大きいか」の判断だけである。
+    給電中なら、絞り込めない1分がそのまま買電になる。給電していない・読めない場合は
+    何も主張せず、呼び出し側は従来の待機に落ちる。
+
+    contactor_closed のみを見て vehicle_current_a は使わない。接点が閉じた直後など
+    電流が0のまま給電中でありうるためで、この判定は「給電しているかもしれない」側へ
+    倒しておくほうが安い（誤って倒れても vehicle_data 1回分の課金で済む）。
+    """
+    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    if vitals is None:
+        return WC_UNKNOWN
+
+    closed = vitals.get("contactor_closed")
+    # read_vehicle_connected と同じ理由で、真偽値でなければ判定に使わない。
+    if not isinstance(closed, bool):
+        return WC_UNKNOWN
+
+    return WC_DELIVERING if closed else WC_NOT_DELIVERING
 
 
 def read_serial(host: str, timeout: float = 5.0, attempts: int = 2) -> Optional[str]:
