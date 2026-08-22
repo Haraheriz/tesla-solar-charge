@@ -17,7 +17,8 @@
 ├── tesla-http-proxy           # [転送] Go言語ネイティブバイナリ
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
-├── override_state.py          # [転送] マニュアル・オーバーライド状態の共有モジュール
+├── override_state.py          # [転送] フル充電モード・外出先の充電記録の状態を共有するモジュール
+├── config_loader.py           # [転送] 設定値を起動時に検証して確定させるモジュール
 ├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-192.png, icon-512.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
@@ -111,6 +112,7 @@ chmod 600 tesla_config.json
 | `WALL_CONNECTOR_SERIAL` | | `""` | 任意。設定するとIPアドレスが別の機器に変わった場合を起動時に検知できる |
 | `WALL_CONNECTOR_TIMEOUT_SEC` | | `5` | ウォールコネクターへのHTTPタイムアウト秒 |
 | `WALL_CONNECTOR_ATTEMPTS` | | `2` | 読み取り失敗時に、その場で取り直す回数（1回目を含む） |
+| `DISCONNECTED_PROBE_INTERVAL_SEC` | | `600` | **外出先の充電記録がONのとき**、ケーブル未接続の車両データを読み直す間隔（秒）。ON/OFFはスマホアプリで切替える |
 | `FAST_CHARGER_POWER_KW` | | `15` | 外出先判定のフォールバック閾値 |
 | `MIN_AMPS` | | `4` | 充電を維持する下限電流。これを下回ると停止する |
 | `MAX_AMPS` | | `48` | 上限電流。**充電設備とブレーカーの容量に合わせること** |

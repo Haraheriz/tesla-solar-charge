@@ -10,8 +10,17 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
-from override_state import read_override_state, write_override
-from wall_connector import WC_NOT_CONNECTED, WC_UNKNOWN, read_serial, read_vehicle_connected
+from config_loader import Settings
+from override_state import read_away_probe_state, read_override_state, write_override
+from wall_connector import (
+    WC_DELIVERING,
+    WC_NOT_CONNECTED,
+    WC_UNKNOWN,
+    read_delivering,
+    read_serial,
+    read_vehicle_connected,
+    take_retry_saved,
+)
 
 # Windows環境での標準出力のエンコーディング問題を解決
 if hasattr(sys.stdout, "reconfigure"):
@@ -70,16 +79,20 @@ CLIENT_ID: str = str(config.get("CLIENT_ID", ""))
 CLIENT_SECRET: str = str(config.get("CLIENT_SECRET", ""))
 DOMAIN: str = str(config.get("DOMAIN", "localhost:8000"))
 
-MIN_AMPS: int = int(config.get("MIN_AMPS", 4))
-MAX_AMPS: int = int(config.get("MAX_AMPS", 48))
+settings = Settings(config, log_attention)
+
+MIN_AMPS: int = settings.integer("MIN_AMPS", 4, minimum=1)
+MAX_AMPS: int = settings.integer("MAX_AMPS", 48, minimum=1)
 
 # ヒステリシス用の開始閾値。充電開始・車両起動はSTART_AMPS以上の余剰を要求し、
 # 停止判定はMIN_AMPS未満で行う。開始直後は車両自身の消費で余剰が減るため、
 # 閾値が1本だと開始→即停止の発振が起きる。
-START_AMPS: int = int(config.get("START_AMPS", MIN_AMPS + 2))
+START_AMPS: int = settings.integer("START_AMPS", MIN_AMPS + 2, minimum=1)
 
 # 停止判定のデバウンス回数。余剰不足がこの回数連続したときだけ充電を停止する。
-STOP_DEBOUNCE_CYCLES: int = int(config.get("STOP_DEBOUNCE_CYCLES", 2))
+# 0 はデバウンスなし（1サイクルで停止）を意味する。値域の中の1値に「無効」の意味を
+# 載せているため、下限を 0 にしてよいキーであることをここに明記しておく。
+STOP_DEBOUNCE_CYCLES: int = settings.integer("STOP_DEBOUNCE_CYCLES", 2, minimum=0)
 
 # Remo E瞬時電力のサンプル数と間隔秒。
 #
@@ -92,8 +105,8 @@ STOP_DEBOUNCE_CYCLES: int = int(config.get("STOP_DEBOUNCE_CYCLES", 2))
 # 窓を広げる案は採れない。複数の更新をまたぐには120〜180秒を要し、
 # 制御サイクル（180秒）のほぼ全部を占める。平滑化が要るなら、サイクルを
 # またいで直近N回の値を使う別の設計にすること。
-REMO_SAMPLES: int = int(config.get("REMO_SAMPLES", 1))
-REMO_SAMPLE_INTERVAL_SEC: int = int(config.get("REMO_SAMPLE_INTERVAL_SEC", 10))
+REMO_SAMPLES: int = settings.integer("REMO_SAMPLES", 1, minimum=1)
+REMO_SAMPLE_INTERVAL_SEC: int = settings.integer("REMO_SAMPLE_INTERVAL_SEC", 10, minimum=1)
 
 # 就寝中の車両を起こす判断に要求する、余剰が開始閾値以上だった連続サイクル数。
 #
@@ -103,40 +116,57 @@ REMO_SAMPLE_INTERVAL_SEC: int = int(config.get("REMO_SAMPLE_INTERVAL_SEC", 10))
 #
 # 既に online の車の充電開始は遅らせない。そちらの誤発火は約¥0.3であり、
 # 3分の遅れと引き合わない。
-WAKE_DEBOUNCE_CYCLES: int = int(config.get("WAKE_DEBOUNCE_CYCLES", 2))
+# 0 はデバウンスなし（1サイクルで起こす）を意味する。STOP_DEBOUNCE_CYCLES と同様。
+WAKE_DEBOUNCE_CYCLES: int = settings.integer("WAKE_DEBOUNCE_CYCLES", 2, minimum=0)
 
 # 充電コマンド（charge_start / charge_stop / set_charging_amps）のリトライ回数。
 # Tesla APIは車両が通信圏外・スリープ移行中などで HTTP 408 や result=false を頻繁に返すため、
 # 「投げっぱなしで成功したことにする」と停止漏れがそのまま夜通しの系統充電になる。
-COMMAND_RETRIES: int = int(config.get("COMMAND_RETRIES", 3))
+COMMAND_RETRIES: int = settings.integer("COMMAND_RETRIES", 3, minimum=1)
 
 # 満充電・ケーブル未接続などの「終端ステータス」を観測したあと、次のサイクルまでの待機秒。
-TERMINAL_BACKOFF_SEC: int = int(config.get("TERMINAL_BACKOFF_SEC", 600))
+TERMINAL_BACKOFF_SEC: int = settings.integer("TERMINAL_BACKOFF_SEC", 600, minimum=1)
 
 # 終端ステータスを観測してから、就寝中の車両をWake Upしてよいと再び判断するまでの秒数。
 # 必ず TERMINAL_BACKOFF_SEC より十分長くすること。同じ値にすると、待機明けの時点で
 # ちょうど期限切れになり抑止が一度も効かない（満充電の車を延々と叩き起こす）。
 # 満充電・ケーブル未接続が解消されるとき（乗車・充電上限の変更・ケーブル接続）は
 # 車両が自分からオンラインになるため、その場合は待たずに通常の問い合わせ経路に入る。
-TERMINAL_WAKE_SUPPRESS_SEC: int = int(config.get("TERMINAL_WAKE_SUPPRESS_SEC", 3600))
+TERMINAL_WAKE_SUPPRESS_SEC: int = settings.integer("TERMINAL_WAKE_SUPPRESS_SEC", 3600, minimum=1)
 
 # 夜間休止に入る際の充電停止確認を、成功するまで再試行する上限回数（1回=10分間隔）。
 # 無制限に再試行するとAPIレートリミット(429)を誘発するため上限を設ける。
-NIGHT_STOP_MAX_ATTEMPTS: int = int(config.get("NIGHT_STOP_MAX_ATTEMPTS", 6))
+NIGHT_STOP_MAX_ATTEMPTS: int = settings.integer("NIGHT_STOP_MAX_ATTEMPTS", 6, minimum=1)
 
 # 夜間休止中のGETを、通信エラー・5xxのときに即座に試行する回数（1回目を含む）。
 # 巡回間隔（10分）を待たずにその場で取り直すためのもの。
-NIGHT_GET_ATTEMPTS: int = int(config.get("NIGHT_GET_ATTEMPTS", 2))
+NIGHT_GET_ATTEMPTS: int = settings.integer("NIGHT_GET_ATTEMPTS", 2, minimum=1)
 
 # 自宅のTesla Wall Connector (Gen 3) のIPアドレス。空なら外出先判定を行わない
 # （設定していない環境では全経路が従来どおりの動作になる）。
 # DHCPでアドレスが変わると判定不能に落ちるため、ルーター側でIPを予約すること。
 WALL_CONNECTOR_HOST: str = str(config.get("WALL_CONNECTOR_HOST", ""))
-WALL_CONNECTOR_TIMEOUT_SEC: float = float(config.get("WALL_CONNECTOR_TIMEOUT_SEC", 5))
+WALL_CONNECTOR_TIMEOUT_SEC: float = settings.number("WALL_CONNECTOR_TIMEOUT_SEC", 5, minimum=0.1)
 
 # ウォールコネクターを読めなかったときに、その場で取り直す回数（1回目を含む）。
 # 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
-WALL_CONNECTOR_ATTEMPTS: int = int(config.get("WALL_CONNECTOR_ATTEMPTS", 2))
+WALL_CONNECTOR_ATTEMPTS: int = settings.integer("WALL_CONNECTOR_ATTEMPTS", 2, minimum=1)
+
+# 「外出先の充電記録」が有効なとき、ケーブル未接続の車両データを読み直す間隔（秒）。
+#
+# 自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。車両データを読んでも
+# 電流調整・停止・開始のどの判断も変わらないため、既定では読まない。2026-08-22 の
+# 11:51〜15:32 は10分ごとに問い合わせ続けており、その日の vehicle_data 38件のうち
+# 23件（約¥6.6）をこの状態に費やしていた。
+#
+# 読むことに意味があるのは、外出先での充電を記録したいときだけである。急速充電器が返す
+# フィールドの実値は未観測のものが多く（docs/03_operation.md の観測記録を参照）、
+# 記録できるのは充電中に読んだときに限られる。そのため有効・無効はスマホから切替える
+# （override_state.json の away_probe）。設定ファイルは起動時にしか読まないため、
+# 出発の直前や充電器の前では変更できないからである。
+#
+# ここが決めるのは有効時の間隔だけである。0以下は指定できない（無効化はフラグ側が担う）。
+DISCONNECTED_PROBE_INTERVAL_SEC: int = settings.integer("DISCONNECTED_PROBE_INTERVAL_SEC", 600, minimum=1)
 
 # 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
 WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
@@ -144,7 +174,37 @@ WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 # ウォールコネクターを読めなかったときのフォールバック閾値（kW）。
 # 自宅の上限は MAX_AMPS(48A) × 200V = 9.6kW であり、これを超える給電は
 # 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
-FAST_CHARGER_POWER_KW: float = float(config.get("FAST_CHARGER_POWER_KW", 15))
+FAST_CHARGER_POWER_KW: float = settings.number("FAST_CHARGER_POWER_KW", 15, minimum=1)
+
+# キーどうしの関係は、個々の下限では表せない。以下はいずれもコメントとして
+# 書かれていながら強制されておらず、破ったときの症状が分かりにくいものである。
+if MAX_AMPS < MIN_AMPS:
+    log_attention(
+        f"設定 MAX_AMPS（{MAX_AMPS}）が MIN_AMPS（{MIN_AMPS}）を下回っています。"
+        f"MAX_AMPS を {MIN_AMPS} として起動します。"
+    )
+    MAX_AMPS = MIN_AMPS
+
+if START_AMPS <= MIN_AMPS:
+    # 開始と停止の閾値が同じだと、開始した直後に車両自身の消費で余剰が減り、
+    # 開始→即停止の発振が起きる（START_AMPS の定義を参照）。
+    log_attention(
+        f"設定 START_AMPS（{START_AMPS}）が MIN_AMPS（{MIN_AMPS}）以下です。"
+        "開始と停止の閾値が重なると発振するため、"
+        f"START_AMPS を {MIN_AMPS + 2} として起動します。"
+    )
+    START_AMPS = MIN_AMPS + 2
+
+if TERMINAL_WAKE_SUPPRESS_SEC <= TERMINAL_BACKOFF_SEC:
+    # 同じ値にすると、待機明けの時点でちょうど期限切れになり抑止が一度も効かない
+    # （満充電の車を延々と起こす。TERMINAL_WAKE_SUPPRESS_SEC の定義を参照）。
+    log_attention(
+        f"設定 TERMINAL_WAKE_SUPPRESS_SEC（{TERMINAL_WAKE_SUPPRESS_SEC}）が "
+        f"TERMINAL_BACKOFF_SEC（{TERMINAL_BACKOFF_SEC}）以下です。"
+        "この関係では車両を起こさない抑止が一度も効かないため、"
+        f"{TERMINAL_BACKOFF_SEC * 6} として起動します。"
+    )
+    TERMINAL_WAKE_SUPPRESS_SEC = TERMINAL_BACKOFF_SEC * 6
 
 # 充電している場所の判定結果。「自宅である」という値は持たない。
 # 自宅の充電器に何かが繋がっていることは分かっても、それが制御対象の車である保証が
@@ -165,11 +225,14 @@ STATUS_CHARGING: str = "Charging"
 STATUS_STOPPED: str = "Stopped"
 # 充電開始処理の途中。コマンドを重ねず次サイクルまで待つ。
 STATUS_STARTING: str = "Starting"
+# ケーブルが繋がっていないステータス。ウォールコネクターの応答と突き合わせる箇所が
+# 複数あるため、文字列を直接書かず定数にしておく。
+STATUS_DISCONNECTED: str = "Disconnected"
 # 終端ステータス：これ以上こちらから充電を促しても意味がない状態。
 # 満充電(Complete)にcharge_startを送り続けると、車両を無駄に起こしAPIを浪費するだけになる。
-TERMINAL_STATUSES: frozenset = frozenset({"Disconnected", "Complete", "NoPower"})
+TERMINAL_STATUSES: frozenset = frozenset({STATUS_DISCONNECTED, "Complete", "NoPower"})
 TERMINAL_STATUS_LABELS: Dict[str, str] = {
-    "Disconnected": "充電ケーブルが未接続",
+    STATUS_DISCONNECTED: "充電ケーブルが未接続",
     "Complete": "満充電に到達済み",
     "NoPower": "充電設備から給電されていない",
 }
@@ -446,7 +509,8 @@ def night_proxy_get(url: str, headers: Dict[str, str]) -> Any:
     加えて500未満は課金対象であり、無駄な再試行は費用に直結する
     （`docs/01_architecture.md` 第3章③）。
     """
-    attempts: int = max(1, NIGHT_GET_ATTEMPTS)
+    # 下限は Settings が保証している（config_loader.py）。ここでは再検査しない。
+    attempts: int = NIGHT_GET_ATTEMPTS
     for attempt in range(1, attempts + 1):
         is_last: bool = attempt == attempts
         try:
@@ -499,6 +563,7 @@ def read_wall_connector() -> str:
     state: str = read_vehicle_connected(
         WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
     )
+    report_wall_connector_retries()
     if state != wall_connector_last_state:
         if state == WC_UNKNOWN:
             logger.warning(
@@ -509,6 +574,39 @@ def read_wall_connector() -> str:
             logger.info("自宅ウォールコネクターの読み取りが回復しました。")
         wall_connector_last_state = state
     return state
+
+
+def report_wall_connector_retries() -> None:
+    """1回目の読み取りに失敗し、取り直しで復帰した回数をログへ出す。
+
+    PR #21 で attempts=2 の再試行を入れて以降、1回目の失敗はどこにも現れなくなった。
+    その再試行の根拠は「2026-08-11〜18 に読み取り失敗が週4回」という実測であり、
+    黙って救い続けると、悪化に気づけるのは「2回とも失敗する」ようになってからになる。
+
+    読み取りを行う経路すべてから、その直後に呼ぶこと。カウンタはモジュール共有で、
+    どこかで読み捨てるとその分の失敗が消える。
+    """
+    saved: int = take_retry_saved()
+    if saved:
+        logger.warning(
+            f"自宅ウォールコネクターの1回目の読み取りに失敗し、その場の取り直しで復帰しました（{saved}回）。"
+            "頻度が上がるようならLANまたはウォールコネクター側を確認してください。"
+        )
+
+
+def home_charger_delivering() -> bool:
+    """自宅の充電器がいま給電しているか。判定できなければ False を返す。
+
+    False に倒すのは、判断できないときに従来の挙動を変えないためである。
+    この関数は待機の長さを短くしてよいかの判断にしか使わない。
+    """
+    if not WALL_CONNECTOR_HOST or not wall_connector_available:
+        return False
+    state: str = read_delivering(
+        WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+    )
+    report_wall_connector_retries()
+    return state == WC_DELIVERING
 
 
 def classify_charging_site(charge_state: Dict[str, Any]) -> Tuple[str, str]:
@@ -666,6 +764,7 @@ def main() -> None:
         serial: Optional[str] = read_serial(
             WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
         )
+        report_wall_connector_retries()
         if serial is None:
             # 起動時点で読めなくても機能は無効化しない。LANやWC側の一時的な不調で
             # 恒久的に判定を諦めるのは過剰であり、毎サイクルの判定は独立して再試行される。
@@ -705,6 +804,8 @@ def main() -> None:
     night_last_observation: str = ""
     # 満充電・ケーブル未接続などの終端状態を観測したら、この時刻までは車両を起こさない
     skip_wake_until: float = 0.0
+    # ケーブル未接続を観測したあと、次に vehicle_data を読み直してよい時刻
+    next_disconnected_probe_at: float = 0.0
     # 直前サイクルで観測した充電ステータス（外部からの手動停止を検知するために保持する）
     prev_charging_status: str = ""
 
@@ -722,6 +823,8 @@ def main() -> None:
     while True:
         now = time.localtime()
         manual_override, override_updated_at = read_override_state()
+        # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
+        away_probe, away_probe_updated_at = read_away_probe_state()
 
         # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
         # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
@@ -757,6 +860,31 @@ def main() -> None:
                     vehicle = vehicles[0] if vehicles else {}
                     vehicle_state = str(vehicle.get("state", ""))
 
+                    # 判定に使う事実を、分岐に入る前に確定させる。elif の条件式の中で
+                    # 評価してしまうと、「記録スイッチのために読んだのか」を後段の
+                    # 観測ログへ渡せない。ログにその理由が出ないと、課金された夜を
+                    # 後から見て理由を追えなくなる。
+                    #
+                    # 車両リストが取れなかった場合（401 を含む）は vehicle が空になるため、
+                    # ウォールコネクターへの問い合わせも行わない。
+                    cable_absent: bool = False
+                    probe_read: bool = False
+                    if vehicle and vehicle_state not in ("asleep", "offline"):
+                        cable_absent = (
+                            prev_charging_status == STATUS_DISCONNECTED
+                            # ウォールコネクターの確認を、記録の判定より先に行う。日中側と同じ順序である。
+                            # 後回しにすると、記録がONで読み直し時刻に達したサイクルでは
+                            # 一度も問い合わせず、read_wall_connector() が担っている
+                            # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
+                            # 代償は宅内LANへのGET 1回（無課金・28ms）である。
+                            and read_wall_connector() == WC_NOT_CONNECTED
+                        )
+                        probe_read = (
+                            cable_absent
+                            and away_probe
+                            and time.time() >= next_disconnected_probe_at
+                        )
+
                     if v_res.status_code == 401:
                         # 日中ループと同じ扱いにする。クライアント側の期限推定より早く
                         # サーバー側で失効した場合（クロックずれ・失効の前倒し等）、
@@ -780,6 +908,24 @@ def main() -> None:
                         log_night_observation(
                             f"車両は『{vehicle_state}』のため充電していないと判断し、そのまま休止します。"
                         )
+                    elif cable_absent and not probe_read:
+                        # 日中と同じ根拠である。自宅の充電器に何も繋がっていなければ、この車は
+                        # 自宅で充電していない。夜間ループが車両データを読むのは自宅の系統充電を
+                        # 止めるためであり、止めるべきものが無いなら読む理由も無い。
+                        #
+                        # 夜間帯は13時間・78サイクルあるため、外出先で車が起きたまま夜を跨ぐと
+                        # 約¥22を費やす。日中側（2026-08-22 の実績で約¥6.6）より大きい。
+                        #
+                        # night_stop_failures は消費せず0へ戻す。通信の失敗ではなく、
+                        # 「充電していないと確認できた」側だからである（asleep/offline と同じ扱い）。
+                        #
+                        # ケーブルが挿し直されれば vehicle_connected が true に戻り、次の巡回で
+                        # 通常の経路に入る。ウォールコネクターを読み取れない場合も成立せず、
+                        # 従来どおり毎サイクル読む。
+                        night_stop_failures = 0
+                        log_night_observation(
+                            "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
+                        )
                     else:
                         vin = vehicle.get("vin", "") or vin
                         s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
@@ -798,6 +944,10 @@ def main() -> None:
                             night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
                             night_status = str(night_charge_state.get("charging_state") or "")
                             prev_charging_status = night_status
+                            if night_status == STATUS_DISCONNECTED:
+                                # 次に読み直してよい時刻。日中側と同じ基準で更新しておかないと、
+                                # 夜をまたいだ時点で外出先の充電記録の間隔がずれる。
+                                next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
                             night_site, night_site_reason = (
                                 classify_charging_site(night_charge_state)
                                 if night_status == STATUS_CHARGING else (SITE_UNKNOWN, "")
@@ -840,9 +990,13 @@ def main() -> None:
                                 # 停止操作が不要だったこと自体を残す。無言で済ませると
                                 # 「夜間チェックが本当に走ったのか」を後から追えない。
                                 night_stop_failures = 0
+                                # 記録スイッチのために読んだ場合は、その旨を同じ行へ添える。
+                                # 別行にすると log_night_observation の重複抑止が効かず、
+                                # 10分ごとに同じ行が並んで変化が埋もれる。
+                                probe_note: str = "（外出先の充電記録により取得）" if probe_read else ""
                                 log_night_observation(
                                     f"車両は『{vehicle_state}』・充電状態『{night_status or '不明'}』のため、"
-                                    "停止操作は不要と判断しました。"
+                                    f"停止操作は不要と判断しました。{probe_note}"
                                 )
                 except Exception as e:
                     night_stop_failures += 1
@@ -932,7 +1086,7 @@ def main() -> None:
                     time.sleep(TERMINAL_BACKOFF_SEC)
                     continue
 
-                if prev_charging_status == "Disconnected" and read_wall_connector() == WC_NOT_CONNECTED:
+                if prev_charging_status == STATUS_DISCONNECTED and read_wall_connector() == WC_NOT_CONNECTED:
                     # ケーブルが自宅に繋がっていない。起こしても Disconnected を読み直すだけで、
                     # 充電は始められない。ケーブルを挿せば車両は自らオンラインになり、
                     # 課金されない車両リストで検知できるため、確認のために起こす必要がない。
@@ -992,6 +1146,44 @@ def main() -> None:
                             )
                         house_power = refreshed_power
 
+            if (
+                vehicle_state not in ("asleep", "offline")
+                and prev_charging_status == STATUS_DISCONNECTED
+                and read_wall_connector() == WC_NOT_CONNECTED
+            ):
+                # 直近の観測がケーブル未接続で、いまも自宅の充電器には何も繋がっていない。
+                # 読み直しても Disconnected を読み直すだけで、自宅では充電を開始できない。
+                # 就寝中の車を起こさない判断（PR #22）と同じ根拠を、online 側にも適用する。
+                #
+                # 2026-08-22 11:51〜15:32、車は online のままケーブル未接続で、その日の
+                # vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
+                #
+                # ケーブルが挿し直されれば vehicle_connected が true に戻り、この条件は
+                # 次のサイクルで成立しなくなる。復帰の検知に遅れは生じない。記録の有効・無効に
+                # 関わらず成立するため、記録をONのまま忘れても復帰は遅れない。
+                # ウォールコネクターを読み取れない場合も成立せず、従来どおり毎サイクル読む。
+                if away_probe and time.time() >= next_disconnected_probe_at:
+                    # 外出先での充電を記録するためだけに読む。課金対象であり、無言で
+                    # 払っていると後からログを見て「なぜこの日は高いのか」を追えない。
+                    # ONからの経過時間を添えるのは、切り忘れをこの行だけで気づけるようにするため。
+                    # 記録が実際に発生したときにしか出ないので、毎サイクルの通知にはならない。
+                    probe_label: str = (
+                        f"ON から{format_duration(time.time() - away_probe_updated_at)}経過"
+                        if away_probe_updated_at > 0 else "ON からの経過時間は不明"
+                    )
+                    logger.info(
+                        f"外出先の充電記録が有効なため（{probe_label}）、車両データを取得します。"
+                    )
+                else:
+                    below_min_count = 0
+                    skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                    logger.info(
+                        "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
+                        f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
+                    )
+                    time.sleep(TERMINAL_BACKOFF_SEC)
+                    continue
+
             state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
             s_res = proxy_session.get(state_url, headers=headers, timeout=10)
 
@@ -1003,12 +1195,37 @@ def main() -> None:
                 time.sleep(3600)
                 continue
             elif s_res.status_code != 200:
-                logger.warning(f"車両データ取得エラー (HTTP {s_res.status_code})。10分待機します。")
-                time.sleep(600)
+                # 車両データを読めない間は電流を動かせない。待機の長さは
+                # 「見えないことの代償」で決める。給電中なら、絞り込めない1分が
+                # そのまま買電になるためである。
+                #
+                # 2026-08-22 07:01:35、46A・買電9,579W のまま408を受け、600秒待機した。
+                # 絞り込み（46A→4A）は 07:11:40 まで遅れ、その間に約1.4kWhを
+                # 余計に買電した。408 は 08-02 以降29件あり、うち15件が7時台に集中する。
+                # 夜間休止が明けた直後は、車が自ら充電を始めている可能性が最も高く、
+                # かつ408が最も出やすい。
+                #
+                # 408 をその場で投げ直すことはしない（night_proxy_get の判断と同じで、
+                # 車両が応答しない状況は即座には変わらず、500未満は課金対象である）。
+                # ここで変えるのは再試行の有無ではなく、次に見るまでの長さだけである。
+                #
+                # 判定は自宅のウォールコネクターで行う。課金がなく、宅内LANで28msで
+                # 読める。読めない場合・給電していない場合は従来どおり10分待つ。
+                wait_sec = 180 if home_charger_delivering() else 600
+                logger.warning(
+                    f"車両データ取得エラー (HTTP {s_res.status_code})。{wait_sec // 60}分待機します。"
+                )
+                time.sleep(wait_sec)
                 continue
 
             response_json = s_res.json().get("response")
             if response_json is None:
+                # HTTP 200 だが本文に response が無い。ここは以前、ログも待機も無いまま
+                # 次の周回へ入っていた。この状態が続くと3分の制御周期を無視して全速で回り、
+                # 課金対象の vehicle_data を叩き続ける。しかも何も記録しないため、
+                # 起きていても後から追う手掛かりが残らない。
+                logger.warning("車両データの応答に response が含まれていません。3分待機します。")
+                time.sleep(180)
                 continue
 
             # charge_state はキーが存在しつつ値が null のことがあるため、get のデフォルトでは防げない。
@@ -1043,6 +1260,10 @@ def main() -> None:
                 # 送り続けていた（2026-07-15 の 03:28〜07:39 で60回）。
                 below_min_count = 0
                 skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                if charging_status == STATUS_DISCONNECTED:
+                    # 次にこの車両データを読み直してよい時刻。外出先の充電記録が
+                    # 有効なときだけ参照される。無効なら、そもそも読み直さない。
+                    next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
                 reason_label = TERMINAL_STATUS_LABELS.get(charging_status, charging_status)
                 logger.info(
                     f"{reason_label}のため、充電コマンドの送信をスキップします。{TERMINAL_BACKOFF_SEC // 60}分待機します。"

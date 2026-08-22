@@ -27,6 +27,18 @@ WC_CONNECTED: str = "connected"
 WC_NOT_CONNECTED: str = "not_connected"
 WC_UNKNOWN: str = "unknown"
 
+# 給電しているかの判定結果。読めなければ WC_UNKNOWN を返す。
+WC_DELIVERING: str = "delivering"
+WC_NOT_DELIVERING: str = "not_delivering"
+
+# 1回目の読み取りに失敗し、その場の取り直しで救われた回数。
+#
+# attempts=2 の再試行（PR #21）を入れて以降、1回目の失敗はどこにも現れなくなった。
+# その再試行の根拠は「2026-08-11〜18 に読み取り失敗が週4回」という実測であり、
+# 数えるのをやめると、失敗率の悪化に気づけるのは「2回とも失敗する」ようになってから
+# になる。このモジュールはログを持たない方針なので、数だけ持って呼び出し側に渡す。
+retry_saved_count: int = 0
+
 # tesla_solar_charger.py の proxy_session / cloud_session とは用途が異なるため独立させる。
 # proxy_session は自己署名証明書をピン留めしたTesla プロキシ専用であり、
 # 宅内の平文HTTPとは無関係。テストではこの変数ごと差し替える。
@@ -72,11 +84,30 @@ def _get_json(host: str, path: str, timeout: float, attempts: int = 2) -> Option
     相手は宅内LANの機器で課金もないが、無制限には繰り返さない。応答しなくなった
     ウォールコネクターを叩き続けても回復しないため。
     """
-    for _ in range(max(attempts, 1)):
+    global retry_saved_count
+
+    # attempts の下限は呼び出し側が保証する（tesla_solar_charger.py の Settings）。
+    # ここで max() で丸め直さない。丸めると、設定が効いていないことが誰にも見えなくなる。
+    # 0 以下を渡された場合は1回も読まず、判定不能（WC_UNKNOWN）へ落ちる。
+    for attempt in range(1, attempts + 1):
         data = _get_json_once(host, path, timeout)
         if data is not None:
+            if attempt > 1:
+                retry_saved_count += 1
             return data
     return None
+
+
+def take_retry_saved() -> int:
+    """前回の呼び出し以降に「取り直しで救われた」回数を返し、カウンタを0に戻す。
+
+    返した回数を呼び出し側がログへ出すことを前提にしている。読み捨てると、
+    再試行が隠している失敗率がそのまま見えないままになる。
+    """
+    global retry_saved_count
+    count = retry_saved_count
+    retry_saved_count = 0
+    return count
 
 
 def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
@@ -96,6 +127,33 @@ def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2) -
         return WC_UNKNOWN
 
     return WC_CONNECTED if connected else WC_NOT_CONNECTED
+
+
+def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
+    """自宅の充電器がいま給電しているかを3値で返す。
+
+    vehicle_connected（ケーブルが挿さっているか）とは別の問いである。ケーブルが
+    挿さったまま充電していない状態が通常であり、そのとき contactor_closed は false、
+    vehicle_current_a は 0.0 になる（2026-08-22 に実機で確認）。
+
+    用途は「車両データを読めない時間の代償がいま大きいか」の判断だけである。
+    給電中なら、絞り込めない1分がそのまま買電になる。給電していない・読めない場合は
+    何も主張せず、呼び出し側は従来の待機に落ちる。
+
+    contactor_closed のみを見て vehicle_current_a は使わない。接点が閉じた直後など
+    電流が0のまま給電中でありうるためで、この判定は「給電しているかもしれない」側へ
+    倒しておくほうが安い（誤って倒れても vehicle_data 1回分の課金で済む）。
+    """
+    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    if vitals is None:
+        return WC_UNKNOWN
+
+    closed = vitals.get("contactor_closed")
+    # read_vehicle_connected と同じ理由で、真偽値でなければ判定に使わない。
+    if not isinstance(closed, bool):
+        return WC_UNKNOWN
+
+    return WC_DELIVERING if closed else WC_NOT_DELIVERING
 
 
 def read_serial(host: str, timeout: float = 5.0, attempts: int = 2) -> Optional[str]:

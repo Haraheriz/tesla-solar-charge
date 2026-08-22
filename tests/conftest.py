@@ -15,6 +15,7 @@ tesla_solar_charger.main() は本来「無限ループ・実API・実時間」�
 """
 import importlib.util
 import itertools
+import json
 import logging
 import os
 import time as real_time
@@ -85,6 +86,8 @@ class FakeSession:
 
     world 辞書が「車両の実際の状態」を表し、コマンドを受けると変化する。
     world["command_results"] で個別コマンドをわざと失敗させられる。
+    world["away_probe"] は外出先の充電記録フラグ（既定 False）で、FakeSession ではなく
+    read_away_probe_state の差し替えが読む。
     """
 
     def __init__(self, world):
@@ -92,6 +95,9 @@ class FakeSession:
         self.commands = []
         self.verify = None
         self.vehicle_list_calls = 0
+        # 課金対象の vehicle_data を何回叩いたか。呼び出し回数そのものが費用であり、
+        # 「読まずに済ませた」ことを検証するにはコマンド数では足りない。
+        self.vehicle_data_calls = 0
 
     def _fail(self, command):
         return self.world.get("command_results", {}).get(command, True) is False
@@ -125,8 +131,13 @@ class FakeSession:
                 fleet.append({"vin": f"TESTVIN{i + 1:011d}", "state": "asleep"})
             return FakeResponse(200, {"response": fleet})
         if "vehicle_data" in url:
+            self.vehicle_data_calls += 1
             if self.world.get("charge_state_http", 200) != 200:
                 return FakeResponse(self.world["charge_state_http"], {})
+            # HTTP 200 でありながら本文に response が無い応答。Tesla側の仕様として
+            # 起こりうるため、制御ループが周期を守れるかを確かめる必要がある。
+            if self.world.get("charge_state_response_missing"):
+                return FakeResponse(200, {})
             return FakeResponse(200, {"response": {"charge_state": {
                 "charging_state": self.world["charging_state"],
                 "charge_current_request": self.world["amps"],
@@ -174,6 +185,8 @@ class FakeWCSession:
         wc_omit_field         True で vehicle_connected キー自体が無い
         wc_serial             /api/1/version が返す serial_number
         wc_fail_first         最初のN回の呼び出しだけ失敗させる（再試行の検証用）
+        wc_contactor_closed   vitals の contactor_closed（給電中かの判定に使う）
+        wc_omit_contactor     True で contactor_closed キー自体が無い
     """
 
     def __init__(self, world):
@@ -208,10 +221,14 @@ class FakeWCSession:
 
         if url.endswith("/api/1/vitals"):
             vitals = {
-                "contactor_closed": True,
+                # 給電中かの判定に使う。既定は「給電中」。ケーブルが挿さったまま
+                # 充電していない状態を再現するには wc_contactor_closed=False を渡す。
+                "contactor_closed": self.world.get("wc_contactor_closed", True),
                 "vehicle_current_a": 21.3,
                 "session_energy_wh": 9738.1,
             }
+            if self.world.get("wc_omit_contactor"):
+                del vitals["contactor_closed"]
             if not self.world.get("wc_omit_field"):
                 vitals["vehicle_connected"] = self.world.get("wc_vehicle_connected", True)
             return FakeResponse(200, vitals)
@@ -232,7 +249,7 @@ class Result:
     """1回のシミュレーション結果。テストはこれに対してアサーションする。"""
 
     def __init__(self, commands, logs, override_writes, world, module, refresh_calls=None,
-                 wc_calls=None):
+                 wc_calls=None, vehicle_data_calls=0):
         self.commands = commands
         self.logs = logs
         self.override_writes = override_writes
@@ -242,6 +259,8 @@ class Result:
         self.refresh_calls = refresh_calls if refresh_calls is not None else []
         # 自宅ウォールコネクターへ投げたURLの一覧
         self.wc_calls = wc_calls if wc_calls is not None else []
+        # 課金対象の vehicle_data を叩いた回数
+        self.vehicle_data_calls = vehicle_data_calls
 
     def count(self, command):
         return self.commands.count(command)
@@ -259,7 +278,7 @@ class Result:
         return self.commands[len(self.commands) - self.commands[::-1].index(command):]
 
 
-def _load_module(tmp_path):
+def _load_module(tmp_path, config_overrides=None):
     """tesla_solar_charger を、設定・ログ・トークンをテスト用に向けて読み込む。
 
     ログはRotatingFileHandlerが相対パスで開くため、import前にtmpへchdirしておく。
@@ -273,7 +292,16 @@ def _load_module(tmp_path):
     tesla_tokens.json は .gitignore 済みなので開発機には在ってもCIには無い。
     ここで tmp 上のダミーを指しておかないと、ローカルだけ通ってCIでハングする。
     """
-    os.environ["TESLA_CONFIG_PATH"] = CI_CONFIG
+    if config_overrides:
+        # 設定値ごとの起動時挙動を見るために、CI用の設定へ差分を当てた一時ファイルを作る。
+        with open(CI_CONFIG, encoding="utf-8") as f:
+            merged = json.load(f)
+        merged.update(config_overrides)
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+        os.environ["TESLA_CONFIG_PATH"] = str(config_path)
+    else:
+        os.environ["TESLA_CONFIG_PATH"] = CI_CONFIG
 
     token_file = tmp_path / "tesla_tokens.json"
     token_file.write_text(
@@ -312,8 +340,17 @@ def run_loop(tmp_path):
     """
 
     def _run(world, start, budget_sec, override=False, house_power=-3000, on_poll=None,
-             wall_connector_host=None, wall_connector_serial=None):
-        module = _load_module(tmp_path)
+             wall_connector_host=None, wall_connector_serial=None, config_overrides=None):
+        # 設定の検証は import 時に走る。モジュール読み込みより後にハンドラーを付けると
+        # その行を取り逃すため、先にルートロガーへ付けておく（SolarCharger ロガーは
+        # 既定で propagate するので、ルートに付けた時点で拾える）。
+        capture = CapturingHandler()
+        root_logger = logging.getLogger()
+        root_logger.addHandler(capture)
+        try:
+            module = _load_module(tmp_path, config_overrides)
+        finally:
+            root_logger.removeHandler(capture)
 
         # ci_config.json の値を上書きする。空文字を渡すと外出先判定そのものが無効になる。
         if wall_connector_host is not None:
@@ -323,7 +360,6 @@ def run_loop(tmp_path):
 
         for handler in list(module.logger.handlers):
             module.logger.removeHandler(handler)
-        capture = CapturingHandler()
         module.logger.addHandler(capture)
         module.logger.setLevel(logging.INFO)
 
@@ -338,6 +374,9 @@ def run_loop(tmp_path):
         # セッションを差し替えれば判定ロジック本体は本物が動く。
         wc_session = FakeWCSession(world)
         wall_connector.wc_session = wc_session
+        # 取り直し回数はモジュール共有のカウンタである。前のテストの分を持ち越すと
+        # 「取り直しで復帰した」ログが別のテストで出てしまう。
+        wall_connector.retry_saved_count = 0
 
         start_epoch = real_time.mktime(real_time.strptime(start, "%Y-%m-%d %H:%M:%S"))
         module.time = FakeTime(start_epoch, budget_sec)
@@ -348,6 +387,14 @@ def run_loop(tmp_path):
             "writes": [],
         }
         module.read_override_state = lambda: (override_state["enabled"], override_state["updated_at"])
+
+        # 外出先の充電記録のフラグ。world 経由にしてあるのは、on_poll から他のキーと
+        # 同じように途中で切替えられるようにするため（出先でONにする場面の再現）。
+        # 差し替えを忘れると開発機のリポジトリ直下の override_state.json を読みに行き、
+        # 手元の状態でテスト結果が変わる。
+        module.read_away_probe_state = lambda: (
+            bool(world.get("away_probe", False)), start_epoch - 3600
+        )
 
         def _write_override(enabled):
             override_state["enabled"] = enabled
@@ -404,7 +451,7 @@ def run_loop(tmp_path):
 
         return Result(
             session.commands, capture.records, override_state["writes"], world, module,
-            refresh_calls, wc_session.calls
+            refresh_calls, wc_session.calls, session.vehicle_data_calls
         )
 
     return _run
