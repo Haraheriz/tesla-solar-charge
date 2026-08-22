@@ -134,7 +134,7 @@ def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
 
     vehicle_connected（ケーブルが挿さっているか）とは別の問いである。ケーブルが
     挿さったまま充電していない状態が通常であり、そのとき contactor_closed は false、
-    vehicle_current_a は 0.0 になる（2026-08-23 に実機で確認）。
+    vehicle_current_a は 0.0 になる（2026-08-22 に実機で確認）。
 
     用途は「車両データを読めない時間の代償がいま大きいか」の判断だけである。
     給電中なら、絞り込めない1分がそのまま買電になる。給電していない・読めない場合は
