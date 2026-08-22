@@ -92,6 +92,9 @@ class FakeSession:
         self.commands = []
         self.verify = None
         self.vehicle_list_calls = 0
+        # 課金対象の vehicle_data を何回叩いたか。呼び出し回数そのものが費用であり、
+        # 「読まずに済ませた」ことを検証するにはコマンド数では足りない。
+        self.vehicle_data_calls = 0
 
     def _fail(self, command):
         return self.world.get("command_results", {}).get(command, True) is False
@@ -125,6 +128,7 @@ class FakeSession:
                 fleet.append({"vin": f"TESTVIN{i + 1:011d}", "state": "asleep"})
             return FakeResponse(200, {"response": fleet})
         if "vehicle_data" in url:
+            self.vehicle_data_calls += 1
             if self.world.get("charge_state_http", 200) != 200:
                 return FakeResponse(self.world["charge_state_http"], {})
             # HTTP 200 でありながら本文に response が無い応答。Tesla側の仕様として
@@ -242,7 +246,7 @@ class Result:
     """1回のシミュレーション結果。テストはこれに対してアサーションする。"""
 
     def __init__(self, commands, logs, override_writes, world, module, refresh_calls=None,
-                 wc_calls=None):
+                 wc_calls=None, vehicle_data_calls=0):
         self.commands = commands
         self.logs = logs
         self.override_writes = override_writes
@@ -252,6 +256,8 @@ class Result:
         self.refresh_calls = refresh_calls if refresh_calls is not None else []
         # 自宅ウォールコネクターへ投げたURLの一覧
         self.wc_calls = wc_calls if wc_calls is not None else []
+        # 課金対象の vehicle_data を叩いた回数
+        self.vehicle_data_calls = vehicle_data_calls
 
     def count(self, command):
         return self.commands.count(command)
@@ -414,7 +420,7 @@ def run_loop(tmp_path):
 
         return Result(
             session.commands, capture.records, override_state["writes"], world, module,
-            refresh_calls, wc_session.calls
+            refresh_calls, wc_session.calls, session.vehicle_data_calls
         )
 
     return _run

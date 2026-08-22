@@ -671,6 +671,83 @@ def test_ケーブルが接続されたら起こす判断に戻る(run_loop):
     assert res.has_log("ケーブルが接続されていないため、車両を起こしません")
 
 
+def test_online_のままケーブル未接続なら車両データを読み続けない(run_loop):
+    """2026-08-22 11:51〜15:32 の再現。車は online のままケーブル未接続で、
+    その日の vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
+
+    自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。
+    就寝中の車を起こさない判断（PR #22）と同じ根拠が online 側にも成り立つ。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=4 * 3600,
+        house_power=-5000,
+    )
+    # 10分周期で4時間なら約24サイクル。1時間ごとの読み直しだけに減っているはず。
+    assert res.vehicle_data_calls <= 6, f"読み続けている（{res.vehicle_data_calls}回）"
+    assert res.count("charge_start") == 0
+
+
+def test_ケーブル未接続でも定期的には車両データを読み直す(run_loop):
+    """読むのをやめきらないこと。決め打ちの長さで盲目区間を作らないため。
+
+    読まない間に外出先で充電を始めても記録できない。ケーブルの再接続と違い、
+    こちらはウォールコネクター側からは分からない。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=4 * 3600,
+        house_power=-5000,
+    )
+    assert res.vehicle_data_calls >= 4, f"読み直していない（{res.vehicle_data_calls}回）"
+
+
+def test_ケーブルが挿し直されたら間隔を待たずに読み直す(run_loop):
+    """復帰の検知に遅れを作らないこと。
+
+    予算を50分にしてあるため、1時間ごとの読み直しはこの試験では発火しない。
+    それでも充電が始まるなら、ウォールコネクター側で再接続を検知している。
+    """
+    def plug_in_later(elapsed, world):
+        if elapsed >= 1800:
+            world["wc_vehicle_connected"] = True
+            world["charging_state"] = "Stopped"
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=3000,
+        house_power=-5000,
+        on_poll=plug_in_later,
+    )
+    assert res.count("charge_start") >= 1, "再接続を検知していない"
+
+
+def test_ウォールコネクターが読めなければ車両データを読み続ける(run_loop):
+    """判定不能な状況で挙動を変えない。デグレの余地を残さないため。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_raise": True,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=4 * 3600,
+        house_power=-5000,
+    )
+    assert res.vehicle_data_calls >= 20, f"従来どおり読んでいない（{res.vehicle_data_calls}回）"
+
+
 def test_ウォールコネクターが読めなければ従来どおり起こす(run_loop):
     """読み取れない状況で挙動を変えない。デグレの余地を残さないため。"""
     res = run_loop(

@@ -145,6 +145,18 @@ WALL_CONNECTOR_TIMEOUT_SEC: float = float(config.get("WALL_CONNECTOR_TIMEOUT_SEC
 # 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
 WALL_CONNECTOR_ATTEMPTS: int = int(config.get("WALL_CONNECTOR_ATTEMPTS", 2))
 
+# ケーブル未接続の車が online のままのとき、vehicle_data を実際に読み直す間隔（秒）。
+#
+# 自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。それでも
+# 2026-08-22 の 11:51〜15:32 は10分ごとに問い合わせ続けており、その日の
+# vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
+#
+# ただし完全に読むのをやめることはしない。その間に外出先で充電を始めても記録できず、
+# 決め打ちの長さで盲目区間を作らないという方針（`skip_wake_until` を毎サイクル
+# 判断し直す理由と同じ）に反する。ケーブルの再接続はウォールコネクター側で
+# 毎サイクル検知するため、この間隔は「外出先の充電を取りこぼさない上限」だけを決める。
+DISCONNECTED_PROBE_INTERVAL_SEC: int = int(config.get("DISCONNECTED_PROBE_INTERVAL_SEC", 3600))
+
 # 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
 WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 
@@ -172,11 +184,14 @@ STATUS_CHARGING: str = "Charging"
 STATUS_STOPPED: str = "Stopped"
 # 充電開始処理の途中。コマンドを重ねず次サイクルまで待つ。
 STATUS_STARTING: str = "Starting"
+# ケーブルが繋がっていないステータス。ウォールコネクターの応答と突き合わせる箇所が
+# 複数あるため、文字列を直接書かず定数にしておく。
+STATUS_DISCONNECTED: str = "Disconnected"
 # 終端ステータス：これ以上こちらから充電を促しても意味がない状態。
 # 満充電(Complete)にcharge_startを送り続けると、車両を無駄に起こしAPIを浪費するだけになる。
-TERMINAL_STATUSES: frozenset = frozenset({"Disconnected", "Complete", "NoPower"})
+TERMINAL_STATUSES: frozenset = frozenset({STATUS_DISCONNECTED, "Complete", "NoPower"})
 TERMINAL_STATUS_LABELS: Dict[str, str] = {
-    "Disconnected": "充電ケーブルが未接続",
+    STATUS_DISCONNECTED: "充電ケーブルが未接続",
     "Complete": "満充電に到達済み",
     "NoPower": "充電設備から給電されていない",
 }
@@ -726,6 +741,8 @@ def main() -> None:
     night_last_observation: str = ""
     # 満充電・ケーブル未接続などの終端状態を観測したら、この時刻までは車両を起こさない
     skip_wake_until: float = 0.0
+    # ケーブル未接続を観測したあと、次に vehicle_data を読み直してよい時刻
+    next_disconnected_probe_at: float = 0.0
     # 直前サイクルで観測した充電ステータス（外部からの手動停止を検知するために保持する）
     prev_charging_status: str = ""
 
@@ -953,7 +970,7 @@ def main() -> None:
                     time.sleep(TERMINAL_BACKOFF_SEC)
                     continue
 
-                if prev_charging_status == "Disconnected" and read_wall_connector() == WC_NOT_CONNECTED:
+                if prev_charging_status == STATUS_DISCONNECTED and read_wall_connector() == WC_NOT_CONNECTED:
                     # ケーブルが自宅に繋がっていない。起こしても Disconnected を読み直すだけで、
                     # 充電は始められない。ケーブルを挿せば車両は自らオンラインになり、
                     # 課金されない車両リストで検知できるため、確認のために起こす必要がない。
@@ -1012,6 +1029,34 @@ def main() -> None:
                                 f"起動後に余剰を測り直しました: {house_power} W → {refreshed_power} W"
                             )
                         house_power = refreshed_power
+
+            if (
+                vehicle_state not in ("asleep", "offline")
+                and prev_charging_status == STATUS_DISCONNECTED
+                and time.time() < next_disconnected_probe_at
+                and read_wall_connector() == WC_NOT_CONNECTED
+            ):
+                # 直近の観測がケーブル未接続で、いまも自宅の充電器には何も繋がっていない。
+                # 読み直しても Disconnected を読み直すだけで、自宅では充電を開始できない。
+                # 就寝中の車を起こさない判断（PR #22）と同じ根拠を、online 側にも適用する。
+                #
+                # 2026-08-22 11:51〜15:32、車は online のままケーブル未接続で、その日の
+                # vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
+                #
+                # 読むのをやめきらないのは、その間に外出先で充電を始めても記録できないため。
+                # DISCONNECTED_PROBE_INTERVAL_SEC ごとに必ず読み直す。
+                #
+                # ケーブルが挿し直されれば vehicle_connected が true に戻り、この条件は
+                # 次のサイクルで成立しなくなる。復帰の検知に遅れは生じない。
+                # 読み取れない場合も成立せず、従来どおり毎サイクル読む。
+                below_min_count = 0
+                skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                logger.info(
+                    "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
+                    f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
+                )
+                time.sleep(TERMINAL_BACKOFF_SEC)
+                continue
 
             state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
             s_res = proxy_session.get(state_url, headers=headers, timeout=10)
@@ -1089,6 +1134,10 @@ def main() -> None:
                 # 送り続けていた（2026-07-15 の 03:28〜07:39 で60回）。
                 below_min_count = 0
                 skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                if charging_status == STATUS_DISCONNECTED:
+                    # 次にこの車両データを読み直す時刻。online のまま未接続が続く間、
+                    # 毎サイクル読み直さないための基準になる。
+                    next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
                 reason_label = TERMINAL_STATUS_LABELS.get(charging_status, charging_status)
                 logger.info(
                     f"{reason_label}のため、充電コマンドの送信をスキップします。{TERMINAL_BACKOFF_SEC // 60}分待機します。"
