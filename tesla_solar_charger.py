@@ -860,6 +860,31 @@ def main() -> None:
                     vehicle = vehicles[0] if vehicles else {}
                     vehicle_state = str(vehicle.get("state", ""))
 
+                    # 判定に使う事実を、分岐に入る前に確定させる。elif の条件式の中で
+                    # 評価してしまうと、「記録スイッチのために読んだのか」を後段の
+                    # 観測ログへ渡せない。ログにその理由が出ないと、課金された夜を
+                    # 後から見て理由を追えなくなる。
+                    #
+                    # 車両リストが取れなかった場合（401 を含む）は vehicle が空になるため、
+                    # ウォールコネクターへの問い合わせも行わない。
+                    cable_absent: bool = False
+                    probe_read: bool = False
+                    if vehicle and vehicle_state not in ("asleep", "offline"):
+                        cable_absent = (
+                            prev_charging_status == STATUS_DISCONNECTED
+                            # ウォールコネクターの確認を、記録の判定より先に行う。日中側と同じ順序である。
+                            # 後回しにすると、記録がONで読み直し時刻に達したサイクルでは
+                            # 一度も問い合わせず、read_wall_connector() が担っている
+                            # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
+                            # 代償は宅内LANへのGET 1回（無課金・28ms）である。
+                            and read_wall_connector() == WC_NOT_CONNECTED
+                        )
+                        probe_read = (
+                            cable_absent
+                            and away_probe
+                            and time.time() >= next_disconnected_probe_at
+                        )
+
                     if v_res.status_code == 401:
                         # 日中ループと同じ扱いにする。クライアント側の期限推定より早く
                         # サーバー側で失効した場合（クロックずれ・失効の前倒し等）、
@@ -883,16 +908,7 @@ def main() -> None:
                         log_night_observation(
                             f"車両は『{vehicle_state}』のため充電していないと判断し、そのまま休止します。"
                         )
-                    elif (
-                        prev_charging_status == STATUS_DISCONNECTED
-                        # ウォールコネクターの確認を、記録の判定より先に置く。日中側と同じ順序である。
-                        # 後ろに置くと、記録がONで読み直し時刻に達したサイクルでは and の短絡評価により
-                        # 一度も問い合わせず、read_wall_connector() が担っている
-                        # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
-                        # 代償は宅内LANへのGET 1回（無課金・28ms）である。
-                        and read_wall_connector() == WC_NOT_CONNECTED
-                        and not (away_probe and time.time() >= next_disconnected_probe_at)
-                    ):
+                    elif cable_absent and not probe_read:
                         # 日中と同じ根拠である。自宅の充電器に何も繋がっていなければ、この車は
                         # 自宅で充電していない。夜間ループが車両データを読むのは自宅の系統充電を
                         # 止めるためであり、止めるべきものが無いなら読む理由も無い。
@@ -974,9 +990,13 @@ def main() -> None:
                                 # 停止操作が不要だったこと自体を残す。無言で済ませると
                                 # 「夜間チェックが本当に走ったのか」を後から追えない。
                                 night_stop_failures = 0
+                                # 記録スイッチのために読んだ場合は、その旨を同じ行へ添える。
+                                # 別行にすると log_night_observation の重複抑止が効かず、
+                                # 10分ごとに同じ行が並んで変化が埋もれる。
+                                probe_note: str = "（外出先の充電記録により取得）" if probe_read else ""
                                 log_night_observation(
                                     f"車両は『{vehicle_state}』・充電状態『{night_status or '不明'}』のため、"
-                                    "停止操作は不要と判断しました。"
+                                    f"停止操作は不要と判断しました。{probe_note}"
                                 )
                 except Exception as e:
                     night_stop_failures += 1

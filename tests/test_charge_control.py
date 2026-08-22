@@ -741,6 +741,24 @@ def test_夜間でも記録が有効なら定期的に読み直す(run_loop):
     vitals_calls = [url for url in res.wc_calls if url.endswith("/api/1/vitals")]
     assert len(vitals_calls) >= 8, f"ウォールコネクターを確認していない（{len(vitals_calls)}回）"
 
+    # 課金された理由が観測ログに残ること。夜間の観測行は状況が変わったときだけ
+    # 出力するため、別行を足さずに同じ行へ織り込んでいる。
+    assert res.has_log("（外出先の充電記録により取得）")
+
+
+def test_記録が無効な夜間の観測行に理由を付けない(run_loop):
+    """既定の夜には無い注記であること。あると常時ONだと誤読される。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Stopped", "amps": 4,
+            "wc_vehicle_connected": True,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=3600,
+    )
+    assert res.has_log("停止操作は不要と判断しました")
+    assert not res.has_log("（外出先の充電記録により取得）")
+
 
 def test_夜間にケーブルが繋がっていれば従来どおり毎サイクル読む(run_loop):
     """自宅で繋がっている車の監視を弱めないこと。
