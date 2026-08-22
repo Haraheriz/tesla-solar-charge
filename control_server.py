@@ -9,7 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Any, Dict
 
-from override_state import read_override, write_override
+from override_state import read_away_probe, read_override, write_away_probe, write_override
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -92,6 +92,19 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
   button#toggle.on { background:#238636; color:#ffffff; }
   button#toggle:disabled { opacity:0.5; }
   button#toggle:focus-visible { outline:3px solid #58a6ff; outline-offset:3px; }
+  /* 主操作（フル充電モード）と従の操作（外出先の充電記録）を罫線で分ける。
+     どちらも「押すと何かが変わる」ため、大きさと色で優先順位を明示する。 */
+  .divider { width:260px; height:1px; background:#21262d; margin:32px auto 24px; }
+  .secondary { max-width:280px; margin:0 auto; }
+  .secondary .status { font-size:15px; margin-bottom:14px; }
+  /* 最小タップ領域はiOS 44pt / Android 48dp を下限の目安にしている。 */
+  button#probe { display:block; width:100%; min-height:48px; border-radius:8px; border:none;
+                 font-size:16px; font-weight:600; padding:12px 18px; cursor:pointer; transition: background .2s; }
+  button#probe.off { background:#21262d; color:#e6edf3; }
+  button#probe.on { background:#1f6feb; color:#ffffff; }
+  button#probe:disabled { opacity:0.5; }
+  button#probe:focus-visible { outline:3px solid #58a6ff; outline-offset:3px; }
+  .secondary p.note { color:#6e7681; font-size:13px; line-height:1.5; margin:12px 0 0; text-align:center; }
   .updated { margin-top:24px; font-size:13px; color:#6e7681; text-align:center; }
 </style>
 </head>
@@ -106,6 +119,16 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
     <!-- ボタン内テキストは常に「これを押すと何が起きるか（未来のアクション）」のみを示し、
          現在の状態は上の.statusだけが伝える。aria-pressedで状態自体も支援技術に伝える。 -->
     <button id="toggle" class="off" type="button" disabled aria-pressed="false" aria-describedby="status">...</button>
+    <div class="divider" role="separator"></div>
+    <section class="secondary">
+      <div class="status off" id="probe-status" role="status" aria-live="polite" aria-atomic="true">
+        <span class="label">外出先の充電記録：</span><span id="probe-status-value">読み込み中...</span>
+      </div>
+      <button id="probe" class="off" type="button" disabled aria-pressed="false" aria-describedby="probe-status">...</button>
+      <!-- 金額を先に見せる。これは充電の制御ではなく記録のための支出であり、
+           押す前に代償が見えているべきものである。 -->
+      <p class="note">外出先の急速充電器で車両が返す値を記録します。自宅の充電器にケーブルが繋がっていない間だけ働き、1回の外出でおよそ¥7かかります。</p>
+    </section>
     <div class="updated" id="updated" aria-hidden="true"></div>
   </main>
 
@@ -125,6 +148,16 @@ async function setOverride(enabled) {
     body: JSON.stringify({ enabled })
   });
   if (!res.ok) throw new Error("override update failed");
+  return res.json();
+}
+
+async function setAwayProbe(enabled) {
+  const res = await fetch(`/api/away_probe?token=${encodeURIComponent(TOKEN)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled })
+  });
+  if (!res.ok) throw new Error("away probe update failed");
   return res.json();
 }
 
@@ -149,6 +182,24 @@ function render(state) {
     btn.className = "off";
     btn.setAttribute("aria-pressed", "false");
   }
+  const probeStatusEl = document.getElementById("probe-status");
+  const probeStatusValueEl = document.getElementById("probe-status-value");
+  const probeBtn = document.getElementById("probe");
+  probeBtn.disabled = false;
+  if (state.away_probe) {
+    probeStatusValueEl.textContent = "記録中（10分ごとに車両を確認）";
+    probeStatusEl.className = "status on";
+    probeBtn.textContent = "記録を停止する";
+    probeBtn.className = "on";
+    probeBtn.setAttribute("aria-pressed", "true");
+  } else {
+    probeStatusValueEl.textContent = "記録しない";
+    probeStatusEl.className = "status off";
+    probeBtn.textContent = "記録を開始する";
+    probeBtn.className = "off";
+    probeBtn.setAttribute("aria-pressed", "false");
+  }
+
   updatedEl.textContent = "最終更新: " + new Date().toLocaleTimeString("ja-JP");
 }
 
@@ -171,6 +222,19 @@ document.getElementById("toggle").addEventListener("click", async () => {
   } catch (e) {
     alert("切替に失敗しました。通信状態を確認してください。");
     btn.disabled = false;
+  }
+});
+
+document.getElementById("probe").addEventListener("click", async () => {
+  const probeBtn = document.getElementById("probe");
+  const currentlyOn = probeBtn.classList.contains("on");
+  probeBtn.disabled = true;
+  try {
+    const state = await setAwayProbe(!currentlyOn);
+    render(state);
+  } catch (e) {
+    alert("切替に失敗しました。通信状態を確認してください。");
+    probeBtn.disabled = false;
   }
 });
 
@@ -261,7 +325,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not self._check_token(query):
                 self._send_json(403, {"error": "invalid token"})
                 return
-            self._send_json(200, {"manual_override": read_override()})
+            self._send_json(200, {"manual_override": read_override(), "away_probe": read_away_probe()})
             return
 
         if parsed.path == "/":
@@ -303,7 +367,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query: Dict[str, list] = parse_qs(parsed.query)
 
-        if parsed.path != "/api/override":
+        if parsed.path not in ("/api/override", "/api/away_probe"):
             self.send_response(404)
             self.end_headers()
             return
@@ -321,9 +385,17 @@ class ControlHandler(BaseHTTPRequestHandler):
             return
 
         enabled = bool(payload.get("enabled"))
-        write_override(enabled)
-        logger.info(f"マニュアル・オーバーライドを {'有効（フル充電）' if enabled else '無効（太陽光追従に復帰）'} に切替えました。")
-        self._send_json(200, {"manual_override": enabled})
+
+        if parsed.path == "/api/override":
+            write_override(enabled)
+            logger.info(f"マニュアル・オーバーライドを {'有効（フル充電）' if enabled else '無効（太陽光追従に復帰）'} に切替えました。")
+        else:
+            write_away_probe(enabled)
+            logger.info(f"外出先の充電記録を {'有効（課金対象の問い合わせを再開）' if enabled else '無効'} に切替えました。")
+
+        # 画面は1回の応答で両方を描き直す。片方だけ返すと、もう一方の表示が
+        # 次のポーリング（5秒後）まで古いままになる。
+        self._send_json(200, {"manual_override": read_override(), "away_probe": read_away_probe()})
 
     def log_message(self, format: str, *args: Any) -> None:
         logger.debug(format % args)
