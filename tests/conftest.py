@@ -127,6 +127,10 @@ class FakeSession:
         if "vehicle_data" in url:
             if self.world.get("charge_state_http", 200) != 200:
                 return FakeResponse(self.world["charge_state_http"], {})
+            # HTTP 200 でありながら本文に response が無い応答。Tesla側の仕様として
+            # 起こりうるため、制御ループが周期を守れるかを確かめる必要がある。
+            if self.world.get("charge_state_response_missing"):
+                return FakeResponse(200, {})
             return FakeResponse(200, {"response": {"charge_state": {
                 "charging_state": self.world["charging_state"],
                 "charge_current_request": self.world["amps"],

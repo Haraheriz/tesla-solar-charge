@@ -1009,6 +1009,12 @@ def main() -> None:
 
             response_json = s_res.json().get("response")
             if response_json is None:
+                # HTTP 200 だが本文に response が無い。ここは以前、ログも待機も無いまま
+                # 次の周回へ入っていた。この状態が続くと3分の制御周期を無視して全速で回り、
+                # 課金対象の vehicle_data を叩き続ける。しかも何も記録しないため、
+                # 起きていても後から追う手掛かりが残らない。
+                logger.warning("車両データの応答に response が含まれていません。3分待機します。")
+                time.sleep(180)
                 continue
 
             # charge_state はキーが存在しつつ値が null のことがあるため、get のデフォルトでは防げない。

@@ -818,6 +818,29 @@ def test_未知のステータスでは安全側に倒してコマンドを送�
     assert res.has_log("未知の充電ステータス", level="WARNING")
 
 
+def test_responseが無い応答でも制御周期を守る(run_loop):
+    """HTTP 200 で本文に response が無いとき、無言・無待機で回り続けないこと。
+
+    修正前はログも sleep も無いまま continue しており、この応答が続くと3分周期を
+    無視して全速で回る。vehicle_data は課金対象であり、しかも何も記録されないため
+    起きても後から追えない。仮想時計は sleep でしか進まないので、待機が無ければ
+    このテストは pytest.ini の timeout に掛かって止まる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "charge_state_response_missing": True,
+        },
+        start="2026-08-22 10:00:00",
+        budget_sec=1800,
+        house_power=-5000,
+    )
+    assert res.has_log("response が含まれていません", level="WARNING")
+    # 30分を3分周期で回れば10回程度。待機が無ければ桁が変わる。
+    cycles = len([m for m in res.messages() if "定期チェック開始" in m])
+    assert cycles <= 12, f"周期を守れていない（{cycles}回）"
+
+
 def test_開始処理中はコマンドを重ねない(run_loop):
     res = run_loop(
         world={"vehicle_state": "online", "charging_state": "Starting", "amps": 16},
