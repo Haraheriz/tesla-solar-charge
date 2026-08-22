@@ -111,6 +111,7 @@ chmod 600 tesla_config.json
 | `WALL_CONNECTOR_SERIAL` | | `""` | 任意。設定するとIPアドレスが別の機器に変わった場合を起動時に検知できる |
 | `WALL_CONNECTOR_TIMEOUT_SEC` | | `5` | ウォールコネクターへのHTTPタイムアウト秒 |
 | `WALL_CONNECTOR_ATTEMPTS` | | `2` | 読み取り失敗時に、その場で取り直す回数（1回目を含む） |
+| `DISCONNECTED_PROBE_INTERVAL_SEC` | | `3600` | ケーブル未接続のまま `online` のとき、車両データを読み直す間隔（秒） |
 | `FAST_CHARGER_POWER_KW` | | `15` | 外出先判定のフォールバック閾値 |
 | `MIN_AMPS` | | `4` | 充電を維持する下限電流。これを下回ると停止する |
 | `MAX_AMPS` | | `48` | 上限電流。**充電設備とブレーカーの容量に合わせること** |
