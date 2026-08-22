@@ -735,6 +735,12 @@ def test_夜間でも記録が有効なら定期的に読み直す(run_loop):
     # 夜間は10分周期。間隔も既定600秒なので、ほぼ毎サイクル読み直すことになる。
     assert res.vehicle_data_calls >= 8, f"記録が有効なのに読んでいない（{res.vehicle_data_calls}回）"
 
+    # 読み直す判断をしたサイクルでも、ウォールコネクターは毎回確認していること。
+    # 記録の判定を先に置くと and の短絡評価で問い合わせが飛び、
+    # 「読めなくなった／回復した」の検知がそのサイクルだけ失われる。
+    vitals_calls = [url for url in res.wc_calls if url.endswith("/api/1/vitals")]
+    assert len(vitals_calls) >= 8, f"ウォールコネクターを確認していない（{len(vitals_calls)}回）"
+
 
 def test_夜間にケーブルが繋がっていれば従来どおり毎サイクル読む(run_loop):
     """自宅で繋がっている車の監視を弱めないこと。

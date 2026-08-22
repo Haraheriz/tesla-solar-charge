@@ -885,8 +885,13 @@ def main() -> None:
                         )
                     elif (
                         prev_charging_status == STATUS_DISCONNECTED
-                        and not (away_probe and time.time() >= next_disconnected_probe_at)
+                        # ウォールコネクターの確認を、記録の判定より先に置く。日中側と同じ順序である。
+                        # 後ろに置くと、記録がONで読み直し時刻に達したサイクルでは and の短絡評価により
+                        # 一度も問い合わせず、read_wall_connector() が担っている
+                        # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
+                        # 代償は宅内LANへのGET 1回（無課金・28ms）である。
                         and read_wall_connector() == WC_NOT_CONNECTED
+                        and not (away_probe and time.time() >= next_disconnected_probe_at)
                     ):
                         # 日中と同じ根拠である。自宅の充電器に何も繋がっていなければ、この車は
                         # 自宅で充電していない。夜間ループが車両データを読むのは自宅の系統充電を
