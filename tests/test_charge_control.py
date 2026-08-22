@@ -702,6 +702,62 @@ def test_ケーブルが接続されたら起こす判断に戻る(run_loop):
     assert res.has_log("ケーブルが接続されていないため、車両を起こしません")
 
 
+def test_夜間もケーブル未接続なら車両データを読まない(run_loop):
+    """夜間ループが車両データを読むのは自宅の系統充電を止めるためである。
+
+    自宅の充電器に何も繋がっていなければ止めるべきものが無く、読む理由も無い。
+    夜間帯は13時間・78サイクルあり、日中側より無駄が大きい。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=4 * 3600,
+    )
+    # 10分周期で4時間なら約24サイクル。未接続と分かる最初の1回で足りる。
+    assert res.vehicle_data_calls <= 2, f"夜間に読み続けている（{res.vehicle_data_calls}回）"
+    assert res.has_log("ケーブルが接続されていないため、車両データを取得しません")
+
+
+def test_夜間でも記録が有効なら定期的に読み直す(run_loop):
+    """記録スイッチは昼夜で挙動を変えない。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+            "away_probe": True,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=4 * 3600,
+    )
+    # 夜間は10分周期。間隔も既定600秒なので、ほぼ毎サイクル読み直すことになる。
+    assert res.vehicle_data_calls >= 8, f"記録が有効なのに読んでいない（{res.vehicle_data_calls}回）"
+
+
+def test_夜間にケーブルが繋がっていれば従来どおり毎サイクル読む(run_loop):
+    """自宅で繋がっている車の監視を弱めないこと。
+
+    夜間に始まった充電を止められなくなるのが最も避けたい退行である。
+    """
+    def start_charging_later(elapsed, world):
+        if elapsed >= 3600:
+            world["charging_state"] = "Charging"
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": True,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=4 * 3600,
+        on_poll=start_charging_later,
+    )
+    assert res.vehicle_data_calls >= 20, f"読む回数が減っている（{res.vehicle_data_calls}回）"
+    assert res.count("charge_stop") >= 1, "夜間に始まった充電を止めていない"
+
+
 def test_online_のままケーブル未接続なら車両データを読み続けない(run_loop):
     """2026-08-22 11:51〜15:32 の再現。車は online のままケーブル未接続で、
     その日の vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。

@@ -883,6 +883,28 @@ def main() -> None:
                         log_night_observation(
                             f"車両は『{vehicle_state}』のため充電していないと判断し、そのまま休止します。"
                         )
+                    elif (
+                        prev_charging_status == STATUS_DISCONNECTED
+                        and not (away_probe and time.time() >= next_disconnected_probe_at)
+                        and read_wall_connector() == WC_NOT_CONNECTED
+                    ):
+                        # 日中と同じ根拠である。自宅の充電器に何も繋がっていなければ、この車は
+                        # 自宅で充電していない。夜間ループが車両データを読むのは自宅の系統充電を
+                        # 止めるためであり、止めるべきものが無いなら読む理由も無い。
+                        #
+                        # 夜間帯は13時間・78サイクルあるため、外出先で車が起きたまま夜を跨ぐと
+                        # 約¥22を費やす。日中側（2026-08-22 の実績で約¥6.6）より大きい。
+                        #
+                        # night_stop_failures は消費せず0へ戻す。通信の失敗ではなく、
+                        # 「充電していないと確認できた」側だからである（asleep/offline と同じ扱い）。
+                        #
+                        # ケーブルが挿し直されれば vehicle_connected が true に戻り、次の巡回で
+                        # 通常の経路に入る。ウォールコネクターを読み取れない場合も成立せず、
+                        # 従来どおり毎サイクル読む。
+                        night_stop_failures = 0
+                        log_night_observation(
+                            "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
+                        )
                     else:
                         vin = vehicle.get("vin", "") or vin
                         s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
@@ -901,6 +923,10 @@ def main() -> None:
                             night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
                             night_status = str(night_charge_state.get("charging_state") or "")
                             prev_charging_status = night_status
+                            if night_status == STATUS_DISCONNECTED:
+                                # 次に読み直してよい時刻。日中側と同じ基準で更新しておかないと、
+                                # 夜をまたいだ時点で外出先の充電記録の間隔がずれる。
+                                next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
                             night_site, night_site_reason = (
                                 classify_charging_site(night_charge_state)
                                 if night_status == STATUS_CHARGING else (SITE_UNKNOWN, "")
