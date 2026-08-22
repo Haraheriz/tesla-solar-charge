@@ -718,27 +718,50 @@ def test_online_のままケーブル未接続なら車両データを読み続�
         budget_sec=4 * 3600,
         house_power=-5000,
     )
-    # 10分周期で4時間なら約24サイクル。1時間ごとの読み直しだけに減っているはず。
-    assert res.vehicle_data_calls <= 6, f"読み続けている（{res.vehicle_data_calls}回）"
+    # 10分周期で4時間なら約24サイクル。既定（記録OFF）では、未接続を知った最初の
+    # 1回だけで足りる。回数を緩く見ると、間隔を空けただけの実装でも通ってしまう。
+    assert res.vehicle_data_calls <= 2, f"読み続けている（{res.vehicle_data_calls}回）"
     assert res.count("charge_start") == 0
 
 
-def test_ケーブル未接続でも定期的には車両データを読み直す(run_loop):
-    """読むのをやめきらないこと。決め打ちの長さで盲目区間を作らないため。
+def test_外出先の充電記録が有効なら定期的に読み直す(run_loop):
+    """記録をONにしたときだけ、ケーブル未接続でも読み直すこと。
 
-    読まない間に外出先で充電を始めても記録できない。ケーブルの再接続と違い、
-    こちらはウォールコネクター側からは分からない。
+    急速充電器が返すフィールドの実値は充電中にしか読めない。2026-08-10 の
+    テンフィールズファクトリーのFLASHでは、記録する仕組みが無く取り逃している。
     """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+            "away_probe": True,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=2 * 3600,
+        house_power=-5000,
+    )
+    # 10分間隔で2時間なら12回前後。既定（読まない）との差が出ていればよい。
+    assert res.vehicle_data_calls >= 8, f"記録が有効なのに読んでいない（{res.vehicle_data_calls}回）"
+    assert res.has_log("外出先の充電記録が有効なため")
+
+
+def test_記録を途中で有効にしたら読み直しに移る(run_loop):
+    """出先でONにする場面の再現。再起動を挟まずに反映されること。"""
+    def enable_later(elapsed, world):
+        if elapsed >= 3600:
+            world["away_probe"] = True
+
     res = run_loop(
         world={
             "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
             "wc_vehicle_connected": False,
         },
         start="2026-08-22 11:51:00",
-        budget_sec=4 * 3600,
+        budget_sec=2 * 3600,
         house_power=-5000,
+        on_poll=enable_later,
     )
-    assert res.vehicle_data_calls >= 4, f"読み直していない（{res.vehicle_data_calls}回）"
+    assert res.has_log("外出先の充電記録が有効なため"), "ONにしても読み直しへ移っていない"
 
 
 def test_ケーブルが挿し直されたら間隔を待たずに読み直す(run_loop):

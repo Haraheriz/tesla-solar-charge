@@ -85,6 +85,8 @@ class FakeSession:
 
     world 辞書が「車両の実際の状態」を表し、コマンドを受けると変化する。
     world["command_results"] で個別コマンドをわざと失敗させられる。
+    world["away_probe"] は外出先の充電記録フラグ（既定 False）で、FakeSession ではなく
+    read_away_probe_state の差し替えが読む。
     """
 
     def __init__(self, world):
@@ -367,6 +369,14 @@ def run_loop(tmp_path):
             "writes": [],
         }
         module.read_override_state = lambda: (override_state["enabled"], override_state["updated_at"])
+
+        # 外出先の充電記録のフラグ。world 経由にしてあるのは、on_poll から他のキーと
+        # 同じように途中で切替えられるようにするため（出先でONにする場面の再現）。
+        # 差し替えを忘れると開発機のリポジトリ直下の override_state.json を読みに行き、
+        # 手元の状態でテスト結果が変わる。
+        module.read_away_probe_state = lambda: (
+            bool(world.get("away_probe", False)), start_epoch - 3600
+        )
 
         def _write_override(enabled):
             override_state["enabled"] = enabled

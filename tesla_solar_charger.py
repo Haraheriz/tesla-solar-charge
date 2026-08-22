@@ -10,7 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
-from override_state import read_override_state, write_override
+from override_state import read_away_probe_state, read_override_state, write_override
 from wall_connector import (
     WC_DELIVERING,
     WC_NOT_CONNECTED,
@@ -146,17 +146,21 @@ WALL_CONNECTOR_TIMEOUT_SEC: float = float(config.get("WALL_CONNECTOR_TIMEOUT_SEC
 # 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
 WALL_CONNECTOR_ATTEMPTS: int = int(config.get("WALL_CONNECTOR_ATTEMPTS", 2))
 
-# ケーブル未接続の車が online のままのとき、vehicle_data を実際に読み直す間隔（秒）。
+# 「外出先の充電記録」が有効なとき、ケーブル未接続の車両データを読み直す間隔（秒）。
 #
-# 自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。それでも
-# 2026-08-22 の 11:51〜15:32 は10分ごとに問い合わせ続けており、その日の
-# vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
+# 自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。車両データを読んでも
+# 電流調整・停止・開始のどの判断も変わらないため、既定では読まない。2026-08-22 の
+# 11:51〜15:32 は10分ごとに問い合わせ続けており、その日の vehicle_data 38件のうち
+# 23件（約¥6.6）をこの状態に費やしていた。
 #
-# ただし完全に読むのをやめることはしない。その間に外出先で充電を始めても記録できず、
-# 決め打ちの長さで盲目区間を作らないという方針（`skip_wake_until` を毎サイクル
-# 判断し直す理由と同じ）に反する。ケーブルの再接続はウォールコネクター側で
-# 毎サイクル検知するため、この間隔は「外出先の充電を取りこぼさない上限」だけを決める。
-DISCONNECTED_PROBE_INTERVAL_SEC: int = int(config.get("DISCONNECTED_PROBE_INTERVAL_SEC", 3600))
+# 読むことに意味があるのは、外出先での充電を記録したいときだけである。急速充電器が返す
+# フィールドの実値は未観測のものが多く（docs/03_operation.md の観測記録を参照）、
+# 記録できるのは充電中に読んだときに限られる。そのため有効・無効はスマホから切替える
+# （override_state.json の away_probe）。設定ファイルは起動時にしか読まないため、
+# 出発の直前や充電器の前では変更できないからである。
+#
+# ここが決めるのは有効時の間隔だけである。0以下は指定できない（無効化はフラグ側が担う）。
+DISCONNECTED_PROBE_INTERVAL_SEC: int = int(config.get("DISCONNECTED_PROBE_INTERVAL_SEC", 600))
 
 # 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
 WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
@@ -782,6 +786,8 @@ def main() -> None:
     while True:
         now = time.localtime()
         manual_override, override_updated_at = read_override_state()
+        # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
+        away_probe, away_probe_updated_at = read_away_probe_state()
 
         # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
         # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
@@ -1055,7 +1061,6 @@ def main() -> None:
             if (
                 vehicle_state not in ("asleep", "offline")
                 and prev_charging_status == STATUS_DISCONNECTED
-                and time.time() < next_disconnected_probe_at
                 and read_wall_connector() == WC_NOT_CONNECTED
             ):
                 # 直近の観測がケーブル未接続で、いまも自宅の充電器には何も繋がっていない。
@@ -1065,20 +1070,31 @@ def main() -> None:
                 # 2026-08-22 11:51〜15:32、車は online のままケーブル未接続で、その日の
                 # vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
                 #
-                # 読むのをやめきらないのは、その間に外出先で充電を始めても記録できないため。
-                # DISCONNECTED_PROBE_INTERVAL_SEC ごとに必ず読み直す。
-                #
                 # ケーブルが挿し直されれば vehicle_connected が true に戻り、この条件は
-                # 次のサイクルで成立しなくなる。復帰の検知に遅れは生じない。
-                # 読み取れない場合も成立せず、従来どおり毎サイクル読む。
-                below_min_count = 0
-                skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
-                logger.info(
-                    "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
-                    f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
-                )
-                time.sleep(TERMINAL_BACKOFF_SEC)
-                continue
+                # 次のサイクルで成立しなくなる。復帰の検知に遅れは生じない。記録の有効・無効に
+                # 関わらず成立するため、記録をONのまま忘れても復帰は遅れない。
+                # ウォールコネクターを読み取れない場合も成立せず、従来どおり毎サイクル読む。
+                if away_probe and time.time() >= next_disconnected_probe_at:
+                    # 外出先での充電を記録するためだけに読む。課金対象であり、無言で
+                    # 払っていると後からログを見て「なぜこの日は高いのか」を追えない。
+                    # ONからの経過時間を添えるのは、切り忘れをこの行だけで気づけるようにするため。
+                    # 記録が実際に発生したときにしか出ないので、毎サイクルの通知にはならない。
+                    probe_label: str = (
+                        f"ON から{format_duration(time.time() - away_probe_updated_at)}経過"
+                        if away_probe_updated_at > 0 else "ON からの経過時間は不明"
+                    )
+                    logger.info(
+                        f"外出先の充電記録が有効なため（{probe_label}）、車両データを取得します。"
+                    )
+                else:
+                    below_min_count = 0
+                    skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                    logger.info(
+                        "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
+                        f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
+                    )
+                    time.sleep(TERMINAL_BACKOFF_SEC)
+                    continue
 
             state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
             s_res = proxy_session.get(state_url, headers=headers, timeout=10)
@@ -1157,8 +1173,8 @@ def main() -> None:
                 below_min_count = 0
                 skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
                 if charging_status == STATUS_DISCONNECTED:
-                    # 次にこの車両データを読み直す時刻。online のまま未接続が続く間、
-                    # 毎サイクル読み直さないための基準になる。
+                    # 次にこの車両データを読み直してよい時刻。外出先の充電記録が
+                    # 有効なときだけ参照される。無効なら、そもそも読み直さない。
                     next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
                 reason_label = TERMINAL_STATUS_LABELS.get(charging_status, charging_status)
                 logger.info(
