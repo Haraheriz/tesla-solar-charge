@@ -95,7 +95,7 @@ class FakeSession:
         self.commands = []
         self.verify = None
         self.vehicle_list_calls = 0
-        # 課金対象の vehicle_data を何回叩いたか。呼び出し回数そのものが費用であり、
+        # 課金対象の vehicle_data を何回呼び出したか。呼び出し回数そのものが費用であり、
         # 「読まずに済ませた」ことを検証するにはコマンド数では足りない。
         self.vehicle_data_calls = 0
 
@@ -259,7 +259,7 @@ class Result:
         self.refresh_calls = refresh_calls if refresh_calls is not None else []
         # 自宅ウォールコネクターへ投げたURLの一覧
         self.wc_calls = wc_calls if wc_calls is not None else []
-        # 課金対象の vehicle_data を叩いた回数
+        # 課金対象の vehicle_data を呼び出した回数
         self.vehicle_data_calls = vehicle_data_calls
 
     def count(self, command):
@@ -368,7 +368,7 @@ def run_loop(tmp_path):
 
         # 自宅ウォールコネクターへの実HTTPを止める。差し替えを忘れると
         # ci_config.json の 192.0.2.1（RFC 5737 のドキュメント用アドレス）へ
-        # 毎サイクル接続を試み、テストが黙って遅くなる。
+        # 毎サイクル接続を試み、テストの実行時間だけが伸びる。
         # tesla_solar_charger は read_vehicle_connected / read_serial を名前で
         # import しているが、どちらも呼び出し時に wall_connector.wc_session を見るため、
         # セッションを差し替えれば判定ロジック本体は本物が動く。
@@ -376,7 +376,7 @@ def run_loop(tmp_path):
         wall_connector.wc_session = wc_session
         # 取り直し回数はモジュール共有のカウンタである。前のテストの分を持ち越すと
         # 「取り直しで復帰した」ログが別のテストで出てしまう。
-        wall_connector.retry_saved_count = 0
+        wall_connector.first_attempt_failure_count = 0
 
         start_epoch = real_time.mktime(real_time.strptime(start, "%Y-%m-%d %H:%M:%S"))
         module.time = FakeTime(start_epoch, budget_sec)

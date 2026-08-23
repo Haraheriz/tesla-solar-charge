@@ -133,7 +133,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
       </div>
       <button id="probe" class="off" type="button" disabled aria-pressed="false" aria-describedby="probe-status">...</button>
       <!-- 金額を先に見せる。これは充電の制御ではなく記録のための支出であり、
-           押す前に代償が見えているべきものである。 -->
+           押す前に費用が見えているべきものである。 -->
       <p class="note">外出先の急速充電器で車両が返す値を記録します。自宅の充電器にケーブルが繋がっていない間だけ働き、1回の外出でおよそ¥7かかります。</p>
     </section>
     <div class="updated" id="updated" aria-hidden="true"></div>

@@ -19,7 +19,7 @@ from wall_connector import (
     read_delivering,
     read_serial,
     read_vehicle_connected,
-    take_retry_saved,
+    take_first_attempt_failures,
 )
 
 # Windows環境での標準出力のエンコーディング問題を解決
@@ -37,7 +37,7 @@ BACKUP_COUNT: int = 3
 
 # INFO と WARNING の間に「ATTENTION」レベルを設ける。
 # フル充電モード（マニュアル・オーバーライド）はユーザーが意図して入れる正常な状態であり
-# WARNING では意味が強すぎる。一方でINFOに埋もれると切り忘れに気づけないため、
+# WARNING では意味が強すぎる。一方でINFOの行に紛れて切り忘れに気づけないため、
 # 「異常ではないが人間の注意を向けたい事実」を専用レベルとして分離する。
 ATTENTION: int = 25
 logging.addLevelName(ATTENTION, "ATTENTION")
@@ -115,7 +115,7 @@ REMO_SAMPLE_INTERVAL_SEC: int = settings.integer("REMO_SAMPLE_INTERVAL_SEC", 10,
 # 費やすことになる。2026-08-13 12:42 に実際にそうなった。
 #
 # 既に online の車の充電開始は遅らせない。そちらの誤発火は約¥0.3であり、
-# 3分の遅れと引き合わない。
+# 3分の遅れによる損失のほうが大きい。
 # 0 はデバウンスなし（1サイクルで起こす）を意味する。STOP_DEBOUNCE_CYCLES と同様。
 WAKE_DEBOUNCE_CYCLES: int = settings.integer("WAKE_DEBOUNCE_CYCLES", 2, minimum=0)
 
@@ -129,7 +129,7 @@ TERMINAL_BACKOFF_SEC: int = settings.integer("TERMINAL_BACKOFF_SEC", 600, minimu
 
 # 終端ステータスを観測してから、就寝中の車両をWake Upしてよいと再び判断するまでの秒数。
 # 必ず TERMINAL_BACKOFF_SEC より十分長くすること。同じ値にすると、待機明けの時点で
-# ちょうど期限切れになり抑止が一度も効かない（満充電の車を延々と叩き起こす）。
+# ちょうど期限切れになり抑止が一度も効かない（満充電の車へ wake_up を繰り返し送る）。
 # 満充電・ケーブル未接続が解消されるとき（乗車・充電上限の変更・ケーブル接続）は
 # 車両が自分からオンラインになるため、その場合は待たずに通常の問い合わせ経路に入る。
 TERMINAL_WAKE_SUPPRESS_SEC: int = settings.integer("TERMINAL_WAKE_SUPPRESS_SEC", 3600, minimum=1)
@@ -552,7 +552,7 @@ def read_wall_connector() -> str:
     """自宅ウォールコネクターの接続状態を読む。状態が変わったときだけログへ残す。
 
     起動時の確認はループに入る前の1回きりである。稼働中に読めなくなったことを
-    黙って見過ごすと、「外出先の充電を止めてしまう」従来の挙動へ痕跡なしに退行する。
+    ログを出さずに見過ごすと、「外出先の充電を止めてしまう」従来の挙動へ痕跡なしに退行する。
     毎サイクル出すと3分毎に同じ行が並ぶため、変化したときだけ記録する。
     """
     global wall_connector_last_state
@@ -581,15 +581,15 @@ def report_wall_connector_retries() -> None:
 
     PR #21 で attempts=2 の再試行を入れて以降、1回目の失敗はどこにも現れなくなった。
     その再試行の根拠は「2026-08-11〜18 に読み取り失敗が週4回」という実測であり、
-    黙って救い続けると、悪化に気づけるのは「2回とも失敗する」ようになってからになる。
+    ログを出さずに成功させ続けると、悪化に気づけるのは「2回とも失敗する」ようになってからになる。
 
     読み取りを行う経路すべてから、その直後に呼ぶこと。カウンタはモジュール共有で、
     どこかで読み捨てるとその分の失敗が消える。
     """
-    saved: int = take_retry_saved()
-    if saved:
+    first_attempt_failures: int = take_first_attempt_failures()
+    if first_attempt_failures:
         logger.warning(
-            f"自宅ウォールコネクターの1回目の読み取りに失敗し、その場の取り直しで復帰しました（{saved}回）。"
+            f"自宅ウォールコネクターの1回目の読み取りに失敗し、2回目で成功しました（{first_attempt_failures}回）。"
             "頻度が上がるようならLANまたはウォールコネクター側を確認してください。"
         )
 
@@ -641,7 +641,7 @@ def classify_charging_site(charge_state: Dict[str, Any]) -> Tuple[str, str]:
     # 2026-08-13・14・18 に、自宅で充電中の車を3回「外出先」と誤判定した。
     # 肯定形（既知のDC種別のみ一致）にする案も採らない。観測できたDC側の値は
     # 'Tesla' の1件だけで、それは同じ場面で fast_charger_present=True が立っており
-    # 判定材料として何も足さない。未観測の値を並べれば、誤って外出先と判定する側に倒れる。
+    # 判定材料として何も足さない。未観測の値を並べれば、誤って外出先と判定しやすくなる。
 
     # 2. 自宅の充電器に何も繋がっていないなら、いま充電中の車は自宅にいない。
     #    これは所有台数に関係なく成立する。
@@ -752,7 +752,7 @@ def main() -> None:
     # 「外出先判定が効いているつもり」になる状態を、サービス再起動時に顕在化させる。
     global wall_connector_available
     if not WALL_CONNECTOR_HOST:
-        # INFO では毎サイクルのログに埋もれる。判定が無効であることは「異常ではないが
+        # INFO では毎サイクルのログに紛れる。判定が無効であることは「異常ではないが
         # 人間の注意を向けたい事実」そのものであり、設定漏れに気づけないと
         # スーパーチャージャーでの充電を停止させる従来の挙動に戻る。
         log_attention(
@@ -813,7 +813,7 @@ def main() -> None:
         """夜間休止中の観測結果を、状況が変わったときだけ記録する。
 
         夜間帯は毎サイクル（10分毎）観測するため、同じ行をそのまま出すと一晩で
-        約80行になり、本当に見たい変化がその中に埋もれる。
+        約80行になり、本当に見たい変化がその中で見つけにくくなる。
         """
         nonlocal night_last_observation
         if message != night_last_observation:
@@ -848,7 +848,7 @@ def main() -> None:
             # 車両側からの再開）は朝まで完全に無検知だった。実際 2026-07-31 18:07 に
             # 停止を確認したあと夜間に充電が再開し、08-01 09:40 に満充電で復帰している。
             #
-            # 毎サイクル叩くのは車両リスト（/api/1/vehicles）だけで、これは車両を起こさない。
+            # 毎サイクル呼び出すのは車両リスト（/api/1/vehicles）だけで、これは車両を起こさない。
             # asleep/offline の車両は充電していないため、そこで打ち切れば
             # 「寝ている車を起こさない」という設計思想（Insomnia Defense）は維持できる。
             if not night_stop_exhausted:
@@ -876,7 +876,7 @@ def main() -> None:
                             # 後回しにすると、記録がONで読み直し時刻に達したサイクルでは
                             # 一度も問い合わせず、read_wall_connector() が担っている
                             # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
-                            # 代償は宅内LANへのGET 1回（無課金・28ms）である。
+                            # 追加で発生するのは宅内LANへのGET 1回（無課金・28ms）である。
                             and read_wall_connector() == WC_NOT_CONNECTED
                         )
                         probe_read = (
@@ -903,7 +903,7 @@ def main() -> None:
                         )
                     elif vehicle_state in ("asleep", "offline"):
                         # 就寝中の車両は充電していない。充電が始まれば車両は自らオンラインになるため、
-                        # 次の巡回で捕まえられる。
+                        # 次の巡回で検知できる。
                         night_stop_failures = 0
                         log_night_observation(
                             f"車両は『{vehicle_state}』のため充電していないと判断し、そのまま休止します。"
@@ -987,12 +987,12 @@ def main() -> None:
                                         f"夜間休止中の充電停止に失敗しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再試行します。"
                                     )
                             else:
-                                # 停止操作が不要だったこと自体を残す。無言で済ませると
+                                # 停止操作が不要だったこと自体を残す。ログを出さずに済ませると
                                 # 「夜間チェックが本当に走ったのか」を後から追えない。
                                 night_stop_failures = 0
                                 # 記録スイッチのために読んだ場合は、その旨を同じ行へ添える。
                                 # 別行にすると log_night_observation の重複抑止が効かず、
-                                # 10分ごとに同じ行が並んで変化が埋もれる。
+                                # 10分ごとに同じ行が並んで変化が見つけにくくなる。
                                 probe_note: str = "（外出先の充電記録により取得）" if probe_read else ""
                                 log_night_observation(
                                     f"車両は『{vehicle_state}』・充電状態『{night_status or '不明'}』のため、"
@@ -1005,7 +1005,7 @@ def main() -> None:
                     )
 
                 if night_stop_failures >= NIGHT_STOP_MAX_ATTEMPTS:
-                    # 通信もコマンドも通らない状態でこれ以上叩き続けても回復せず、429を招くだけ。
+                    # 通信もコマンドも通らない状態でこれ以上呼び出し続けても回復せず、429を招くだけ。
                     # 朝まで沈黙することになるため、必ずCRITICALで顕在化させる。
                     night_stop_exhausted = True
                     logger.critical(
@@ -1092,7 +1092,7 @@ def main() -> None:
                     # 課金されない車両リストで検知できるため、確認のために起こす必要がない。
                     #
                     # 抑止のタイマー（skip_wake_until）には手を入れず、毎サイクル
-                    # ウォールコネクターに問い合わせ直す。決め打ちの長さで盲目区間を作らないため。
+                    # ウォールコネクターに問い合わせ直す。決め打ちの長さのあいだ、ウォールコネクターの状態を確認しない区間を作らないため。
                     # 読み取れなければこの条件は成立せず、従来どおり1時間ごとに起こす。
                     #
                     # 2026-08-12、フル充電モードが37時間ONのまま、ケーブル未接続の車を
@@ -1163,7 +1163,7 @@ def main() -> None:
                 # 関わらず成立するため、記録をONのまま忘れても復帰は遅れない。
                 # ウォールコネクターを読み取れない場合も成立せず、従来どおり毎サイクル読む。
                 if away_probe and time.time() >= next_disconnected_probe_at:
-                    # 外出先での充電を記録するためだけに読む。課金対象であり、無言で
+                    # 外出先での充電を記録するためだけに読む。課金対象であり、ログを出さずに
                     # 払っていると後からログを見て「なぜこの日は高いのか」を追えない。
                     # ONからの経過時間を添えるのは、切り忘れをこの行だけで気づけるようにするため。
                     # 記録が実際に発生したときにしか出ないので、毎サイクルの通知にはならない。
@@ -1196,7 +1196,7 @@ def main() -> None:
                 continue
             elif s_res.status_code != 200:
                 # 車両データを読めない間は電流を動かせない。待機の長さは
-                # 「見えないことの代償」で決める。給電中なら、絞り込めない1分が
+                # 車両データを取得できない時間に発生する買電で決める。給電中なら、絞り込めない1分が
                 # そのまま買電になるためである。
                 #
                 # 2026-08-22 07:01:35、46A・買電9,579W のまま408を受け、600秒待機した。
@@ -1222,7 +1222,7 @@ def main() -> None:
             if response_json is None:
                 # HTTP 200 だが本文に response が無い。ここは以前、ログも待機も無いまま
                 # 次の周回へ入っていた。この状態が続くと3分の制御周期を無視して全速で回り、
-                # 課金対象の vehicle_data を叩き続ける。しかも何も記録しないため、
+                # 課金対象の vehicle_data を呼び出し続ける。しかも何も記録しないため、
                 # 起きていても後から追う手掛かりが残らない。
                 logger.warning("車両データの応答に response が含まれていません。3分待機します。")
                 time.sleep(180)
@@ -1278,7 +1278,7 @@ def main() -> None:
                 continue
 
             if charging_status not in (STATUS_CHARGING, STATUS_STOPPED):
-                # 未知のステータスに対して開始命令を投げるのは危険なので、安全側に倒して待機する。
+                # 未知のステータスに対して開始命令を投げるのは危険なので、安全側の動作として待機する。
                 below_min_count = 0
                 skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
                 logger.warning(
