@@ -597,7 +597,7 @@ def report_wall_connector_retries() -> None:
 def home_charger_delivering() -> bool:
     """自宅の充電器がいま給電しているか。判定できなければ False を返す。
 
-    False に倒すのは、判断できないときに従来の挙動を変えないためである。
+    False を返すのは、判断できないときに従来の挙動を変えないためである。
     この関数は待機の長さを短くしてよいかの判断にしか使わない。
     """
     if not WALL_CONNECTOR_HOST or not wall_connector_available:
@@ -1005,8 +1005,8 @@ def main() -> None:
                     )
 
                 if night_stop_failures >= NIGHT_STOP_MAX_ATTEMPTS:
-                    # 通信もコマンドも通らない状態でこれ以上呼び出し続けても回復せず、429を招くだけ。
-                    # 朝まで沈黙することになるため、必ずCRITICALで顕在化させる。
+                    # 通信もコマンドも通らない状態でこれ以上呼び出し続けても回復せず、429を発生させるだけ。
+                    # 朝まで確認を行わなくなるため、必ずCRITICALで記録する。
                     night_stop_exhausted = True
                     logger.critical(
                         f"夜間休止中の充電状態を{NIGHT_STOP_MAX_ATTEMPTS}回連続で確認できませんでした。"

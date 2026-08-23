@@ -36,7 +36,7 @@ class StopSim(BaseException):
     """main() の `except Exception` を突き抜けてループを終わらせるための例外。
 
     BaseException を継承しているのが重要。Exception だと main() 内の
-    ループ内例外ハンドラに捕まってしまい、いつまでも止まらない。
+    ループ内例外ハンドラに捕捉され、いつまでも止まらない。
     """
 
 
@@ -341,7 +341,7 @@ def run_loop(tmp_path):
 
     def _run(world, start, budget_sec, override=False, house_power=-3000, on_poll=None,
              wall_connector_host=None, wall_connector_serial=None, config_overrides=None):
-        # 設定の検証は import 時に走る。モジュール読み込みより後にハンドラーを付けると
+        # 設定の検証は import 時に実行される。モジュール読み込みより後にハンドラーを付けると
         # その行を取り逃すため、先にルートロガーへ付けておく（SolarCharger ロガーは
         # 既定で propagate するので、ルートに付けた時点で拾える）。
         capture = CapturingHandler()
@@ -422,7 +422,7 @@ def run_loop(tmp_path):
         module.token_expires_at = start_epoch + 10 ** 6
 
         # 実物の refresh_tesla_token() は auth.tesla.com へPOSTする。401検出の経路など
-        # リフレッシュを踏むテストで実APIを叩かないよう、必ず差し替えておく。
+        # リフレッシュを踏むテストで実APIを呼び出さないよう、必ず差し替えておく。
         refresh_calls = []
 
         def _fake_refresh():

@@ -193,7 +193,7 @@ def poll_vehicle():
     vehicle = vehicles[0] if vehicles else {}
     state = str(vehicle.get("state", ""))
     if state != "online":
-        return state, None, "車両=%s（充電していない状態。vehicle_dataは叩かない）" % state
+        return state, None, "車両=%s（充電していない状態。vehicle_dataは呼び出さない）" % state
 
     status, body = get(
         "/api/1/vehicles/%s/vehicle_data?endpoints=charge_state" % vehicle.get("vin"),

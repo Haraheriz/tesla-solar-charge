@@ -19,7 +19,7 @@ python -m pytest
 
 `tests/` は `main()` の常駐ループを**仮想時計と擬似Tesla API**で駆動する（実APIには接続しない）。数時間ぶんのサイクルが一瞬で回るため、「満充電の車にコマンドを送り続ける」「夜通し充電が止まらない」といった時間依存の不具合を検出できる。
 
-GitHub Actions（`.github/workflows/tests.yml`）が **main への push と PR** で自動実行する。`claude-review.yml`（自動レビュー）は **PR のみ**。**フィーチャーブランチへ push しても何も走らない**ため、「PRを作る前にCIや自動レビューの結果を見る」という順序は取れない。ブランチ上での検証手段はローカルの `python -m pytest` だけである。
+GitHub Actions（`.github/workflows/tests.yml`）が **main への push と PR** で自動実行する。`claude-review.yml`（自動レビュー）は **PR のみ**。**フィーチャーブランチへ push しても何も実行されない**ため、「PRを作る前にCIや自動レビューの結果を見る」という順序は取れない。ブランチ上での検証手段はローカルの `python -m pytest` だけである。
 
 ### 守ること
 
