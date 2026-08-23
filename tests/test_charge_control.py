@@ -6,7 +6,7 @@
   01:58  PWAからフル充電モードON
   02:03  48A（約9.6kW）で深夜の系統充電を開始
   03:28  満充電（Complete）に到達
-  03:28-07:39  満充電の車へ charge_start を3分おきに60回送信、7回叩き起こす
+  03:28-07:39  満充電の車へ charge_start を3分おきに60回送信、7回 wake_up を送信
   19:04  ステータス Stopped（ユーザーが停止）→ 即座に再開命令
   19:10  充電が再開されてしまう
   19:40  ユーザーがオーバーライドを解除（ONのまま17時間41分）
@@ -38,7 +38,7 @@ def test_満充電のあいだ就寝中の車両を起こし続けない(run_loo
 
     抑止期間が明けたときの再確認は必要なので0回にはならない。ただし
     抑止期間(1時間) > 待機間隔(10分) でなければ抑止は一度も効かず、
-    毎サイクル叩き起こすことになる。この関係が崩れていないかを見張る。
+    毎サイクル wake_up を送ることになる。この関係が崩れていないかを見張る。
     """
     res = run_loop(
         world={"vehicle_state": "online", "charging_state": "Complete", "amps": 48},
@@ -212,7 +212,7 @@ def test_夜間に開始された充電も検知して止める(run_loop):
 
 
 def test_夜間の停止失敗は確認できるまで再試行される(run_loop):
-    """停止できないまま黙って朝を迎えないこと。上限に達したらCRITICALで報告する。"""
+    """停止できないままログを出さずに朝を迎えないこと。上限に達したらCRITICALで報告する。"""
     res = run_loop(
         world={
             "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
@@ -362,7 +362,7 @@ def test_車両リスト取得失敗を充電していないと断定しない(r
     ],
 )
 def test_夜間チェックは結果を必ずログに残す(run_loop, vehicle_state, charging_state, expected_log):
-    """無言で終わる経路があると『チェックが走ったのか』を後から追えない。"""
+    """ログを出さずに終わる経路があると『チェックが走ったのか』を後から追えない。"""
     res = run_loop(
         world={"vehicle_state": vehicle_state, "charging_state": charging_state, "amps": 10},
         start="2026-07-20 18:00:00",
@@ -374,7 +374,7 @@ def test_夜間チェックは結果を必ずログに残す(run_loop, vehicle_s
 
 
 def test_夜間の観測ログは状況が変わったときだけ出す(run_loop):
-    """10分毎に同じ行を出すと一晩で約80行になり、本当に見たい変化が埋もれる。"""
+    """10分毎に同じ行を出すと一晩で約80行になり、本当に見たい変化が見つけにくくなる。"""
     res = run_loop(
         world={"vehicle_state": "asleep", "charging_state": "Stopped", "amps": 10},
         start="2026-07-20 18:00:00",
@@ -546,7 +546,7 @@ def test_ウォールコネクター未設定なら判定は行われない(run_
     )
     assert res.wc_calls == [], "未設定なのにウォールコネクターへ問い合わせている"
     assert res.count("charge_stop") >= 1
-    # 安全機能が無効であることは INFO に埋もれさせない。設定漏れに気づけないと
+    # 安全機能が無効であることは INFO の行に紛れさせない。設定漏れに気づけないと
     # スーパーチャージャーでの充電を停止させる従来の挙動に戻る。
     assert res.has_log("外出先の充電判定は行いません", level="ATTENTION")
 
@@ -623,6 +623,37 @@ def test_ウォールコネクターの単発の読み取り失敗はその場�
     assert not res.has_log("読み取れなくなりました", level="WARNING")
 
 
+def test_1回目に失敗し2回目で成功したことを記録する(run_loop):
+    """再試行が1回目の失敗を隠したままにしないこと。
+
+    PR #21 の根拠は「2026-08-11〜18 に読み取り失敗が週4回」という実測だった。
+    ログを出さずに成功させ続けると、悪化に気づけるのは「2回とも失敗する」ようになってからになる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+            "wc_fail_first": 1,
+        },
+        start="2026-08-18 20:00:00",
+        budget_sec=1200,
+    )
+    assert res.has_log("2回目で成功しました", level="WARNING")
+
+
+def test_1回目で成功したら何も記録しない(run_loop):
+    """正常時に週何行も増やさないこと。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-18 20:00:00",
+        budget_sec=1200,
+    )
+    assert not res.has_log("2回目で成功しました")
+
+
 def test_ケーブル未接続なら就寝中の車を起こさない(run_loop):
     """2026-08-12 の再現。ケーブル未接続の車を約71分ごとに13回起動していた（約¥36）。
 
@@ -647,7 +678,7 @@ def test_ケーブル未接続なら就寝中の車を起こさない(run_loop):
 
 
 def test_ケーブルが接続されたら起こす判断に戻る(run_loop):
-    """盲目区間を作らないこと。ウォールコネクターの応答で毎サイクル判断し直す。"""
+    """ウォールコネクターの状態を確認しない区間を作らないこと。ウォールコネクターの応答で毎サイクル判断し直す。"""
     def plug_in_later(elapsed, world):
         world["vehicle_state"] = "offline"
         if elapsed >= 2 * 3600:
@@ -669,6 +700,197 @@ def test_ケーブルが接続されたら起こす判断に戻る(run_loop):
     assert res.count("wake_up") >= 2, "ケーブル接続後に起こす判断へ戻っていない"
     # 接続前は抑止が働いていたこと（＝この試験が抑止経路を通っていること）も確認する。
     assert res.has_log("ケーブルが接続されていないため、車両を起こしません")
+
+
+def test_夜間もケーブル未接続なら車両データを読まない(run_loop):
+    """夜間ループが車両データを読むのは自宅の系統充電を止めるためである。
+
+    自宅の充電器に何も繋がっていなければ止めるべきものが無く、読む理由も無い。
+    夜間帯は13時間・78サイクルあり、日中側より無駄が大きい。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=4 * 3600,
+    )
+    # 10分周期で4時間なら約24サイクル。未接続と分かる最初の1回で足りる。
+    assert res.vehicle_data_calls <= 2, f"夜間に読み続けている（{res.vehicle_data_calls}回）"
+    assert res.has_log("ケーブルが接続されていないため、車両データを取得しません")
+
+
+def test_夜間でも記録が有効なら定期的に読み直す(run_loop):
+    """記録スイッチは昼夜で挙動を変えない。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+            "away_probe": True,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=4 * 3600,
+    )
+    # 夜間は10分周期。間隔も既定600秒なので、ほぼ毎サイクル読み直すことになる。
+    assert res.vehicle_data_calls >= 8, f"記録が有効なのに読んでいない（{res.vehicle_data_calls}回）"
+
+    # 読み直す判断をしたサイクルでも、ウォールコネクターは毎回確認していること。
+    # 記録の判定を先に置くと and の短絡評価で問い合わせが飛び、
+    # 「読めなくなった／回復した」の検知がそのサイクルだけ失われる。
+    vitals_calls = [url for url in res.wc_calls if url.endswith("/api/1/vitals")]
+    assert len(vitals_calls) >= 8, f"ウォールコネクターを確認していない（{len(vitals_calls)}回）"
+
+    # 課金された理由が観測ログに残ること。夜間の観測行は状況が変わったときだけ
+    # 出力するため、別行を足さずに同じ行へ織り込んでいる。
+    assert res.has_log("（外出先の充電記録により取得）")
+
+
+def test_記録以外の理由で読んだ夜間には注記を付けない(run_loop):
+    """注記は「記録スイッチがこの読み取りを買った」ことだけを意味すること。
+
+    記録がONでも、ウォールコネクターを読めなければ `cable_absent` は成立せず、
+    読み取りは従来どおり毎サイクル発生する。これはスイッチが買ったものではないため
+    注記を付けてはならない。付けると、その夜の費用の理由を誤って読むことになる。
+
+    「記録OFFで注記が付かない」ことを直接確かめるテストは書けない。OFFかつケーブル
+    未接続なら読み取り自体をスキップし、注記を付ける経路へ到達しないためである。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "away_probe": True,
+            "wc_raise": True,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=2 * 3600,
+    )
+    # 判定不能なので従来どおり読んでいる（＝注記を付ける分岐に到達している）。
+    assert res.vehicle_data_calls >= 5, f"読み取り経路を通っていない（{res.vehicle_data_calls}回）"
+    assert res.has_log("停止操作は不要と判断しました")
+    assert not res.has_log("（外出先の充電記録により取得）")
+
+
+def test_夜間にケーブルが繋がっていれば従来どおり毎サイクル読む(run_loop):
+    """自宅で繋がっている車の監視を弱めないこと。
+
+    夜間に始まった充電を止められなくなるのが最も避けたい退行である。
+    """
+    def start_charging_later(elapsed, world):
+        if elapsed >= 3600:
+            world["charging_state"] = "Charging"
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": True,
+        },
+        start="2026-08-22 19:00:00",
+        budget_sec=4 * 3600,
+        on_poll=start_charging_later,
+    )
+    assert res.vehicle_data_calls >= 20, f"読む回数が減っている（{res.vehicle_data_calls}回）"
+    assert res.count("charge_stop") >= 1, "夜間に始まった充電を止めていない"
+
+
+def test_online_のままケーブル未接続なら車両データを読み続けない(run_loop):
+    """2026-08-22 11:51〜15:32 の再現。車は online のままケーブル未接続で、
+    その日の vehicle_data 38件のうち23件（約¥6.6）をこの状態に費やしていた。
+
+    自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。
+    就寝中の車を起こさない判断（PR #22）と同じ根拠が online 側にも成り立つ。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=4 * 3600,
+        house_power=-5000,
+    )
+    # 10分周期で4時間なら約24サイクル。既定（記録OFF）では、未接続を知った最初の
+    # 1回だけで足りる。回数を緩く見ると、間隔を空けただけの実装でも通ってしまう。
+    assert res.vehicle_data_calls <= 2, f"読み続けている（{res.vehicle_data_calls}回）"
+    assert res.count("charge_start") == 0
+
+
+def test_外出先の充電記録が有効なら定期的に読み直す(run_loop):
+    """記録をONにしたときだけ、ケーブル未接続でも読み直すこと。
+
+    急速充電器が返すフィールドの実値は充電中にしか読めない。2026-08-10 の
+    テンフィールズファクトリーのFLASHでは、記録する仕組みが無く取り逃している。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+            "away_probe": True,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=2 * 3600,
+        house_power=-5000,
+    )
+    # 10分間隔で2時間なら12回前後。既定（読まない）との差が出ていればよい。
+    assert res.vehicle_data_calls >= 8, f"記録が有効なのに読んでいない（{res.vehicle_data_calls}回）"
+    assert res.has_log("外出先の充電記録が有効なため")
+
+
+def test_記録を途中で有効にしたら読み直しに移る(run_loop):
+    """出先でONにする場面の再現。再起動を挟まずに反映されること。"""
+    def enable_later(elapsed, world):
+        if elapsed >= 3600:
+            world["away_probe"] = True
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=2 * 3600,
+        house_power=-5000,
+        on_poll=enable_later,
+    )
+    assert res.has_log("外出先の充電記録が有効なため"), "ONにしても読み直しへ移っていない"
+
+
+def test_ケーブルが挿し直されたら間隔を待たずに読み直す(run_loop):
+    """復帰の検知に遅れを作らないこと。
+
+    予算を50分にしてあるため、1時間ごとの読み直しはこの試験では発火しない。
+    それでも充電が始まるなら、ウォールコネクター側で再接続を検知している。
+    """
+    def plug_in_later(elapsed, world):
+        if elapsed >= 1800:
+            world["wc_vehicle_connected"] = True
+            world["charging_state"] = "Stopped"
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_vehicle_connected": False,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=3000,
+        house_power=-5000,
+        on_poll=plug_in_later,
+    )
+    assert res.count("charge_start") >= 1, "再接続を検知していない"
+
+
+def test_ウォールコネクターが読めなければ車両データを読み続ける(run_loop):
+    """判定不能な状況で挙動を変えない。デグレの余地を残さないため。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "wc_raise": True,
+        },
+        start="2026-08-22 11:51:00",
+        budget_sec=4 * 3600,
+        house_power=-5000,
+    )
+    assert res.vehicle_data_calls >= 20, f"従来どおり読んでいない（{res.vehicle_data_calls}回）"
 
 
 def test_ウォールコネクターが読めなければ従来どおり起こす(run_loop):
@@ -705,9 +927,9 @@ def test_車両が複数あれば起動時に警告する(run_loop):
 
 
 def test_稼働中に読み取れなくなったら警告を残す(run_loop):
-    """起動時の確認を通過した後で読めなくなる経路がある。黙って従来動作へ戻さない。
+    """起動時の確認を通過した後で読めなくなる経路がある。ログを出さずに従来動作へ戻さない。
 
-    ここで無言だと「外出先の充電を止めてしまう」挙動へ痕跡なしに退行する。
+    ここでログを出さないと「外出先の充電を止めてしまう」挙動へ痕跡なしに退行する。
     ただし毎サイクル出すと3分毎に同じ行が並ぶため、状態が変わったときだけ残す。
     """
     def wc_dies_then_recovers(elapsed, world):
@@ -751,7 +973,7 @@ def test_シリアルが設定と一致しなければ判定を無効化する(r
     """設定したIPが別の機器を指している。誤った機器の応答で在宅を判断させない。
 
     このとき判定は行われず、全経路が従来どおりの動作に戻る。無効化したことは
-    ATTENTION で必ず可視化する（黙って従来動作に戻ると原因を追えない）。
+    ATTENTION で必ず可視化する（ログを出さずに従来動作に戻ると原因を追えない）。
     """
     res = run_loop(
         world={
@@ -806,7 +1028,7 @@ def test_終端ステータスではコマンドを送らない(run_loop, chargi
 
 
 @pytest.mark.parametrize("charging_state", [None, "", "SomethingNew"])
-def test_未知のステータスでは安全側に倒してコマンドを送らない(run_loop, charging_state):
+def test_未知のステータスでは安全側の動作としてコマンドを送らない(run_loop, charging_state):
     """充電状態が判断できないまま開始命令を投げるのは危険。"""
     res = run_loop(
         world={"vehicle_state": "online", "charging_state": charging_state, "amps": 4},
@@ -816,6 +1038,87 @@ def test_未知のステータスでは安全側に倒してコマンドを送�
     )
     assert res.count("charge_start") == 0
     assert res.has_log("未知の充電ステータス", level="WARNING")
+
+
+def test_responseが無い応答でも制御周期を守る(run_loop):
+    """HTTP 200 で本文に response が無いとき、ログも待機も無く回り続けないこと。
+
+    修正前はログも sleep も無いまま continue しており、この応答が続くと3分周期を
+    無視して全速で回る。vehicle_data は課金対象であり、しかも何も記録されないため
+    起きても後から追えない。仮想時計は sleep でしか進まないので、待機が無ければ
+    このテストは pytest.ini の timeout に掛かって止まる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "charge_state_response_missing": True,
+        },
+        start="2026-08-22 10:00:00",
+        budget_sec=1800,
+        house_power=-5000,
+    )
+    assert res.has_log("response が含まれていません", level="WARNING")
+    # 30分を3分周期で回れば10回程度。待機が無ければ桁が変わる。
+    cycles = len([m for m in res.messages() if "定期チェック開始" in m])
+    assert cycles <= 12, f"周期を守れていない（{cycles}回）"
+
+
+def test_給電中に車両データを読めなければ待機を短くする(run_loop):
+    """2026-08-22 07:01:35 の再現。46A・買電9,579W のまま408を受け、600秒待機した。
+
+    絞り込み（46A→4A）は 07:11:40 まで遅れ、その間に約1.4kWhを余計に買電した。
+    給電中は「見えない1分」がそのまま買電になるため、次に見るまでを短くする。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 46,
+            "charge_state_http": 408,
+            "wc_contactor_closed": True,
+        },
+        start="2026-08-22 07:01:00",
+        budget_sec=1800,
+        house_power=9579,
+    )
+    assert res.has_log("3分待機します", level="WARNING")
+    assert not res.has_log("10分待機します", level="WARNING")
+
+
+@pytest.mark.parametrize("world_extra, label", [
+    ({"wc_contactor_closed": False}, "給電していない"),
+    ({"wc_raise": True}, "読み取れない"),
+    ({"wc_omit_contactor": True}, "contactor_closedが無い"),
+])
+def test_給電していなければ従来どおり10分待つ(run_loop, world_extra, label):
+    """判定できない場合に挙動を変えない。デグレの余地を残さないため。"""
+    world = {
+        "vehicle_state": "online", "charging_state": "Charging", "amps": 46,
+        "charge_state_http": 408,
+    }
+    world.update(world_extra)
+    res = run_loop(
+        world=world,
+        start="2026-08-22 07:01:00",
+        budget_sec=1800,
+        house_power=9579,
+    )
+    assert res.has_log("10分待機します", level="WARNING"), label
+    assert not res.has_log("3分待機します", level="WARNING"), label
+
+
+def test_ウォールコネクター未設定なら待機の短縮も行わない(run_loop):
+    """未設定の環境では全経路が従来どおりであること。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 46,
+            "charge_state_http": 408,
+        },
+        start="2026-08-22 07:01:00",
+        budget_sec=1800,
+        house_power=9579,
+        wall_connector_host="",
+    )
+    assert res.has_log("10分待機します", level="WARNING")
+    assert res.wc_calls == [], "未設定なのにウォールコネクターを読んでいる"
 
 
 def test_開始処理中はコマンドを重ねない(run_loop):
@@ -1008,6 +1311,85 @@ def test_夜間は太陽光追従モードで動かない(run_loop):
 # ---------------------------------------------------------------------------
 # 補助関数
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 設定値の検証（起動時に1か所で行う）
+# ---------------------------------------------------------------------------
+
+def test_下限を下回る設定は既定値へ戻して知らせる(run_loop):
+    """REMO_SAMPLES に 0 を書くと、以前は1回も測定せず制御がログを出さずに止まっていた。
+
+    使う側の関数に下限の検査が無かったためで、症状はログに何も出ない「動いているのに
+    何もしない」状態だった。既定値へ戻したうえで、戻したことを必ず残す。
+    """
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"REMO_SAMPLES": 0},
+    )
+    assert res.has_log("設定 REMO_SAMPLES", level="ATTENTION")
+    assert res.module.REMO_SAMPLES == 1
+    # 既定値で動いているので、制御そのものは通常どおり行われる。
+    assert res.count("set_charging_amps") >= 1
+
+
+def test_数値として読めない設定も既定値へ戻す(run_loop):
+    """以前は import 時に ValueError で落ち、systemd の再起動ループになっていた。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"COMMAND_RETRIES": "three"},
+    )
+    assert res.has_log("設定 COMMAND_RETRIES", level="ATTENTION")
+    assert res.module.COMMAND_RETRIES == 3
+
+
+@pytest.mark.parametrize("key", ["STOP_DEBOUNCE_CYCLES", "WAKE_DEBOUNCE_CYCLES"])
+def test_0を無効の意味で使えるキーは戻さない(run_loop, key):
+    """このキーに限り 0 は「デバウンスしない」という有効な指定である。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 10},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={key: 0},
+    )
+    assert not res.has_log(f"設定 {key}", level="ATTENTION")
+    assert getattr(res.module, key) == 0
+
+
+def test_キーどうしの関係も検査する(run_loop):
+    """個々の下限では表せない関係。コメントに書かれているだけで強制されていなかった。
+
+    抑止期間が待機間隔以下だと、待機明けにちょうど期限切れになり抑止が一度も効かない。
+    """
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Complete", "amps": 48},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"TERMINAL_BACKOFF_SEC": 600, "TERMINAL_WAKE_SUPPRESS_SEC": 600},
+    )
+    assert res.has_log("TERMINAL_WAKE_SUPPRESS_SEC", level="ATTENTION")
+    assert res.module.TERMINAL_WAKE_SUPPRESS_SEC > res.module.TERMINAL_BACKOFF_SEC
+
+
+def test_開始閾値が停止閾値以下なら引き上げる(run_loop):
+    """閾値が1本になると開始→即停止の発振が起きる。"""
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Stopped", "amps": 4},
+        start="2026-07-20 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+        config_overrides={"MIN_AMPS": 4, "START_AMPS": 4},
+    )
+    assert res.has_log("設定 START_AMPS", level="ATTENTION")
+    assert res.module.START_AMPS > res.module.MIN_AMPS
+
 
 def test_format_duration(run_loop, tmp_path):
     res = run_loop(

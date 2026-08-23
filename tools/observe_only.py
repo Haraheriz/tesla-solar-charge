@@ -20,11 +20,11 @@
 これは観測を継続するために必要なもの。
 
 車両リスト（GET /api/1/vehicles）は課金対象外で車両も起こさない。vehicle_data は
-車両が online のときだけ叩く（asleep/offline の車両は充電していないため、
+車両が online のときだけ呼び出す（asleep/offline の車両は充電していないため、
 起こしてまで確認する必要がない）。
 
 Nature Remo APIにはレート制限がある（5分あたり30リクエスト程度）。制御ループ自身が
-1サイクルにつき3回叩くため、ここの `SAMPLE_SEC` を短くしすぎると両方が429で失敗する。
+1サイクルにつき3回呼び出すため、ここの `SAMPLE_SEC` を短くしすぎると両方が429で失敗する。
 既定の60秒で、両者あわせて5分あたり10回程度に収まる。
 """
 import json
@@ -193,7 +193,7 @@ def poll_vehicle():
     vehicle = vehicles[0] if vehicles else {}
     state = str(vehicle.get("state", ""))
     if state != "online":
-        return state, None, "車両=%s（充電していない状態。vehicle_dataは叩かない）" % state
+        return state, None, "車両=%s（充電していない状態。vehicle_dataは呼び出さない）" % state
 
     status, body = get(
         "/api/1/vehicles/%s/vehicle_data?endpoints=charge_state" % vehicle.get("vin"),

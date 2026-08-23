@@ -35,7 +35,7 @@ REMO_LOCAL_IP=192.168.x.x
 | `test_tesla_battery.py` | ブラウザでの認証後、コールバックURLを手動貼り付けして車両データを取得するテスト |
 | `test_tesla_command.py` | ローカルプロキシ経由で充電電流変更コマンドを送信するテスト |
 | `check_remo_data.py` / `test_remo_cloud.py` | Nature Remo Cloud APIから電力データを取得するテスト |
-| `test_remo_e.py` | Nature Remo Eのローカル通信APIを直接叩くテスト（同一Wi-Fi内のみ） |
+| `test_remo_e.py` | Nature Remo Eのローカル通信APIを直接呼び出すテスト（同一Wi-Fi内のみ） |
 
 ## 注意
 
