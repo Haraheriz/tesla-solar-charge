@@ -13,7 +13,7 @@ REMO_IP = os.environ["REMO_LOCAL_IP"]
 # ローカルAPIのURL
 URL = f"http://{REMO_IP}/local_api/broute"
 
-# Nature Remo EのローカルAPIを叩く際は、このヘッダーが必須です
+# Nature Remo EのローカルAPIを呼び出す際は、このヘッダーが必須です
 HEADERS = {
     "X-Requested-With": "local_api"
 }
