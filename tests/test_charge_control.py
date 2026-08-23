@@ -746,16 +746,27 @@ def test_夜間でも記録が有効なら定期的に読み直す(run_loop):
     assert res.has_log("（外出先の充電記録により取得）")
 
 
-def test_記録が無効な夜間の観測行に理由を付けない(run_loop):
-    """既定の夜には無い注記であること。あると常時ONだと誤読される。"""
+def test_記録以外の理由で読んだ夜間には注記を付けない(run_loop):
+    """注記は「記録スイッチがこの読み取りを買った」ことだけを意味すること。
+
+    記録がONでも、ウォールコネクターを読めなければ `cable_absent` は成立せず、
+    読み取りは従来どおり毎サイクル発生する。これはスイッチが買ったものではないため
+    注記を付けてはならない。付けると、その夜の費用の理由を誤って読むことになる。
+
+    「記録OFFで注記が付かない」ことを直接確かめるテストは書けない。OFFかつケーブル
+    未接続なら読み取り自体をスキップし、注記を付ける経路へ到達しないためである。
+    """
     res = run_loop(
         world={
-            "vehicle_state": "online", "charging_state": "Stopped", "amps": 4,
-            "wc_vehicle_connected": True,
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 4,
+            "away_probe": True,
+            "wc_raise": True,
         },
         start="2026-08-22 19:00:00",
-        budget_sec=3600,
+        budget_sec=2 * 3600,
     )
+    # 判定不能なので従来どおり読んでいる（＝注記を付ける分岐に到達している）。
+    assert res.vehicle_data_calls >= 5, f"読み取り経路を通っていない（{res.vehicle_data_calls}回）"
     assert res.has_log("停止操作は不要と判断しました")
     assert not res.has_log("（外出先の充電記録により取得）")
 
