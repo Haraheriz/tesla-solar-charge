@@ -645,7 +645,7 @@ GET http://<WALL_CONNECTOR_HOST>/api/1/vitals → vehicle_connected
 
 `fast_charger_brand` は自宅とスーパーチャージャーで値が逆転しており、`conn_charge_cable` は全件で同じ値だった。いずれも判定には使えない。
 
-`charger_power` の観測幅はDC側が 51〜145、AC側が 0〜9 である。判定閾値 `FAST_CHARGER_POWER_KW`（既定15）はこの間にあり、2026-08-26 の観測でDC側の上限が 55 から 145 へ広がった。閾値を上げる理由は無い。
+上表に記録されている `charger_power` は、DC側が 51・55・77・145、AC側が 9 である。判定閾値 `FAST_CHARGER_POWER_KW`（既定15）はこれらの間にある。2026-08-26 の観測でDC側の最大が 55 から 145 になったが、閾値を動かす理由は無い。
 
 2026-08-10 にテンフィールズファクトリーのFLASH（NACS）で充電した際は、これらの値を記録する仕組みが無く取り逃した。**非Teslaの急速充電器での値は未観測である。**
 
