@@ -1045,7 +1045,7 @@ def main() -> None:
             # 課金対象外、日中の最初の巡回は以前も行っていたものである。
             wait_sec: int = min(NIGHT_SLEEP_SEC, seconds_until_hour(DAY_START_HOUR))
             wait_label: str = format_duration(wait_sec) if wait_sec >= 60 else f"{wait_sec}秒"
-            logger.info(f"次の稼働チェックまで{wait_label}スリープします...")
+            logger.info(f"次の稼働チェックまで{wait_label}間スリープします...")
             time.sleep(wait_sec)
             continue
 
