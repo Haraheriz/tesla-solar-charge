@@ -176,6 +176,13 @@ WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 # 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
 FAST_CHARGER_POWER_KW: float = settings.number("FAST_CHARGER_POWER_KW", 15, minimum=1)
 
+# 太陽光追従で制御する時間帯。これ以外は夜間休止に入る。
+DAY_START_HOUR: int = 7
+DAY_END_HOUR: int = 18
+
+# 夜間休止中の巡回間隔（秒）。ただし DAY_START_HOUR をまたぐ手前で切り上げる。
+NIGHT_SLEEP_SEC: int = 600
+
 # キーどうしの関係は、個々の下限では表せない。以下はいずれもコメントとして
 # 書かれていながら強制されておらず、破ったときの症状が分かりにくいものである。
 if MAX_AMPS < MIN_AMPS:
@@ -403,6 +410,16 @@ def set_charging_amps(vin: str, headers: Dict[str, str], amps: int) -> bool:
 
     logger.error(f"電流設定（{amps}A）が{COMMAND_RETRIES}回連続で失敗しました。")
     return False
+
+
+def seconds_until_hour(hour: int) -> int:
+    """次に指定時（分秒0）が来るまでの秒数を返す。いま指定時ちょうどなら24時間後を指す。"""
+    now = time.localtime()
+    elapsed_today: int = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+    remaining: int = hour * 3600 - elapsed_today
+    if remaining <= 0:
+        remaining += 86400
+    return remaining
 
 
 def format_duration(seconds: float) -> str:
@@ -836,7 +853,7 @@ def main() -> None:
         # 1時間前の1回と新しい1回が合算されて「2サイクル連続」と誤認しえた。
         wake_surplus_streak, wake_surplus_count = wake_surplus_count, 0
 
-        if not manual_override and not FORCE_RUN and not (7 <= now.tm_hour < 18):
+        if not manual_override and not FORCE_RUN and not (DAY_START_HOUR <= now.tm_hour < DAY_END_HOUR):
             logger.info("--- 定期チェック開始 ---")
             logger.info(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
 
@@ -1013,8 +1030,23 @@ def main() -> None:
                         "系統からの充電が継続している可能性があります。手動で確認してください。"
                     )
 
-            logger.info("次の稼働チェックまで10分間スリープします...")
-            time.sleep(600)
+            # 夜間の待機は、日中の開始（DAY_START_HOUR）を越える手前で切り上げる。
+            #
+            # 固定の600秒で回すと、1サイクルごとの処理時間が積み上がって位相がずれ、
+            # 日中の開始をまたぐ最初の巡回が 07:00〜07:10 のどこに落ちるかが日によって
+            # 変わる。車両側のスケジュール充電は 07:00 に始まる設定であり
+            # （docs/03_operation.md「車両側スケジュール充電の運用方針」）、このずれが
+            # そのまま「充電が始まっているのに観測していない時間」になる。
+            #
+            # 2026-08-07〜09-01 の実測で、この時間は 0.7〜9.8分（平均4.6分）だった。
+            # そのあいだ車両は最大9.6kWを消費しており、18日で 6.7kWh を買電していた。
+            #
+            # サイクル数は増えない。夜間最後の待機が短くなるだけで、車両リストの取得は
+            # 課金対象外、日中の最初の巡回は以前も行っていたものである。
+            wait_sec: int = min(NIGHT_SLEEP_SEC, seconds_until_hour(DAY_START_HOUR))
+            wait_label: str = format_duration(wait_sec) if wait_sec >= 60 else f"{wait_sec}秒"
+            logger.info(f"次の稼働チェックまで{wait_label}スリープします...")
+            time.sleep(wait_sec)
             continue
 
         night_stop_failures = 0
@@ -1036,7 +1068,7 @@ def main() -> None:
                 f"ON から{format_duration(time.time() - override_updated_at)}経過"
                 if override_updated_at > 0 else "ON からの経過時間は不明"
             )
-            night_note: str = "／夜間休止を迂回中" if not (7 <= now.tm_hour < 18) else ""
+            night_note: str = "／夜間休止を迂回中" if not (DAY_START_HOUR <= now.tm_hour < DAY_END_HOUR) else ""
             log_attention(
                 f"フル充電モード継続中（{elapsed_label}{night_note}）："
                 f"太陽光の発電状況に関わらず最大{MAX_AMPS}Aで充電します。"

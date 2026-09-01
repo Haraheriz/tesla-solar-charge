@@ -13,6 +13,8 @@
 
 「充電を停止したつもりが一昼夜継続していた」という報告の正体は19:04の再開である。
 """
+import time as real_time
+
 import pytest
 
 
@@ -1295,6 +1297,59 @@ def test_余剰が閾値未満なら就寝中の車両を起こさない(run_loo
         house_power=-200,
     )
     assert res.count("wake_up") == 0
+
+
+def test_夜間の待機は日中の開始をまたがない(run_loop):
+    """車両側のスケジュール充電は 07:00 に始まる。そこを最初に観測する時刻が
+    日によってずれると、そのずれがそのまま買電になる。
+
+    固定600秒で回すと 06:45 → 06:55 → 07:05 となり、07:00 に始まった充電を
+    5分間観測しない。境界で切り上げれば 06:55 → 07:00 になる。
+    2026-08-07〜09-01 の実測で、このずれは 0.7〜9.8分（平均4.6分）だった。
+    """
+    res = run_loop(
+        world={"vehicle_state": "offline", "charging_state": "Disconnected", "amps": 4},
+        start="2026-08-27 06:45:00",
+        budget_sec=1200,
+    )
+    slept = res.module.time.slept
+    assert 300 in slept, f"日中の開始で切り上げていない（slept={slept[:6]}）"
+    assert all(s <= 600 for s in slept), f"待機が上限を超えている（slept={slept[:6]}）"
+
+
+def test_境界から遠い夜間の待機は10分のまま(run_loop):
+    """切り上げは境界の手前だけに効くこと。夜通し短い周期で回すと費用が増える。"""
+    res = run_loop(
+        world={"vehicle_state": "offline", "charging_state": "Disconnected", "amps": 4},
+        start="2026-08-27 20:00:00",
+        budget_sec=1800,
+    )
+    assert set(res.module.time.slept) == {600}, f"周期が変わっている（{res.module.time.slept}）"
+
+
+def test_境界ちょうどでは次の日の同時刻までを返す(run_loop):
+    """0 を返すと待機が 0 秒になり、その周回だけ全速で回る。
+
+    `seconds_until_hour` は待機時間の上限を決める側なので、下限が 0 になる入力を
+    持たないことを確かめる。
+    """
+    res = run_loop(
+        world={"vehicle_state": "offline", "charging_state": "Disconnected", "amps": 4},
+        start="2026-08-27 20:00:00",
+        budget_sec=60,
+    )
+    seconds_until_hour = res.module.seconds_until_hour
+    clock = res.module.time
+
+    def at(hms):
+        clock.now = real_time.mktime(real_time.strptime(f"2026-08-27 {hms}", "%Y-%m-%d %H:%M:%S"))
+
+    at("06:45:00")
+    assert seconds_until_hour(7) == 900
+    at("20:00:00")
+    assert seconds_until_hour(7) == 11 * 3600
+    at("07:00:00")
+    assert seconds_until_hour(7) == 86400, "境界ちょうどで 0 を返している"
 
 
 def test_夜間は太陽光追従モードで動かない(run_loop):
