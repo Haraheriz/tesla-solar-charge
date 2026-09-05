@@ -21,6 +21,26 @@
 
 ---
 
+## 2026-09-05（文字入出力・エンコーディング例外の処理）
+
+**タグ：** `v0.6.4`（PR #37）
+
+**内容：** POSTリクエストボディの不正バイト列受信時の `UnicodeDecodeError` 捕捉、設定・状態ファイルの BOM 付き UTF-8 対応、非対話環境での `EOFError` 捕捉を追加した。
+
+### 作業内容
+
+- `tesla_solar_charger.py`、`control_server.py`、`override_state.py`、`show_control_url.sh` の4ファイルをSCPで転送し、sha256の一致を確認
+- `tesla-charger.service` および `tesla-override.service` を再起動（`tesla-proxy.service` は対象外）
+- 再起動は 22:09。夜間休止帯で車両が `offline`（充電していない）の時間帯を選んだ
+- `show_control_url.sh` を実行し、QRコードとURLが正常に出力されることを確認
+
+**結果：**
+- `tesla-charger.service` / `tesla-override.service` ともに `active (running)`、`NRestarts=0`
+- 起動時のログでトークン読み込み、車両捕捉（VIN: LRW3F7EK6RC238023）、ウォールコネクター照合（シリアル E4A25003000840）が通過し、夜間休止に入ったことを確認
+- テストは106件通過
+
+---
+
 ## 2026-09-02（ログ文言の1文字を戻す／位相合わせの効果を確認）
 
 **タグ：** `v0.6.3`（PR #35）
