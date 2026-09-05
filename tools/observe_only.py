@@ -55,7 +55,7 @@ VEHICLE_SEC = 600    # 車両状態を問い合わせる間隔
 if not os.path.exists(CONFIG_FILE):
     sys.exit("設定ファイル（%s）が見つかりません。" % CONFIG_FILE)
 
-with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config = json.load(f)
 
 # 本体（proxy_session.verify = cert.pem）と同じく自己署名証明書をピン留めして検証する。
@@ -87,7 +87,7 @@ def append_sample(power, meter_updated_at, vehicle_state, charging_state):
 
 
 def load_tokens():
-    with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+    with open(TOKEN_FILE, "r", encoding="utf-8-sig") as f:
         return json.load(f)
 
 
