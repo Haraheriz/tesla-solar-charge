@@ -71,7 +71,7 @@ if not os.path.exists(CONFIG_FILE):
     logger.critical(f"設定ファイル（{CONFIG_FILE}）が見つかりません。")
     sys.exit(1)
 
-with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config: Dict[str, Any] = json.load(f)
 
 REMO_ACCESS_TOKEN: str = str(config.get("REMO_ACCESS_TOKEN", ""))
@@ -448,7 +448,7 @@ def load_tokens() -> bool:
     global access_token, refresh_token, token_expires_at
     if os.path.exists(TOKEN_FILE):
         try:
-            with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            with open(TOKEN_FILE, "r", encoding="utf-8-sig") as f:
                 data: Dict[str, Any] = json.load(f)
                 access_token = data.get("access_token")
                 refresh_token = data.get("refresh_token")
@@ -1077,9 +1077,12 @@ def main() -> None:
         house_power: Optional[int] = None
         if not manual_override:
             if FORCE_RUN:
-                user_input = input(
-                    "[FORCE_RUNモード] 仮想の家庭消費電力(W)を入力（負の値＝売電中/余剰あり、空Enterで実測値を使用）: "
-                ).strip()
+                try:
+                    user_input = input(
+                        "[FORCE_RUNモード] 仮想の家庭消費電力(W)を入力（負の値＝売電中/余剰あり、空Enterで実測値を使用）: "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    user_input = ""
                 if user_input:
                     try:
                         house_power = int(user_input)

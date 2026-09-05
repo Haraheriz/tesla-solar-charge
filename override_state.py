@@ -19,7 +19,7 @@ OVERRIDE_FILE: str = os.environ.get("TESLA_OVERRIDE_PATH", os.path.join(BASE_DIR
 def _read_all() -> Dict[str, Any]:
     """状態ファイル全体を辞書で返す。無い・壊れている場合は空の辞書を返す。"""
     try:
-        with open(OVERRIDE_FILE, "r", encoding="utf-8") as f:
+        with open(OVERRIDE_FILE, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except Exception:
         return {}
