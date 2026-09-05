@@ -155,6 +155,8 @@ def test_BOM付き設定ファイルでも起動できる(tmp_path):
     config_file.write_bytes(content)
     previous_config = os.environ.get("TESLA_CONFIG_PATH")
     os.environ["TESLA_CONFIG_PATH"] = str(config_file)
+    previous_cwd = os.getcwd()
+    os.chdir(tmp_path)
     try:
         name = f"control_server_bom_test_{next(_module_counter)}"
         spec = importlib.util.spec_from_file_location(
@@ -164,6 +166,7 @@ def test_BOM付き設定ファイルでも起動できる(tmp_path):
         spec.loader.exec_module(module)
         assert module.CONTROL_TOKEN == "bom-token"
     finally:
+        os.chdir(previous_cwd)
         if previous_config is not None:
             os.environ["TESLA_CONFIG_PATH"] = previous_config
         else:

@@ -1081,7 +1081,7 @@ def main() -> None:
                     user_input = input(
                         "[FORCE_RUNモード] 仮想の家庭消費電力(W)を入力（負の値＝売電中/余剰あり、空Enterで実測値を使用）: "
                     ).strip()
-                except (EOFError, KeyboardInterrupt):
+                except EOFError:
                     user_input = ""
                 if user_input:
                     try:
