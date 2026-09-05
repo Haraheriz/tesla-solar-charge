@@ -38,7 +38,7 @@ if not os.path.exists(CONFIG_FILE):
     logger.critical(f"設定ファイル（{CONFIG_FILE}）が見つかりません。")
     sys.exit(1)
 
-with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config: Dict[str, Any] = json.load(f)
 
 # 数値の設定は充電制御側と同じ入口を通す。片方だけ素の config.get に戻ると、
@@ -387,7 +387,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         raw_body = self.rfile.read(length) if length else b""
         try:
             payload: Dict[str, Any] = json.loads(raw_body.decode("utf-8")) if raw_body else {}
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             self._send_json(400, {"error": "invalid json"})
             return
 

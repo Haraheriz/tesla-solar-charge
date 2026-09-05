@@ -52,7 +52,7 @@ else:
     print("→ 既存の鍵ペアが見つかりました。これを使用します。")
 
 # 生成した公開鍵のテキストを読み込む
-with open(public_key_file, "r") as f:
+with open(public_key_file, "r", encoding="utf-8") as f:
     PUBLIC_KEY_PEM = f.read()
 
 

@@ -132,3 +132,57 @@ def test_知らないパスは404を返す(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         _post(f"{base}/api/unknown?token={TOKEN}", {"enabled": True})
     assert exc.value.code == 404
+
+
+def test_不正なバイト列をPOSTしても400を返す(server):
+    base, _ = server
+    request = urllib.request.Request(
+        f"{base}/api/override?token={TOKEN}",
+        data=b"\xff\xfe\xfd",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+    assert exc.value.code == 400
+    assert json.loads(exc.value.read().decode("utf-8")) == {"error": "invalid json"}
+
+
+def test_BOM付き設定ファイルでも起動できる(tmp_path):
+    config_file = tmp_path / "config_bom.json"
+    content = b"\xef\xbb\xbf" + json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": "bom-token"}).encode("utf-8")
+    config_file.write_bytes(content)
+    previous_config = os.environ.get("TESLA_CONFIG_PATH")
+    os.environ["TESLA_CONFIG_PATH"] = str(config_file)
+    previous_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        name = f"control_server_bom_test_{next(_module_counter)}"
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(PROJECT_ROOT, "control_server.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert module.CONTROL_TOKEN == "bom-token"
+    finally:
+        os.chdir(previous_cwd)
+        if previous_config is not None:
+            os.environ["TESLA_CONFIG_PATH"] = previous_config
+        else:
+            os.environ.pop("TESLA_CONFIG_PATH", None)
+
+
+def test_BOM付き状態ファイルを読める(tmp_path):
+    import override_state
+    state_file = tmp_path / "override_state_bom.json"
+    content = b"\xef\xbb\xbf" + json.dumps({"manual_override": True, "updated_at": 1234.5}).encode("utf-8")
+    state_file.write_bytes(content)
+    previous_state = override_state.OVERRIDE_FILE
+    override_state.OVERRIDE_FILE = str(state_file)
+    try:
+        assert override_state.read_override() is True
+    finally:
+        override_state.OVERRIDE_FILE = previous_state
+
+
