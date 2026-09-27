@@ -10,7 +10,16 @@ from urllib.parse import urlparse, parse_qs
 from typing import Any, Dict
 
 from config_loader import Settings
-from override_state import read_away_probe, read_override, write_away_probe, write_override
+from override_state import (
+    parse_charge_target,
+    read_away_probe,
+    read_charge_target,
+    read_override,
+    write_away_probe,
+    write_charge_target,
+    write_override,
+)
+from vehicle_status import load_vehicle_status
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -77,186 +86,290 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <link rel="manifest" href="/manifest.webmanifest?token=__TOKEN__">
 <link rel="icon" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png">
-<meta name="theme-color" content="#0b0f14">
+<meta name="theme-color" content="#F2F3F5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1113" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Tesla充電切替">
 <style>
-  :root { color-scheme: dark; }
-  * { -webkit-tap-highlight-color: transparent; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
-         background:#0b0f14; color:#e6edf3; margin:0;
-         /* iOSのDynamic Island/ノッチ、Androidのジェスチャーナビゲーション・カットアウトに
-            重ならないよう、固定24pxではなくセーフエリアの方を優先して確保する。 */
-         padding-top: max(24px, env(safe-area-inset-top));
-         padding-right: max(24px, env(safe-area-inset-right));
-         padding-bottom: max(24px, env(safe-area-inset-bottom));
-         padding-left: max(24px, env(safe-area-inset-left));
-         display:flex; flex-direction:column; align-items:center; min-height:100vh; box-sizing:border-box; }
-  /* iOS Human Interface Guidelines の本文基準（約17pt）、Android Material Design の
-     body1（16sp）を下限の目安として、各要素のフォントサイズを引き上げている。 */
-  h1 { font-size:22px; font-weight:600; margin-bottom:6px; text-align:center; }
-  p.sub { color:#8b949e; font-size:16px; line-height:1.5; margin-top:0; margin-bottom:32px;
-          text-align:center; max-width:280px; margin-left:auto; margin-right:auto; }
-  /* 「現在のステータス」：常に事実（状態）のみを示す固定位置の表示。ボタンの外に置くことで
-     「状態の提示」と「未来のアクションの提示」を位置的に分離する（位置とテキストの相補関係）。 */
-  .status { font-size:17px; margin-bottom:24px; padding:10px 18px; border-radius:8px; background:#161b22; text-align:center; }
-  .status.on { color:#3fb950; }
-  .status.off { color:#8b949e; }
-  .status .label { color:#6e7681; font-weight:500; }
-  button#toggle { display:block; width:220px; height:220px; border-radius:50%; border:none; font-size:18px;
-                  line-height:1.3; padding:0 24px;
-                  font-weight:700; cursor:pointer; transition: background .2s; margin:0 auto; }
-  button#toggle.off { background:#21262d; color:#e6edf3; }
-  button#toggle.on { background:#238636; color:#ffffff; }
-  button#toggle:disabled { opacity:0.5; }
-  button#toggle:focus-visible { outline:3px solid #58a6ff; outline-offset:3px; }
-  /* 主操作（フル充電モード）と従の操作（外出先の充電記録）を罫線で分ける。
-     どちらも「押すと何かが変わる」ため、大きさと色で優先順位を明示する。 */
-  .divider { width:260px; height:1px; background:#21262d; margin:32px auto 24px; }
-  .secondary { max-width:280px; margin:0 auto; }
-  .secondary .status { font-size:15px; margin-bottom:14px; }
-  /* 最小タップ領域はiOS 44pt / Android 48dp を下限の目安にしている。 */
-  button#probe { display:block; width:100%; min-height:48px; border-radius:8px; border:none;
-                 font-size:16px; font-weight:600; padding:12px 18px; cursor:pointer; transition: background .2s; }
-  button#probe.off { background:#21262d; color:#e6edf3; }
-  button#probe.on { background:#1f6feb; color:#ffffff; }
-  button#probe:disabled { opacity:0.5; }
-  button#probe:focus-visible { outline:3px solid #58a6ff; outline-offset:3px; }
-  .secondary p.note { color:#6e7681; font-size:13px; line-height:1.5; margin:12px 0 0; text-align:center; }
-  .updated { margin-top:24px; font-size:13px; color:#6e7681; text-align:center; }
+  /* 画面の規則は docs/05_charge_target_design.md 第8章。
+     タップ領域は Apple HIG（44pt）と Material Design 3（48dp）の厳しい方に合わせて 48px 以上。
+     外観は端末の設定（prefers-color-scheme）に従い、ライト／ダークを切替える。 */
+  :root {
+    --bg:#F2F3F5; --surf:#FFFFFF; --surf2:#E6E9ED; --text:#14171A; --text2:#4F5863; --text3:#5E6771;
+    --primary:#0B5CAD; --on-primary:#FFFFFF; --tonal-bg:#DCE8F7; --tonal-text:#0B3E73;
+    --fill:#E3A008; --fill-off:#8C959F; --chip-on-bg:#FFF0CC; --chip-on-text:#6B4700;
+    --chip-off-bg:#E6E9ED; --chip-off-text:#3F4750; --note-bg:#EEF1F4; --note-text:#3F4750;
+    --banner-bg:#E3EEFB; --banner-text:#0B3E73; --seg-on:#FFFFFF; --seg-on-text:#14171A;
+    --switch-off:#AEB6BF; --disabled-bg:#E6E9ED; --disabled-text:#5E6771; --ring:#FFFFFF;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#0E1113; --surf:#1A1E22; --surf2:#2A3036; --text:#E9EDF0; --text2:#A7B1B9; --text3:#98A2AB;
+      --primary:#8CC8FF; --on-primary:#002F57; --tonal-bg:#1E3247; --tonal-text:#CFE5FF;
+      --fill:#F2B33D; --fill-off:#7C868F; --chip-on-bg:#3A2C0E; --chip-on-text:#F2B33D;
+      --chip-off-bg:#2A3036; --chip-off-text:#A7B1B9; --note-bg:#22272C; --note-text:#A7B1B9;
+      --banner-bg:#13263A; --banner-text:#CFE5FF; --seg-on:#454D55; --seg-on-text:#FFFFFF;
+      --switch-off:#555E67; --disabled-bg:#2A3036; --disabled-text:#98A2AB; --ring:#1A1E22;
+    }
+  }
+  /* iOS では -apple-system-body を起点にすると、端末の文字サイズ設定（Dynamic Type）に追従する。
+     以降のサイズは rem で指定し、この基準に比例させる。 */
+  html { font: -apple-system-body; }
+  * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+         font-size:1.0625rem; line-height:1.35;
+         padding-top: max(16px, env(safe-area-inset-top));
+         padding-right: max(16px, env(safe-area-inset-right));
+         padding-bottom: max(32px, env(safe-area-inset-bottom));
+         padding-left: max(16px, env(safe-area-inset-left)); }
+  main { max-width:480px; margin:0 auto; display:flex; flex-direction:column; gap:16px; }
+  header { padding:8px 4px 4px; }
+  h1 { margin:0; font-size:2.125rem; line-height:1.2; font-weight:700; }
+  .sub { font-size:0.9375rem; color:var(--text2); }
+  section { background:var(--surf); border-radius:28px; padding:20px; display:flex; flex-direction:column; gap:16px; }
+  h2 { margin:0; font-size:1.25rem; font-weight:600; }
+  .row { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .row.base { align-items:baseline; }
+  .label { margin:0; font-size:0.9375rem; font-weight:600; color:var(--text2); }
+  .big { font-size:4.5rem; line-height:1; font-weight:700; letter-spacing:-0.02em; font-variant-numeric:tabular-nums; }
+  .big small { font-size:2rem; font-weight:600; color:var(--text2); margin-left:2px; }
+  .chip { padding:8px 14px; border-radius:16px; font-size:0.9375rem; font-weight:600; white-space:nowrap;
+          background:var(--chip-off-bg); color:var(--chip-off-text); }
+  .chip.on { background:var(--chip-on-bg); color:var(--chip-on-text); }
+  .bar { position:relative; height:16px; border-radius:8px; background:var(--surf2); }
+  .bar .fill { position:absolute; left:0; top:0; bottom:0; border-radius:8px; background:var(--fill-off); }
+  .bar .fill.on { background:var(--fill); }
+  .bar .limit { position:absolute; top:-4px; bottom:-4px; width:0; border-left:2px dashed var(--text2); }
+  .bar .target { position:absolute; top:-6px; bottom:-6px; width:4px; border-radius:2px; background:var(--primary);
+                 box-shadow:0 0 0 2px var(--ring); }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:0.8125rem; color:var(--text2); }
+  .legend span { display:flex; align-items:center; gap:6px; }
+  .sw-target { width:4px; height:14px; border-radius:2px; background:var(--primary); }
+  .sw-limit { width:0; height:14px; border-left:2px dashed var(--text2); }
+  .note { margin:0; padding:12px 16px; border-radius:16px; font-size:0.9375rem; line-height:1.45;
+          background:var(--note-bg); color:var(--note-text); }
+  .banner { background:var(--banner-bg); color:var(--banner-text); }
+  .fine { margin:0; font-size:0.8125rem; line-height:1.4; color:var(--text3); }
+  .stepper { display:grid; grid-template-columns:56px minmax(0,1fr) 56px; align-items:center; gap:8px; }
+  .icon-btn { width:56px; height:56px; border-radius:28px; border:none; background:var(--tonal-bg); color:var(--tonal-text);
+              display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  output { text-align:center; font-size:4rem; line-height:1; font-weight:700; letter-spacing:-0.02em;
+           font-variant-numeric:tabular-nums; color:var(--primary); }
+  output small { font-size:1.75rem; font-weight:600; }
+  input[type=range] { width:100%; height:48px; margin:0; accent-color:var(--primary); }
+  .ticks { display:flex; justify-content:space-between; font-size:0.8125rem; color:var(--text3); font-variant-numeric:tabular-nums; }
+  .btn { min-height:56px; border-radius:28px; border:none; font:inherit; font-size:1.0625rem; font-weight:600; cursor:pointer;
+         background:var(--primary); color:var(--on-primary); }
+  .btn:disabled { background:var(--disabled-bg); color:var(--disabled-text); cursor:default; }
+  .btn.text { min-height:48px; background:transparent; color:var(--primary); }
+  .seg { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; padding:4px; border-radius:28px; background:var(--surf2); }
+  .seg button { min-height:48px; border-radius:24px; border:none; font:inherit; font-size:1.0625rem; font-weight:500;
+                background:transparent; color:var(--text2); cursor:pointer; }
+  .seg button[aria-pressed=true] { background:var(--seg-on); color:var(--seg-on-text); font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+  .switch { flex-shrink:0; position:relative; width:52px; height:32px; border-radius:16px; border:none; padding:0;
+            background:var(--switch-off); cursor:pointer; }
+  .switch[aria-checked=true] { background:var(--primary); }
+  .switch span { position:absolute; top:3px; left:3px; width:26px; height:26px; border-radius:13px; background:#FFFFFF;
+                 box-shadow:0 1px 2px rgba(0,0,0,.25); transition:left .15s; }
+  .switch[aria-checked=true] span { left:23px; }
+  button:focus-visible, input:focus-visible { outline:3px solid var(--primary); outline-offset:3px; }
+  @media (prefers-reduced-motion: reduce) { .switch span { transition:none; } }
+  [hidden] { display:none !important; }
 </style>
 </head>
 <body>
-  <main>
-    <h1>Tesla充電切替</h1>
-    <p class="sub">ONにすると太陽光の発電状況に関わらず、フル充電モードで動作します。</p>
-    <!-- role="status" + aria-live="polite": 状態が変わったことを支援技術にも読み上げさせる -->
-    <div class="status off" id="status" role="status" aria-live="polite" aria-atomic="true">
-      <span class="label">現在のステータス：</span><span id="status-value">読み込み中...</span>
-    </div>
-    <!-- ボタン内テキストは常に「これを押すと何が起きるか（未来のアクション）」のみを示し、
-         現在の状態は上の.statusだけが伝える。aria-pressedで状態自体も支援技術に伝える。 -->
-    <button id="toggle" class="off" type="button" disabled aria-pressed="false" aria-describedby="status">...</button>
-    <div class="divider" role="separator"></div>
-    <section class="secondary">
-      <div class="status off" id="probe-status" role="status" aria-live="polite" aria-atomic="true">
-        <span class="label">外出先の充電記録：</span><span id="probe-status-value">読み込み中...</span>
+<main>
+  <header>
+    <h1>Tesla充電</h1>
+    <div class="sub" id="fetched">読み込み中...</div>
+  </header>
+
+  <section aria-labelledby="now-label">
+    <div class="row">
+      <div>
+        <h2 class="label" id="now-label">現在の充電率</h2>
+        <div class="big" id="level">--<small>%</small></div>
       </div>
-      <button id="probe" class="off" type="button" disabled aria-pressed="false" aria-describedby="probe-status">...</button>
-      <!-- 金額を先に見せる。これは充電の制御ではなく記録のための支出であり、
-           押す前に費用が見えているべきものである。 -->
-      <p class="note">外出先の急速充電器で車両が返す値を記録します。自宅の充電器にケーブルが繋がっていない間だけ働き、1回の外出でおよそ¥7かかります。</p>
-    </section>
-    <div class="updated" id="updated" aria-hidden="true"></div>
-  </main>
+      <div class="chip" id="chip" role="status" aria-live="polite">--</div>
+    </div>
+    <div>
+      <div class="bar" aria-hidden="true">
+        <div class="fill" id="bar-fill" style="width:0%"></div>
+        <div class="limit" id="bar-limit" hidden></div>
+        <div class="target" id="bar-target" hidden></div>
+      </div>
+      <div class="legend" style="margin-top:10px">
+        <span id="legend-target" hidden><span class="sw-target"></span><span id="legend-target-text"></span></span>
+        <span id="legend-limit" hidden><span class="sw-limit"></span><span id="legend-limit-text"></span></span>
+      </div>
+    </div>
+    <p class="note banner" id="banner" hidden></p>
+  </section>
+
+  <section aria-labelledby="target-label">
+    <div class="row base">
+      <h2 id="target-label">目標充電率</h2>
+      <span class="sub" id="saved-label">--</span>
+    </div>
+    <div class="stepper">
+      <button type="button" class="icon-btn" id="dec" aria-label="1%下げる">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      </button>
+      <output for="target-range" id="pending">--<small>%</small></output>
+      <button type="button" class="icon-btn" id="inc" aria-label="1%上げる">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line><line x1="12" y1="5" x2="12" y2="19"></line></svg>
+      </button>
+    </div>
+    <div>
+      <label for="target-range" class="fine">スライダーで大まかに、±ボタンで1%ずつ合わせる</label>
+      <input id="target-range" type="range" min="1" max="100" step="1" value="30">
+      <div class="ticks"><span>1%</span><span>50%</span><span>100%</span></div>
+    </div>
+    <p class="note" id="limit-note"></p>
+    <button type="button" class="btn" id="set-target" disabled>設定済み</button>
+    <button type="button" class="btn text" id="clear-target" hidden>目標充電率を解除する</button>
+    <p class="fine">目標以上になったら止め、目標より下では止めません。最大電流（48A）のときは1%程度超えて止まることがあります。</p>
+  </section>
+
+  <section aria-labelledby="mode-label">
+    <h2 id="mode-label">充電モード</h2>
+    <div class="seg" role="group" aria-labelledby="mode-label">
+      <button type="button" id="mode-solar" aria-pressed="false">太陽光追従</button>
+      <button type="button" id="mode-full" aria-pressed="false">フル充電</button>
+    </div>
+    <p class="note" id="mode-note" style="background:transparent;padding:0;color:var(--text2)"></p>
+  </section>
+
+  <section>
+    <div class="row" style="align-items:center;min-height:48px">
+      <span id="probe-label">外出先の充電記録</span>
+      <button type="button" class="switch" id="probe" role="switch" aria-checked="false" aria-labelledby="probe-label"><span></span></button>
+    </div>
+    <p class="fine">自宅の充電器にケーブルが繋がっていない間も、10分ごとに車両データを読みます。外出1回（約4時間）でおよそ¥7かかります。</p>
+  </section>
+</main>
 
 <script>
 const TOKEN = "__TOKEN__";
+const STATE_LABELS = { Charging: "充電中", Stopped: "停止中", Complete: "満充電", Disconnected: "ケーブル未接続",
+                       NoPower: "給電なし", Starting: "開始処理中" };
+let state = null;
+let pending = null;   // 画面で選んでいる目標充電率（保存前）
+let dirty = false;    // 保存前の変更があるか。あるうちは5秒ごとの再取得で上書きしない
 
-async function fetchStatus() {
-  const res = await fetch(`/api/status?token=${encodeURIComponent(TOKEN)}`);
-  if (!res.ok) throw new Error("status fetch failed");
-  return res.json();
-}
-
-async function setOverride(enabled) {
-  const res = await fetch(`/api/override?token=${encodeURIComponent(TOKEN)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled })
+function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  };
+  return fetch(`${path}?token=${encodeURIComponent(TOKEN)}`, opts).then((res) => {
+    if (!res.ok) throw new Error(path);
+    return res.json();
   });
-  if (!res.ok) throw new Error("override update failed");
-  return res.json();
 }
 
-async function setAwayProbe(enabled) {
-  const res = await fetch(`/api/away_probe?token=${encodeURIComponent(TOKEN)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled })
-  });
-  if (!res.ok) throw new Error("away probe update failed");
-  return res.json();
+function hhmm(epoch) {
+  return new Date(epoch * 1000).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 }
 
-function render(state) {
-  const statusEl = document.getElementById("status");
-  const statusValueEl = document.getElementById("status-value");
-  const btn = document.getElementById("toggle");
-  const updatedEl = document.getElementById("updated");
-  btn.disabled = false;
-  if (state.manual_override) {
-    // .status側：現在の事実のみを示す（状態の提示）
-    statusValueEl.textContent = "フル充電モード（太陽光発電状況を無視）";
-    statusEl.className = "status on";
-    // button側：押すと起きる未来のアクションのみを示す（アクションの提示）。状態の文言とは混在させない。
-    btn.textContent = "太陽光追従モードに戻す";
-    btn.className = "on";
-    btn.setAttribute("aria-pressed", "true");
-  } else {
-    statusValueEl.textContent = "太陽光追従モード（通常稼働中）";
-    statusEl.className = "status off";
-    btn.textContent = "フル充電モードを開始する";
-    btn.className = "off";
-    btn.setAttribute("aria-pressed", "false");
-  }
-  const probeStatusEl = document.getElementById("probe-status");
-  const probeStatusValueEl = document.getElementById("probe-status-value");
-  const probeBtn = document.getElementById("probe");
-  probeBtn.disabled = false;
-  if (state.away_probe) {
-    probeStatusValueEl.textContent = "記録中（10分ごとに車両を確認）";
-    probeStatusEl.className = "status on";
-    probeBtn.textContent = "記録を停止する";
-    probeBtn.className = "on";
-    probeBtn.setAttribute("aria-pressed", "true");
-  } else {
-    probeStatusValueEl.textContent = "記録しない";
-    probeStatusEl.className = "status off";
-    probeBtn.textContent = "記録を開始する";
-    probeBtn.className = "off";
-    probeBtn.setAttribute("aria-pressed", "false");
+function el(id) { return document.getElementById(id); }
+
+function render() {
+  if (!state) return;
+  const v = state.vehicle || {};
+  const target = state.charge_target_soc;
+  const level = Number.isInteger(v.battery_level) ? v.battery_level : null;
+  const limitMin = Number.isInteger(v.charge_limit_soc_min) ? v.charge_limit_soc_min : 50;
+  const original = Number.isInteger(v.charge_limit_restore_soc) ? v.charge_limit_restore_soc
+                 : (Number.isInteger(v.charge_limit_soc) ? v.charge_limit_soc : null);
+  if (!dirty) pending = target === null ? 30 : target;
+
+  el("fetched").textContent = v.observed_at ? `車両データ ${hhmm(v.observed_at)} 取得` : "車両データ未取得";
+  el("level").firstChild.textContent = level === null ? "--" : String(level);
+  const charging = v.charging_state === "Charging";
+  el("chip").textContent = STATE_LABELS[v.charging_state] || v.charging_state || "--";
+  el("chip").className = charging ? "chip on" : "chip";
+  el("bar-fill").style.width = `${level === null ? 0 : level}%`;
+  el("bar-fill").className = charging ? "fill on" : "fill";
+
+  const showMarker = target !== null || dirty;
+  el("bar-target").hidden = !showMarker;
+  el("bar-target").style.left = `calc(${pending}% - 2px)`;
+  el("legend-target").hidden = !showMarker;
+  el("legend-target-text").textContent = `目標充電率 ${pending}%${dirty ? "（未保存）" : ""}`;
+  const limit = Number.isInteger(v.charge_limit_soc) ? v.charge_limit_soc : null;
+  el("bar-limit").hidden = limit === null;
+  el("bar-limit").style.left = `calc(${limit}% - 1px)`;
+  el("legend-limit").hidden = limit === null;
+  el("legend-limit-text").textContent = `車両側の上限 ${limit}%${Number.isInteger(v.charge_limit_applied_soc) ? "（自動）" : ""}`;
+
+  const reached = target !== null && level !== null && level >= target && v.target_reached_at;
+  el("banner").hidden = !reached;
+  if (reached) {
+    el("banner").textContent = `目標充電率 ${target}% に達したため、${hhmm(v.target_reached_at)} に充電を停止しました。` +
+      `以後は ${target}% を下回り、かつ余剰電力があるときだけ充電します。`;
   }
 
-  updatedEl.textContent = "最終更新: " + new Date().toLocaleTimeString("ja-JP");
+  el("saved-label").textContent = target === null ? "未設定" : `設定中：${target}%`;
+  el("pending").firstChild.textContent = String(pending);
+  el("target-range").value = String(pending);
+  const nextLimit = Math.max(pending, limitMin);
+  const stopper = pending < limitMin
+    ? `車両側の下限が${limitMin}%のため、${pending}% ではシステムが充電を停止します。`
+    : `車両自身が ${pending}% で充電を止めます。`;
+  const back = original !== null
+    ? `ケーブルを抜くと元の ${original}% に戻すため、外出先では ${original}% まで充電できます。` : "";
+  el("limit-note").textContent =
+    `自宅の充電器に繋がっている間、車両側の充電上限を ${nextLimit}% にします。${stopper}${back}`;
+  const changed = pending !== target;
+  el("set-target").disabled = !changed;
+  el("set-target").textContent = changed ? `${pending}% に設定する` : "設定済み";
+  el("clear-target").hidden = target === null;
+
+  const full = state.manual_override;
+  el("mode-solar").setAttribute("aria-pressed", String(!full));
+  el("mode-full").setAttribute("aria-pressed", String(full));
+  el("mode-note").textContent = !full
+    ? "余剰電力の範囲で充電します。夜間（18:00〜7:00）は充電しません。"
+    : (target !== null && level !== null && level >= target
+      ? "現在の充電率が目標充電率以上のため、次の確認（最大3分後）でフル充電モードを解除し、太陽光追従に戻ります。"
+      : "太陽光に関係なく最大48Aで充電します。夜間も充電します。" +
+        (target !== null ? `目標充電率 ${target}% に達したら停止し、太陽光追従に戻ります。` : "車両側の上限まで充電します。"));
+  el("probe").setAttribute("aria-checked", String(state.away_probe));
 }
 
-async function refresh() {
-  try {
-    const state = await fetchStatus();
-    render(state);
-  } catch (e) {
-    document.getElementById("status-value").textContent = "通信エラー";
-  }
+function update(promise) {
+  return promise.then((s) => { state = s; render(); })
+    .catch(() => { alert("切替に失敗しました。通信状態を確認してください。"); });
 }
 
-document.getElementById("toggle").addEventListener("click", async () => {
-  const btn = document.getElementById("toggle");
-  const currentlyOn = btn.classList.contains("on");
-  btn.disabled = true;
-  try {
-    const state = await setOverride(!currentlyOn);
-    render(state);
-  } catch (e) {
-    alert("切替に失敗しました。通信状態を確認してください。");
-    btn.disabled = false;
-  }
+function setPending(value) {
+  pending = Math.max(1, Math.min(100, value));
+  dirty = !state || pending !== state.charge_target_soc;
+  render();
+}
+
+el("dec").addEventListener("click", () => setPending(pending - 1));
+el("inc").addEventListener("click", () => setPending(pending + 1));
+el("target-range").addEventListener("input", (e) => setPending(parseInt(e.target.value, 10)));
+el("set-target").addEventListener("click", () => {
+  dirty = false;
+  update(api("/api/charge_target", { soc: pending }));
 });
-
-document.getElementById("probe").addEventListener("click", async () => {
-  const probeBtn = document.getElementById("probe");
-  const currentlyOn = probeBtn.classList.contains("on");
-  probeBtn.disabled = true;
-  try {
-    const state = await setAwayProbe(!currentlyOn);
-    render(state);
-  } catch (e) {
-    alert("切替に失敗しました。通信状態を確認してください。");
-    probeBtn.disabled = false;
-  }
+el("clear-target").addEventListener("click", () => {
+  dirty = false;
+  update(api("/api/charge_target", { soc: null }));
 });
+el("mode-solar").addEventListener("click", () => update(api("/api/override", { enabled: false })));
+el("mode-full").addEventListener("click", () => update(api("/api/override", { enabled: true })));
+el("probe").addEventListener("click", () => update(api("/api/away_probe", { enabled: !state.away_probe })));
 
+function refresh() {
+  api("/api/status").then((s) => { state = s; render(); })
+    .catch(() => { el("fetched").textContent = "通信エラー"; });
+}
 refresh();
 setInterval(refresh, 5000);
 
@@ -305,6 +418,30 @@ self.addEventListener("fetch", (event) => {
 """
 
 
+# 画面に返す車両の状態。vehicle_status.json のうち、表示に使うキーだけを渡す。
+VEHICLE_STATUS_KEYS = (
+    "battery_level",
+    "charging_state",
+    "charge_limit_soc",
+    "charge_limit_soc_min",
+    "charge_limit_applied_soc",
+    "charge_limit_restore_soc",
+    "observed_at",
+    "target_reached_at",
+)
+
+
+def status_payload() -> Dict[str, Any]:
+    """/api/status と各POSTの応答。画面は1回の応答で全体を描き直す。"""
+    vehicle = load_vehicle_status()
+    return {
+        "manual_override": read_override(),
+        "away_probe": read_away_probe(),
+        "charge_target_soc": read_charge_target()[0],
+        "vehicle": {key: vehicle.get(key) for key in VEHICLE_STATUS_KEYS},
+    }
+
+
 def render_page(token: str) -> str:
     return PAGE_TEMPLATE.replace("__TOKEN__", html.escape(token, quote=True))
 
@@ -346,7 +483,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             if not self._check_token(query):
                 self._send_json(403, {"error": "invalid token"})
                 return
-            self._send_json(200, {"manual_override": read_override(), "away_probe": read_away_probe()})
+            self._send_json(200, status_payload())
             return
 
         if parsed.path == "/":
@@ -388,7 +525,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query: Dict[str, list] = parse_qs(parsed.query)
 
-        if parsed.path not in ("/api/override", "/api/away_probe"):
+        if parsed.path not in ("/api/override", "/api/away_probe", "/api/charge_target"):
             self.send_response(404)
             self.end_headers()
             return
@@ -405,6 +542,22 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid json"})
             return
 
+        if parsed.path == "/api/charge_target":
+            # 値の検査はここで1回だけ行い、通った値だけを保存する（parse_charge_target）。
+            # 制御ループは保存された値を信用するが、手で書き換えられた場合に備えて読む側でも同じ関数を通す。
+            if not isinstance(payload, dict) or "soc" not in payload:
+                self._send_json(400, {"error": "soc is required"})
+                return
+            try:
+                target = parse_charge_target(payload["soc"])
+            except ValueError:
+                self._send_json(400, {"error": "soc must be an integer from 1 to 100, or null"})
+                return
+            write_charge_target(target)
+            logger.info(f"目標充電率を {'未設定' if target is None else f'{target}%'} に変更しました。")
+            self._send_json(200, status_payload())
+            return
+
         enabled = bool(payload.get("enabled"))
 
         if parsed.path == "/api/override":
@@ -414,9 +567,9 @@ class ControlHandler(BaseHTTPRequestHandler):
             write_away_probe(enabled)
             logger.info(f"外出先の充電記録を {'有効（課金対象の問い合わせを再開）' if enabled else '無効'} に切替えました。")
 
-        # 画面は1回の応答で両方を描き直す。片方だけ返すと、もう一方の表示が
+        # 画面は1回の応答で全体を描き直す。一部だけ返すと、残りの表示が
         # 次のポーリング（5秒後）まで古いままになる。
-        self._send_json(200, {"manual_override": read_override(), "away_probe": read_away_probe()})
+        self._send_json(200, status_payload())
 
     def log_message(self, format: str, *args: Any) -> None:
         logger.debug(format % args)

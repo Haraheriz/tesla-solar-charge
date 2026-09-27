@@ -61,7 +61,8 @@ tesla-solar-charge/
 │
 ├── tesla_solar_charger.py            # [共用] 充電制御メインスクリプト（両環境で直接実行可能）
 ├── control_server.py                 # [共用] スマホ操作用コントロールサーバー（フル充電モードの切替UI）
-├── override_state.py                 # [共用] マニュアル・オーバーライド状態の共有読み書きモジュール
+├── override_state.py                 # [共用] フル充電モード・外出先の充電記録・目標充電率の共有読み書きモジュール
+├── vehicle_status.py                 # [共用] 最後に読んだ車両の状態と、車両側の充電上限の元の値の保存モジュール
 ├── icons/                             # [共用] PWA用アプリアイコン（icon-*.png, icon-maskable-*.png, apple-touch-icon-180.png）
 ├── tesla_config.json                 # [共用] システム設定ファイル（各環境のトークン/パスを記載）
 ├── override_state.json               # 【動線: スマホ → RPi】マニュアル・オーバーライドの現在状態（自動生成）

@@ -11,8 +11,10 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from config_loader import Settings
-from override_state import read_away_probe_state, read_override_state, write_override
+from override_state import read_away_probe_state, read_charge_target, read_override_state, write_override
+from vehicle_status import load_vehicle_status, save_vehicle_status
 from wall_connector import (
+    WC_CONNECTED,
     WC_DELIVERING,
     WC_NOT_CONNECTED,
     WC_UNKNOWN,
@@ -243,6 +245,15 @@ TERMINAL_STATUS_LABELS: Dict[str, str] = {
     "Complete": "満充電に到達済み",
     "NoPower": "充電設備から給電されていない",
 }
+
+# 車両データに charge_limit_soc_min が無いときに使う、車両側の充電上限の下限。
+# 2026-09-28 の実機確認で、車両は 50 を返し、50 未満の set_charge_limit を
+# result: true のまま 50 に切り上げた（docs/05_charge_target_design.md 第2.1節）。
+CHARGE_LIMIT_MIN_FALLBACK: int = 50
+
+# 目標到達後の待機中に、自宅の充電器が給電を始めていないかを確かめる間隔（秒）。
+# ウォールコネクターのローカルAPIは課金されない（1回28ms）。
+TARGET_WAIT_CHECK_SEC: int = 60
 
 # 動作確認用：コマンドライン引数 --force-run または環境変数 FORCE_RUN=1 で
 # 夜間休止モード（7:00-18:00以外は停止）を無視して常時稼働させ、
@@ -688,6 +699,180 @@ def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
         time.sleep(10)
     return False
 
+def as_percent(value: Any) -> Optional[int]:
+    """車両データの百分率フィールドを整数で返す。数値でなければ None を返す。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def set_charge_limit(vin: str, headers: Dict[str, str], percent: int) -> bool:
+    """車両側の充電上限を送る。成否は応答の result ではなく、次に読む値で確かめる。
+
+    実機は下限未満の値を result: true のまま下限へ切り上げる（第2.1節）。
+    ここで true を「設定できた」とみなすと、送った値と実際の値が食い違ったまま進む。
+    リトライはしない。次のサイクルで読んだ値が一致しなければ、そこで送り直す。
+    """
+    ok, reason = post_vehicle_command(vin, headers, "set_charge_limit", {"percent": percent})
+    if not ok:
+        logger.warning(f"車両側の充電上限（{percent}%）の送信に失敗しました: {reason}。次のサイクルで再送します。")
+    return ok
+
+
+def record_vehicle_observation(status: Dict[str, Any], charge_state: Dict[str, Any]) -> None:
+    """読んだ車両データを vehicle_status.json に残す。画面表示と、就寝中の判定に使う。"""
+    status["battery_level"] = as_percent(charge_state.get("battery_level"))
+    status["charging_state"] = str(charge_state.get("charging_state") or "")
+    status["charge_limit_soc"] = as_percent(charge_state.get("charge_limit_soc"))
+    status["charge_limit_soc_min"] = as_percent(charge_state.get("charge_limit_soc_min"))
+    status["observed_at"] = time.time()
+    save_vehicle_status(status)
+
+
+def clear_charge_limit_record(status: Dict[str, Any]) -> None:
+    status["charge_limit_applied_soc"] = None
+    status["charge_limit_restore_soc"] = None
+    save_vehicle_status(status)
+
+
+def sync_charge_limit(
+    vin: str,
+    headers: Dict[str, str],
+    charge_state: Dict[str, Any],
+    charge_target: Optional[int],
+    status: Dict[str, Any],
+) -> None:
+    """車両側の充電上限を、目標充電率に合わせる、または元に戻す。
+
+    車両データを読んだ直後に呼ぶ（docs/05_charge_target_design.md 第4.5節）。
+
+    設定すべき上限 = max(目標充電率, charge_limit_soc_min)。合わせるのは自宅の充電器に
+    接続中のときだけである。目標に合わせた上限のまま外出すると、スーパーチャージャーでも
+    その値で止まる（設計意図 R3・R4）。ウォールコネクターを読めないときは何もしない。
+    """
+    current = as_percent(charge_state.get("charge_limit_soc"))
+    applied = status.get("charge_limit_applied_soc")
+    restore = status.get("charge_limit_restore_soc")
+    if current is None:
+        return
+    # 目標も記録も無ければ、ウォールコネクターを読む理由も無い（従来の動作と同じにする）
+    if charge_target is None and applied is None:
+        return
+
+    wc_state = read_wall_connector()
+    if wc_state == WC_UNKNOWN:
+        return
+    charging_state = str(charge_state.get("charging_state") or "")
+    at_home = wc_state == WC_CONNECTED and charging_state != STATUS_DISCONNECTED
+
+    if charge_target is None or not at_home:
+        # 元に戻す側
+        if applied is None:
+            return
+        if restore is None or current == restore:
+            clear_charge_limit_record(status)
+            return
+        if current != applied:
+            log_attention(
+                f"車両側の充電上限が {current}% に変更されていたため、元の値 {restore}% には戻しません。"
+            )
+            clear_charge_limit_record(status)
+            return
+        reason = "目標充電率が解除されたため" if charge_target is None else "自宅の充電器から外れたため"
+        if set_charge_limit(vin, headers, restore):
+            logger.info(f"{reason}、車両側の充電上限を {restore}% に戻しました。")
+            # 送信に成功した時点で記録を消す。外出中は車両データを読まない経路に入るため、
+            # 読み直して確かめるまで残すと、その経路（restore_charge_limit_without_reading）が
+            # 同じ値を二重に送る。帰宅して接続すれば、その時点の値を改めて保存し直す。
+            clear_charge_limit_record(status)
+        elif not at_home:
+            log_attention(
+                f"車両側の充電上限が {current}% のままです（元の値 {restore}%）。外出先では {current}% で止まります。"
+            )
+        return
+
+    limit_min = as_percent(charge_state.get("charge_limit_soc_min")) or CHARGE_LIMIT_MIN_FALLBACK
+    want = max(charge_target, limit_min)
+    if current == want:
+        if applied is not None and applied != want:
+            status["charge_limit_applied_soc"] = want
+            save_vehicle_status(status)
+        return
+
+    if applied is not None and current != applied:
+        if current == restore:
+            log_attention(
+                f"車両側の充電上限に {applied}% を送りましたが、読み取った値は {current}% でした。再送します。"
+            )
+        else:
+            log_attention(
+                f"車両側の充電上限が {current}% に変更されていました。この値を元の値として保存し、"
+                f"目標充電率に合わせて {want}% に戻します。"
+            )
+            status["charge_limit_restore_soc"] = current
+    elif restore is None:
+        status["charge_limit_restore_soc"] = current
+    save_vehicle_status(status)
+
+    if set_charge_limit(vin, headers, want):
+        status["charge_limit_applied_soc"] = want
+        save_vehicle_status(status)
+        note = (
+            f"車両側の下限が {limit_min}% のため、{charge_target}% ではシステムが充電を停止します。"
+            if charge_target < limit_min else ""
+        )
+        logger.info(
+            f"目標充電率 {charge_target}% に合わせ、車両側の充電上限を {current}% から {want}% に変更しました。{note}"
+        )
+
+
+def restore_charge_limit_without_reading(vin: str, headers: Dict[str, str], status: Dict[str, Any]) -> None:
+    """自宅の充電器から外れ、車両データを読まない経路で、車両側の充電上限を元に戻す。
+
+    車両データを読まないので、戻ったことを読み直して確かめる手段がない。送信に成功したら
+    記録を消す。帰宅して接続すれば sync_charge_limit が改めて現在値を保存し直す。
+    """
+    applied = status.get("charge_limit_applied_soc")
+    restore = status.get("charge_limit_restore_soc")
+    if applied is None or restore is None:
+        return
+    if set_charge_limit(vin, headers, restore):
+        logger.info(f"自宅の充電器から外れたため、車両側の充電上限を {restore}% に戻しました。")
+        clear_charge_limit_record(status)
+    else:
+        log_attention(
+            f"車両側の充電上限が {applied}% のままです（元の値 {restore}%）。外出先では {applied}% で止まります。"
+        )
+
+
+def wait_watching_home_charger(total_sec: int) -> None:
+    """目標到達後の待機。自宅の充電器が給電を始めたら打ち切る。
+
+    車両は 07:00 のスケジュール充電やケーブルの挿し直しで自分から充電を始める。
+    待機の途中でウォールコネクターの contactor_closed を確かめ、給電が始まっていれば
+    次のサイクルへ進む。ウォールコネクターが未設定・読めないときは全時間待つ。
+    """
+    waited = 0
+    while waited < total_sec:
+        step = min(TARGET_WAIT_CHECK_SEC, total_sec - waited)
+        time.sleep(step)
+        waited += step
+        if waited < total_sec and home_charger_delivering():
+            logger.info("待機中に自宅の充電器が給電を始めました。待機を打ち切って確認します。")
+            return
+
+
+def release_override_for_target(level: Optional[int], target: int, stopped: bool) -> None:
+    """目標充電率に達したので、フル充電モードを解除する（第4.4節）。"""
+    write_override(False)
+    level_label = f"充電率 {level}%" if level is not None else "最後に読んだ充電率"
+    action = "充電を停止し、" if stopped else ""
+    log_attention(
+        f"{level_label}が目標充電率 {target}% に達しているため{action}フル充電モードを解除しました。"
+        "太陽光追従モードに戻ります。"
+    )
+
+
 def main() -> None:
     global received_code, expected_oauth_state, access_token, refresh_token, token_expires_at
 
@@ -825,6 +1010,16 @@ def main() -> None:
     next_disconnected_probe_at: float = 0.0
     # 直前サイクルで観測した充電ステータス（外部からの手動停止を検知するために保持する）
     prev_charging_status: str = ""
+    # 車両の最新状態と、車両側の充電上限を戻すための値。書き手はこのプロセスだけである。
+    # 再起動をまたいで保持するのは、就寝中の判定（最後に読んだ充電率）と上限の復元に要るため。
+    vehicle_status: Dict[str, Any] = load_vehicle_status()
+    # 目標充電率の前サイクルの値と、不正値を報告済みか。変わったときだけログへ残す。
+    last_charge_target: Optional[int] = None
+    target_seen: bool = False
+    last_target_invalid: bool = False
+
+    def target_label(value: Optional[int]) -> str:
+        return "未設定" if value is None else f"{value}%"
 
     def log_night_observation(message: str) -> None:
         """夜間休止中の観測結果を、状況が変わったときだけ記録する。
@@ -842,6 +1037,23 @@ def main() -> None:
         manual_override, override_updated_at = read_override_state()
         # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
         away_probe, away_probe_updated_at = read_away_probe_state()
+        # 目標充電率（docs/05_charge_target_design.md）。スマホから変更でき、毎サイクル読み直す。
+        charge_target, target_invalid = read_charge_target()
+        if target_invalid and not last_target_invalid:
+            log_attention(
+                "override_state.json の charge_target_soc が 1〜100 の整数ではないため、"
+                "目標充電率を未設定として扱います。"
+            )
+        last_target_invalid = target_invalid
+        if charge_target != last_charge_target or not target_seen:
+            if target_seen:
+                logger.info(
+                    f"目標充電率が {target_label(last_charge_target)} → {target_label(charge_target)} に変更されました。"
+                )
+            elif charge_target is not None:
+                logger.info(f"目標充電率 {charge_target}% で稼働します。")
+            last_charge_target = charge_target
+            target_seen = True
 
         # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
         # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
@@ -940,6 +1152,8 @@ def main() -> None:
                         # 通常の経路に入る。ウォールコネクターを読み取れない場合も成立せず、
                         # 従来どおり毎サイクル読む。
                         night_stop_failures = 0
+                        # 車両は起きている。車両側の充電上限を目標に合わせたまま外出させない（R4）。
+                        restore_charge_limit_without_reading(vin, headers, vehicle_status)
                         log_night_observation(
                             "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
                         )
@@ -959,6 +1173,8 @@ def main() -> None:
                             )
                         else:
                             night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
+                            record_vehicle_observation(vehicle_status, night_charge_state)
+                            sync_charge_limit(vin, headers, night_charge_state, charge_target, vehicle_status)
                             night_status = str(night_charge_state.get("charging_state") or "")
                             prev_charging_status = night_status
                             if night_status == STATUS_DISCONNECTED:
@@ -1139,6 +1355,24 @@ def main() -> None:
                     time.sleep(TERMINAL_BACKOFF_SEC)
                     continue
 
+                last_level: Optional[int] = as_percent(vehicle_status.get("battery_level"))
+                if charge_target is not None and last_level is not None and last_level >= charge_target:
+                    # 就寝中の車両の充電率は増えない。最後に読んだ値が目標以上なら、起こしても
+                    # 充電は始められない。ウェイク（¥2.75/件）を送らない（第4.2節）。
+                    observed_at = vehicle_status.get("observed_at")
+                    observed_label = (
+                        time.strftime("%m-%d %H:%M", time.localtime(observed_at))
+                        if isinstance(observed_at, (int, float)) else "時刻不明"
+                    )
+                    if manual_override:
+                        release_override_for_target(last_level, charge_target, stopped=False)
+                    logger.info(
+                        f"最後に読んだ充電率 {last_level}%（{observed_label} 取得）が目標充電率 "
+                        f"{charge_target}% 以上のため、車両を起こしません。"
+                    )
+                    time.sleep(TERMINAL_BACKOFF_SEC)
+                    continue
+
                 if not manual_override and house_power >= -(START_AMPS * 200):
                     logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * 200}W）未満のため、このまま寝かせます。")
                     time.sleep(180)
@@ -1212,6 +1446,8 @@ def main() -> None:
                 else:
                     below_min_count = 0
                     skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                    # 車両は起きている。車両側の充電上限を目標に合わせたまま外出させない（R4）。
+                    restore_charge_limit_without_reading(vin, headers, vehicle_status)
                     logger.info(
                         "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
                         f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
@@ -1267,6 +1503,9 @@ def main() -> None:
             charge_state = response_json.get("charge_state") or {}
             raw_amps = charge_state.get("charge_current_request")
             charging_status = str(charge_state.get("charging_state") or "")
+            battery_level: Optional[int] = as_percent(charge_state.get("battery_level"))
+            record_vehicle_observation(vehicle_status, charge_state)
+            sync_charge_limit(vin, headers, charge_state, charge_target, vehicle_status)
 
             if raw_amps is None:
                 raw_amps = MIN_AMPS
@@ -1295,6 +1534,17 @@ def main() -> None:
                 # 送り続けていた（2026-07-15 の 03:28〜07:39 で60回）。
                 below_min_count = 0
                 skip_wake_until = time.time() + TERMINAL_WAKE_SUPPRESS_SEC
+                if (
+                    charging_status == "Complete"
+                    and manual_override
+                    and charge_target is not None
+                    and battery_level is not None
+                    and battery_level >= charge_target
+                ):
+                    # 目標が車両側の下限以上なら、車両自身が目標で止まり Complete になる。
+                    # この分岐は目標の判定より前で continue するため、ここで解除しないと
+                    # フル充電モードが残る（第4.4節）。
+                    release_override_for_target(battery_level, charge_target, stopped=False)
                 if charging_status == STATUS_DISCONNECTED:
                     # 次にこの車両データを読み直してよい時刻。外出先の充電記録が
                     # 有効なときだけ参照される。無効なら、そもそも読み直さない。
@@ -1341,6 +1591,36 @@ def main() -> None:
                     f" [{describe_fast_charger(charge_state)}]"
                 )
                 time.sleep(180)
+                continue
+
+            # 目標充電率の判定。外出先の判定より後に置き、外出先の充電には到達させない（R3）。
+            # 止めるのは目標「以上」のときだけで、目標未満では止めない（R2）。
+            if charge_target is not None and battery_level is not None and battery_level >= charge_target:
+                below_min_count = 0
+                if charging_status == STATUS_CHARGING:
+                    if not send_charge_command(vin, headers, "charge_stop"):
+                        # 停止を確認できないうちはフル充電モードも解除しない。解除を先にすると、
+                        # 止まっていないのにモードだけ消える。
+                        logger.error("目標充電率での充電停止を確認できませんでした。次のサイクルで再試行します。")
+                        time.sleep(180)
+                        continue
+                    prev_charging_status = STATUS_STOPPED
+                    vehicle_status["target_reached_at"] = time.time()
+                    save_vehicle_status(vehicle_status)
+                    if manual_override:
+                        release_override_for_target(battery_level, charge_target, stopped=True)
+                    else:
+                        log_attention(
+                            f"充電率 {battery_level}% が目標充電率 {charge_target}% に達したため、充電を停止しました。"
+                        )
+                else:
+                    if manual_override:
+                        release_override_for_target(battery_level, charge_target, stopped=False)
+                    logger.info(
+                        f"充電率 {battery_level}% が目標充電率 {charge_target}% 以上のため、充電を開始しません。"
+                        f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
+                    )
+                wait_watching_home_charger(TERMINAL_BACKOFF_SEC)
                 continue
 
             if manual_override:
