@@ -21,6 +21,42 @@
 
 ---
 
+## 2026-09-28（秘密ファイルRead拒否フックの配置の記録）
+
+**タグ：** なし（ラズパイへのデプロイは無し）
+
+**内容：** 2026-06-27 の項で「コミットし、別端末でも共有されるようにした」と記録した `.claude/settings.json` は、翌日のコミット `2f77355`（2026-06-28）で git 管理から外し、`.gitignore` の対象にした。この項はその事実と、フックを別の端末で作る手順を記録する。2026-06-27 の項は当時の記録として書き換えない。
+
+**理由：** `.claude/settings.json` はプロジェクトのソースではなく端末ごとの AI アシスタント設定であり、`.codex/hooks.json` と同じ扱いにした（`2f77355` のコミットメッセージ）。管理外に戻したことがこのファイルに記録されておらず、フックの作り方もどのドキュメントにも無かった。
+
+**作業内容：**
+- ユーザー設定（`~/.claude/settings.json`、chezmoi 管理）の Read 拒否フックの一致条件を広げた。ファイル名が `tokens.json` 等と完全一致するときだけ拒否していたのを、`_` または `-` で終わる接頭辞付きの名前（`tesla_tokens.json` 等）も拒否するようにした。これにより `.claude/settings.json` が無い端末でも `tesla_tokens.json` と `*.pem` は拒否される
+- `tesla_config.json`（client secret を含む）はユーザー設定の一般的なパターンでは一致しない。このファイルがある端末では、次の内容で `.claude/settings.json` を作る
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import sys,json,re; d=json.load(sys.stdin); fp=d.get('tool_input',{}).get('file_path',''); m=re.search(r'(tesla_tokens\\.json|tesla_config\\.json|\\.pem)$', fp); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':'This file contains secrets (OAuth tokens, private keys, or client secret). Do not read its contents - use ls to check existence/timestamp only.'}})) if m else None\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**制約：** 両フックとも対象は Read ツールだけである。Bash の `cat` 等による読み取りは拒否しない。
+
+**結果：** ラズパイ側の本番サービスへの変更は無し。
+
+---
+
 ## 2026-09-05（文字入出力・エンコーディング例外の処理）
 
 **タグ：** `v0.6.4`（PR #37）
