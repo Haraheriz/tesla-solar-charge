@@ -20,7 +20,7 @@
 ├── override_state.py          # [転送] フル充電モード・外出先の充電記録の状態を共有するモジュール
 ├── config_loader.py           # [転送] 設定値を起動時に検証して確定させるモジュール
 ├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
-├── icons/                     # [転送] PWA用アプリアイコン（icon-192.png, icon-512.png）
+├── icons/                     # [転送] PWA用アプリアイコン（icon-*.png, icon-maskable-*.png, apple-touch-icon-180.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 
 > **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**

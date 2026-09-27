@@ -21,6 +21,29 @@
 
 ---
 
+## 2026-09-28（アプリアイコンの差し替えと any / maskable の分離）
+
+**タグ：** `v0.6.5`（PR #43）
+
+**内容：** アプリアイコンを差し替えた。淡い桜色の地に、光線がつながった深紅（`#BC002D`）の太陽を置き、旧アイコンの緑で縁取った銀色の雷が太陽を貫く図柄である。manifest が1つの画像を `"any maskable"` として宣言していたのを、`any` 用と `maskable` 用の別ファイルに分けた。180×180 の `apple-touch-icon` を追加した。
+
+### 作業内容
+
+- 転送前に、ラズパイ上の `control_server.py`・`icons/icon-192.png`・`icons/icon-512.png` の sha256 が `main` と一致することを確認
+- `control_server.py` と `icons/` の5ファイル（`icon-192.png`、`icon-512.png`、`icon-maskable-192.png`、`icon-maskable-512.png`、`apple-touch-icon-180.png`）をSCPで転送し、sha256の一致を確認
+- `tesla-override.service` だけを再起動した（02:56:21）。`tesla-charger.service` と `tesla-proxy.service` は変更していないため対象外
+
+**結果：**
+- `tesla-override.service` は `active`、`NRestarts=0`
+- ラズパイ上で `/manifest.webmanifest` を取得し、アイコン4件（`any` 2件、`maskable` 2件）が宣言されていることを確認
+- アイコン5ファイルが HTTP 200・`image/png` で返り、`/icons/unknown.png` は404を返すことを確認
+- ページの `<link rel="apple-touch-icon">` が `apple-touch-icon-180.png` を指すことを確認。`/api/status` は200
+- テストは111件通過
+
+**利用者側の作業：** iOS はホーム画面に追加した時点のアイコンを保持する。新しいアイコンにするには、ホーム画面のアイコンを一度削除して追加し直す。
+
+---
+
 ## 2026-09-28（秘密ファイルRead拒否フックの配置の記録）
 
 **タグ：** なし（ラズパイへのデプロイは無し）

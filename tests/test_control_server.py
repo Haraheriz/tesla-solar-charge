@@ -186,3 +186,49 @@ def test_BOM付き状態ファイルを読める(tmp_path):
         override_state.OVERRIDE_FILE = previous_state
 
 
+
+
+def _get_bytes(url):
+    with urllib.request.urlopen(url, timeout=5) as res:
+        return res.status, res.headers.get("Content-Type"), res.read()
+
+
+def test_manifestのアイコンはすべて配信され宣言どおりの大きさである(server):
+    """any と maskable を別ファイルにしたとき、manifest と配信の許可リストがずれていないかを見る。"""
+    base, _ = server
+    _, _, raw = _get_bytes(f"{base}/manifest.webmanifest?token={TOKEN}")
+    icons = json.loads(raw.decode("utf-8"))["icons"]
+
+    # 集合ではなく (大きさ, purpose) の組で比べる。purpose の種類だけを見ると、
+    # エントリが1件消えても残りが any と maskable を含む限り検出できない。
+    declared = sorted((icon["sizes"], icon["purpose"]) for icon in icons)
+    assert declared == [
+        ("192x192", "any"),
+        ("192x192", "maskable"),
+        ("512x512", "any"),
+        ("512x512", "maskable"),
+    ], "any と maskable を1つの画像で兼ねているか、エントリが欠けている"
+
+    for icon in icons:
+        status, content_type, body = _get_bytes(f"{base}{icon['src']}")
+        assert status == 200
+        assert content_type == "image/png"
+        # PNG の IHDR から幅と高さを読む
+        width = int.from_bytes(body[16:20], "big")
+        height = int.from_bytes(body[20:24], "big")
+        assert f"{width}x{height}" == icon["sizes"], icon["src"]
+
+
+def test_apple_touch_iconを配信する(server):
+    base, _ = server
+    status, content_type, body = _get_bytes(f"{base}/icons/apple-touch-icon-180.png")
+    assert status == 200 and content_type == "image/png"
+    assert int.from_bytes(body[16:20], "big") == 180
+
+
+@pytest.mark.parametrize("path", ["/icons/unknown.png", "/icons/../control_server.py", "/icons/"])
+def test_許可リストにないアイコンのパスは404を返す(server, path):
+    base, _ = server
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get_bytes(f"{base}{path}")
+    assert exc.value.code == 404
