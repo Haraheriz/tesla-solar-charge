@@ -199,8 +199,15 @@ def test_manifestのアイコンはすべて配信され宣言どおりの大き
     _, _, raw = _get_bytes(f"{base}/manifest.webmanifest?token={TOKEN}")
     icons = json.loads(raw.decode("utf-8"))["icons"]
 
-    purposes = {icon["purpose"] for icon in icons}
-    assert purposes == {"any", "maskable"}, "any と maskable を1つの画像で兼ねている"
+    # 集合ではなく (大きさ, purpose) の組で比べる。purpose の種類だけを見ると、
+    # エントリが1件消えても残りが any と maskable を含む限り検出できない。
+    declared = sorted((icon["sizes"], icon["purpose"]) for icon in icons)
+    assert declared == [
+        ("192x192", "any"),
+        ("192x192", "maskable"),
+        ("512x512", "any"),
+        ("512x512", "maskable"),
+    ], "any と maskable を1つの画像で兼ねているか、エントリが欠けている"
 
     for icon in icons:
         status, content_type, body = _get_bytes(f"{base}{icon['src']}")
