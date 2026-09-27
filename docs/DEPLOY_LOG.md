@@ -21,6 +21,30 @@
 
 ---
 
+## 2026-09-28（目標充電率）
+
+**タグ：** `v0.7.0`（PR #44）
+
+**内容：** スマホから設定した目標充電率で充電を止める機能を追加した。自宅の充電器に接続中は、車両側の充電上限を max(目標, `charge_limit_soc_min`) にし、外出時と目標の解除時に元の値へ戻す。スマホ画面を作り直した（ライト／ダーク両対応）。仕様と設計意図は `docs/05_charge_target_design.md`。
+
+### 作業内容
+
+- 転送前に、ラズパイ上の `tesla_solar_charger.py`・`control_server.py`・`override_state.py` の sha256 が前回デプロイ時（`e143513`）と一致することを確認
+- `tesla_solar_charger.py`・`control_server.py`・`override_state.py`・`vehicle_status.py`（新規）をSCPで転送し、sha256の一致を確認
+- `tesla-charger.service` と `tesla-override.service` を再起動した（06:45:13）。07:00 の日中制御の開始前で、車両は `offline` だった。`tesla-proxy.service` は対象外
+
+**結果：**
+- 両サービスとも `active`、`NRestarts=0`
+- 起動時のログでトークン読み込み、車両捕捉、ウォールコネクター照合（シリアル E4A25003000840）が通過し、夜間休止に入ったことを確認
+- `/api/status` が `charge_target_soc` と `vehicle` を返すこと、`/api/charge_target` に 0 を送ると400を返すこと、新しい画面が配信されることを確認
+- 本番の `override_state.json` に `charge_target_soc` は無く（未設定）、スマホで設定するまで制御の挙動は従来と同じである
+- `vehicle_status.json` は、制御ループが次に車両データを読んだときに作られる
+- テストは147件通過
+
+**未確認（実機で確認する項目、設計書第11章）：** 目標到達の `charge_stop` 直後に `contactor_closed` が `false` になるか（V1）、`set_charge_limit` の値がTeslaアプリに反映されるか（V2）、スーパーチャージャーで上限を戻したとき充電が再開するか（V3）、外出後に上限が何分で戻るか（V4）、停止した値が目標から何%超えたか（V5）。
+
+---
+
 ## 2026-09-28（アプリアイコンの差し替えと any / maskable の分離）
 
 **タグ：** `v0.6.5`（PR #43）
