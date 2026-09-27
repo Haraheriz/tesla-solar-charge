@@ -1,15 +1,16 @@
 import os
 import json
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # tesla_solar_charger.py（充電制御ループ）と control_server.py（スマホ操作用サーバー）の
-# 両プロセスがこのファイルを介して状態を共有する。現在2つ持っている。
+# 両プロセスがこのファイルを介して状態を共有する。現在3つ持っている。
 #
 #   manual_override … フル充電モード（太陽光の発電状況を無視して充電する）
 #   away_probe      … 外出先の充電記録（ケーブル未接続でも車両データを読み続ける）
+#   charge_target_soc … 目標充電率（docs/05_charge_target_design.md）
 #
-# どちらも「利用者が意図して入れ、しばらく続く状態」であり、設定ファイルではなくここに置く。
+# いずれも「利用者が意図して入れ、しばらく続く状態」であり、設定ファイルではなくここに置く。
 # tesla_config.json は起動時に1回しか読まないため、変更に再起動が要る。こちらは制御ループが
 # 毎サイクル読み直すので、スマホからの切替が次のサイクルで反映される。
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
@@ -98,3 +99,46 @@ def read_away_probe_state() -> Tuple[bool, float]:
 
 def write_away_probe(enabled: bool) -> None:
     _write_flag("away_probe", "away_probe_updated_at", enabled)
+
+
+# 目標充電率の値域。1〜100 の整数だけを受け付ける（docs/05_charge_target_design.md 第5.1節）。
+CHARGE_TARGET_MIN: int = 1
+CHARGE_TARGET_MAX: int = 100
+
+
+def parse_charge_target(raw: Any) -> Optional[int]:
+    """目標充電率として受け付ける値なら int を、未設定（None）なら None を返す。
+
+    それ以外は ValueError を投げる。bool は int の部分型だが、true を 1% と
+    解釈させないために拒否する。コントロールサーバーの入口と、状態ファイルを
+    読む側の両方がこの関数を通す（検査の基準を1か所にするため）。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"目標充電率は整数で指定する: {raw!r}")
+    if not CHARGE_TARGET_MIN <= raw <= CHARGE_TARGET_MAX:
+        raise ValueError(f"目標充電率は {CHARGE_TARGET_MIN}〜{CHARGE_TARGET_MAX} の範囲で指定する: {raw}")
+    return raw
+
+
+def read_charge_target() -> Tuple[Optional[int], bool]:
+    """目標充電率と、ファイル上の値が不正だったかを返す。
+
+    不正な値（手で書き換えた場合など）は未設定として扱う。2つめの戻り値が True のとき、
+    呼び出し側はそのことをログへ残す。ここで握りつぶすと、利用者は目標が効いていない理由を
+    知る手段がない。
+    """
+    raw = _read_all().get("charge_target_soc")
+    try:
+        return parse_charge_target(raw), False
+    except ValueError:
+        return None, True
+
+
+def write_charge_target(value: Optional[int]) -> None:
+    """目標充電率を書く。value は parse_charge_target を通した後の値であること。"""
+    data = _read_all()
+    data["charge_target_soc"] = value
+    data["charge_target_updated_at"] = time.time()
+    _write_all(data)

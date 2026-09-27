@@ -61,7 +61,9 @@
   └────────────────────────┘
 ```
 
-* **`override_state.json`：** `{"manual_override": true/false, "updated_at": ...}` を保持する共有状態ファイル。`override_state.py` が原子的な読み書き（`save_tokens`と同様の tmp→rename 方式）を提供する。
+* **`override_state.json`：** `{"manual_override": true/false, "updated_at": ...}` を保持する共有状態ファイル。`override_state.py` が原子的な読み書き（`save_tokens`と同様の tmp→rename 方式）を提供する。外出先の充電記録（`away_probe`）と目標充電率（`charge_target_soc`、1〜100 の整数または `null`）も同じファイルに置く。
+* **`vehicle_status.json`：** 制御ループが最後に読んだ車両の状態（`battery_level`・`charging_state`・`charge_limit_soc` など）と、車両側の充電上限の元の値を保持する。書き手は `tesla_solar_charger.py` だけで、`control_server.py` は画面表示のために読むだけである。`override_state.json` と分けているのは、上限の元の値を2プロセスの書き込み競合に巻き込まないためである（`docs/05_charge_target_design.md` 第5.2節）。
+* **目標充電率：** 充電率が目標以上になったら充電を止める機能。車両側の充電上限は50%未満に設定できないため、システムが `battery_level` を見て止める。仕様と設計意図は `docs/05_charge_target_design.md` にある。
 * **`manual_override: true` の場合：** `tesla_solar_charger.py` は夜間休止モードおよびNature Remoの瞬時電力に基づく漸進的フィードバック制御（第4章）をすべてスキップし、車両を起動（必要な場合）して `MAX_AMPS` でのフル充電を維持する。
 * **`manual_override: false` の場合：** 通常の太陽光追従ロジックに復帰する。
 * **認証：** `control_server.py` はクエリパラメータ `?token=` またはヘッダー `X-Control-Token` で、`tesla_config.json` の `CONTROL_TOKEN`（ランダムな共有シークレット）との一致を要求する。トークンが一致しない場合はHTTP 403を返し、ページ・APIともに一切の情報を返さない。

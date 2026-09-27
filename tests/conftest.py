@@ -138,7 +138,12 @@ class FakeSession:
             # 起こりうるため、制御ループが周期を守れるかを確かめる必要がある。
             if self.world.get("charge_state_response_missing"):
                 return FakeResponse(200, {})
-            return FakeResponse(200, {"response": {"charge_state": {
+            # 充電中は読むたびに充電率を上げる（目標充電率の到達を再現する）。
+            # 実車の上昇速度ではなく「読むごとに何%上がるか」で指定する。
+            rise = self.world.get("battery_rise_per_read", 0)
+            if rise and self.world["charging_state"] == "Charging":
+                self.world["battery_level"] = self.world.get("battery_level", 60) + rise
+            charge_state = {
                 "charging_state": self.world["charging_state"],
                 "charge_current_request": self.world["amps"],
                 # 急速充電の判定に使うフィールド。既定は自宅のAC充電に相当する値で、
@@ -146,7 +151,13 @@ class FakeSession:
                 "fast_charger_present": self.world.get("fast_charger_present", False),
                 "fast_charger_type": self.world.get("fast_charger_type", "<invalid>"),
                 "charger_power": self.world.get("charger_power", 0),
-            }}})
+                # 目標充電率の判定と、車両側の充電上限の設定に使うフィールド
+                "battery_level": self.world.get("battery_level", 60),
+                "charge_limit_soc": self.world.get("charge_limit_soc", 80),
+            }
+            if not self.world.get("omit_charge_limit_soc_min"):
+                charge_state["charge_limit_soc_min"] = self.world.get("charge_limit_soc_min", 50)
+            return FakeResponse(200, {"response": {"charge_state": charge_state}})
         raise AssertionError(f"想定外のGET: {url}")
 
     def post(self, url, headers=None, json=None, timeout=None):
@@ -166,6 +177,12 @@ class FakeSession:
             self.world["charging_state"] = "Stopped"
         elif command == "set_charging_amps":
             self.world["amps"] = json["charging_amps"]
+        elif command == "set_charge_limit":
+            # 実機は下限未満の値を result: true のまま下限へ切り上げる（2026-09-28 実機確認、
+            # docs/05_charge_target_design.md 第2.1節）。擬似車両も同じ挙動にする。
+            self.world.setdefault("set_charge_limit_sent", []).append(json["percent"])
+            if not self.world.get("set_charge_limit_ignored"):
+                self.world["charge_limit_soc"] = max(json["percent"], self.world.get("charge_limit_soc_min", 50))
         return FakeResponse(200, {"response": {"result": True}})
 
 
@@ -401,6 +418,23 @@ def run_loop(tmp_path):
             override_state["writes"].append(enabled)
 
         module.write_override = _write_override
+
+        # 目標充電率。world 経由にしてあるのは、on_poll から途中で変更できるようにするため。
+        # charge_target_invalid は「ファイル上の値が不正だった」ことを再現する。
+        module.read_charge_target = lambda: (
+            world.get("charge_target_soc"), bool(world.get("charge_target_invalid", False))
+        )
+
+        # vehicle_status.json の差し替え。差し替えないと開発機のリポジトリ直下へ書く。
+        # 保存された内容は world["vehicle_status"] で確かめられる。
+        initial_status = dict(world.get("vehicle_status_initial") or {})
+        world["vehicle_status"] = dict(initial_status)
+        module.load_vehicle_status = lambda: dict(initial_status)
+
+        def _save_vehicle_status(data):
+            world["vehicle_status"] = dict(data)
+
+        module.save_vehicle_status = _save_vehicle_status
 
         # house_power はスカラーのほか、リストでも渡せる。1回の測定ごとに次の値へ進み、
         # 使い切ったら最後の値を返し続ける。起動前後で余剰が変わる状況を再現するために要る。

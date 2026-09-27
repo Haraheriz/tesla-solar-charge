@@ -44,6 +44,11 @@ def server(tmp_path):
     import override_state
     previous_state_path = override_state.OVERRIDE_FILE
     override_state.OVERRIDE_FILE = str(state_file)
+    # vehicle_status.json も同じ理由で差し替える。差し替えないと、開発機にある本物の
+    # 車両の状態を画面APIが返し、手元の状態でテスト結果が変わる。
+    import vehicle_status
+    previous_vehicle_path = vehicle_status.VEHICLE_STATUS_FILE
+    vehicle_status.VEHICLE_STATUS_FILE = str(tmp_path / "vehicle_status.json")
 
     previous_cwd = os.getcwd()
     os.chdir(tmp_path)
@@ -69,6 +74,7 @@ def server(tmp_path):
         httpd.server_close()
         thread.join(timeout=5)
         override_state.OVERRIDE_FILE = previous_state_path
+        vehicle_status.VEHICLE_STATUS_FILE = previous_vehicle_path
 
 
 def _get(url):
@@ -87,11 +93,15 @@ def _post(url, payload):
         return res.status, json.loads(res.read().decode("utf-8"))
 
 
-def test_状態は両方のフラグを返す(server):
+def test_状態は各スイッチと目標充電率と車両の状態を返す(server):
     base, _ = server
     status, body = _get(f"{base}/api/status?token={TOKEN}")
     assert status == 200
-    assert body == {"manual_override": False, "away_probe": False}
+    assert body["manual_override"] is False
+    assert body["away_probe"] is False
+    assert body["charge_target_soc"] is None
+    # 制御ループがまだ車両を読んでいない状態。キーは揃っていて値が None になる。
+    assert body["vehicle"]["battery_level"] is None
 
 
 def test_外出先の充電記録を切替えられる(server):
@@ -109,7 +119,7 @@ def test_片方の切替でもう片方が消えない(server):
     base, state_file = server
     _post(f"{base}/api/override?token={TOKEN}", {"enabled": True})
     _, body = _post(f"{base}/api/away_probe?token={TOKEN}", {"enabled": True})
-    assert body == {"manual_override": True, "away_probe": True}
+    assert (body["manual_override"], body["away_probe"]) == (True, True)
 
     _, body = _post(f"{base}/api/away_probe?token={TOKEN}", {"enabled": False})
     assert body["manual_override"] is True, "記録の切替でフル充電モードが消えた"
@@ -118,7 +128,7 @@ def test_片方の切替でもう片方が消えない(server):
     assert saved["manual_override"] is True
 
 
-@pytest.mark.parametrize("path", ["/api/override", "/api/away_probe"])
+@pytest.mark.parametrize("path", ["/api/override", "/api/away_probe", "/api/charge_target"])
 def test_トークンが違えば書き込ませない(server, path):
     base, state_file = server
     with pytest.raises(urllib.error.HTTPError) as exc:
@@ -232,3 +242,62 @@ def test_許可リストにないアイコンのパスは404を返す(server, pa
     with pytest.raises(urllib.error.HTTPError) as exc:
         _get_bytes(f"{base}{path}")
     assert exc.value.code == 404
+
+
+# ---------------------------------------------------------------------------
+# 目標充電率（docs/05_charge_target_design.md 第5.1節・第8.3節、テスト T16）
+# ---------------------------------------------------------------------------
+
+def test_目標充電率を設定し解除できる(server):
+    base, state_file = server
+    _, body = _post(f"{base}/api/charge_target?token={TOKEN}", {"soc": 25})
+    assert body["charge_target_soc"] == 25
+    saved = json.loads(state_file.read_text(encoding="utf-8"))
+    assert saved["charge_target_soc"] == 25
+    assert saved["charge_target_updated_at"] > 0
+
+    _, body = _post(f"{base}/api/charge_target?token={TOKEN}", {"soc": None})
+    assert body["charge_target_soc"] is None
+
+
+def test_目標充電率の設定でほかのスイッチが消えない(server):
+    base, _ = server
+    _post(f"{base}/api/override?token={TOKEN}", {"enabled": True})
+    _, body = _post(f"{base}/api/charge_target?token={TOKEN}", {"soc": 40})
+    assert body["manual_override"] is True
+
+
+@pytest.mark.parametrize("payload", [
+    {"soc": 0},
+    {"soc": 101},
+    {"soc": 25.5},
+    {"soc": "25"},
+    {"soc": True},
+    {},
+])
+def test_T16_目標充電率として受け付けない値は400を返す(server, payload):
+    base, state_file = server
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(f"{base}/api/charge_target?token={TOKEN}", payload)
+    assert exc.value.code == 400
+    assert not state_file.exists(), "不正な値を保存している"
+
+
+def test_状態APIは制御ループが書いた車両の状態を返す(server, tmp_path):
+    base, _ = server
+    (tmp_path / "vehicle_status.json").write_text(
+        json.dumps({"battery_level": 42, "charge_limit_soc": 50, "charge_limit_restore_soc": 80,
+                    "charge_limit_applied_soc": 50, "observed_at": 1790000000, "unrelated": "x"}),
+        encoding="utf-8",
+    )
+    _, body = _get(f"{base}/api/status?token={TOKEN}")
+    assert body["vehicle"]["battery_level"] == 42
+    assert body["vehicle"]["charge_limit_restore_soc"] == 80
+    assert "unrelated" not in body["vehicle"], "表示に使わない値まで返している"
+
+
+def test_状態ファイルの不正な目標充電率は未設定として返す(server):
+    base, state_file = server
+    state_file.write_text(json.dumps({"charge_target_soc": "abc"}), encoding="utf-8")
+    _, body = _get(f"{base}/api/status?token={TOKEN}")
+    assert body["charge_target_soc"] is None

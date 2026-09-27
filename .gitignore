@@ -3,6 +3,7 @@
 tesla_config.json
 tesla_tokens.json
 override_state.json
+vehicle_status.json
 
 # 2. テスラAPI用の各種暗号鍵・電子証明書ファイル（漏洩厳禁）
 *.pem
