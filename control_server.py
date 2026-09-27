@@ -56,6 +56,18 @@ if not CONTROL_TOKEN:
 
 ICONS_DIR: str = os.path.join(BASE_DIR, "icons")
 
+# トークン無しで配信するアイコンの一覧。パスをそのままファイル名にせず、ここに載せたものだけを返す。
+# purpose "any" と "maskable" を1つの画像で兼ねると、any として表示するときは切り抜き用の余白が
+# 余分になり、maskable として切り抜くときは余白が足りず図柄の端が欠ける。別ファイルにして
+# manifest で使い分ける（tools/gen_icon.py）。
+ICON_FILES: frozenset = frozenset({
+    "icon-192.png",
+    "icon-512.png",
+    "icon-maskable-192.png",
+    "icon-maskable-512.png",
+    "apple-touch-icon-180.png",
+})
+
 PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -64,7 +76,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <title>Tesla充電切替</title>
 <link rel="manifest" href="/manifest.webmanifest?token=__TOKEN__">
 <link rel="icon" href="/icons/icon-192.png">
-<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png">
 <meta name="theme-color" content="#0b0f14">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -266,8 +278,10 @@ MANIFEST_TEMPLATE: str = """{
   "background_color": "#0b0f14",
   "theme_color": "#0b0f14",
   "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
 """
@@ -354,7 +368,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send_bytes(200, SERVICE_WORKER_SCRIPT.encode("utf-8"), "application/javascript; charset=utf-8")
             return
 
-        if parsed.path in ("/icons/icon-192.png", "/icons/icon-512.png"):
+        if parsed.path.startswith("/icons/") and parsed.path[len("/icons/"):] in ICON_FILES:
             # アイコン画像自体は機密情報を含まないため、トークン無しで配信する
             icon_path = os.path.join(ICONS_DIR, os.path.basename(parsed.path))
             try:
