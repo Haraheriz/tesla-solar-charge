@@ -128,7 +128,7 @@ chmod 600 tesla_config.json
 | `NIGHT_STOP_MAX_ATTEMPTS` | | `6` | 夜間の停止確認をあきらめるまでの回数 |
 | `NIGHT_GET_ATTEMPTS` | | `2` | 夜間のGETをその場で再試行する回数 |
 | `CONTROL_PORT` | | `8090` | スマホ操作用サーバーの待受ポート |
-| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。空だとサーバーは起動しない |
+| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。文字列でない値、32文字未満、テンプレート値では起動しない。`openssl rand -hex 32` で生成する |
 
 ### `REMO_SAMPLES` を増やす前に
 
@@ -234,7 +234,22 @@ WantedBy=multi-user.target
 
 ### 3. スマホ操作用コントロールサーバー設定ファイルの配置
 
-`tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定したうえで、以下を配置する。
+`tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定したうえで、以下を配置する。操作サーバーは `0.0.0.0:8090` で待ち受け、宅内LANから直接アクセスできる。Tailscale経由でも利用する場合は、ラズパイとスマートフォンを同じtailnetに参加させ、ラズパイでTailscale ServeのHTTPS転送先を `http://localhost:8090` に設定する。Funnelとルーターの8090番ポート転送は有効にしない。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られる。
+
+`tesla-override.service` の起動または再起動前に、ラズパイ上で次の形式確認を実行する。`CONTROL_TOKEN` がJSON文字列でない、32文字未満、または `YOUR_RANDOM_CONTROL_TOKEN_HERE` の場合、スクリプトはエラーで終了し、`control_server.py` も起動を中止する。この確認はトークンの値を出力しない。
+
+```bash
+cd /home/<username>/tesla-solar-charge
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+token = json.loads(Path("tesla_config.json").read_text(encoding="utf-8")).get("CONTROL_TOKEN")
+if not (isinstance(token, str) and len(token) >= 32 and token != "YOUR_RANDOM_CONTROL_TOKEN_HERE"):
+    raise SystemExit("CONTROL_TOKEN の形式が無効です")
+print("CONTROL_TOKEN の形式を確認しました")
+PY
+```
 
 ```bash
 sudo nano /etc/systemd/system/tesla-override.service
