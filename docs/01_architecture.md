@@ -44,11 +44,12 @@
 
 ### マニュアル・オーバーライド機構（スマホからのフル充電切替）
 
-太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電など）に備え、`control_server.py` が宅内LAN上で軽量HTTPサーバーとして常駐し、スマートフォンのブラウザから「フル充電モード」をワンタップでON/OFFできる。
+太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電など）に備え、`control_server.py` がラズパイの全インターフェースでHTTPサーバーとして常駐する。スマートフォンは宅内LANから直接、またはTailscale ServeのHTTPS経由で「フル充電モード」をON/OFFできる。
 
 ```text
 [スマートフォン (ブラウザ)]
-         │ (HTTPS/HTTP、トークン付きURL)
+         │ (宅内LANのHTTP、またはTailscale ServeのHTTPS)
+         │ (トークン付きURL)
          ▼
   ┌────────────────────────┐
   │   control_server.py     │  ← override_state.json を読み書き
@@ -67,7 +68,10 @@
 * **`manual_override: true` の場合：** `tesla_solar_charger.py` は夜間休止モードおよびNature Remoの瞬時電力に基づく漸進的フィードバック制御（第4章）をすべてスキップし、車両を起動（必要な場合）して `MAX_AMPS` でのフル充電を維持する。
 * **`manual_override: false` の場合：** 通常の太陽光追従ロジックに復帰する。
 * **認証：** `control_server.py` はクエリパラメータ `?token=` またはヘッダー `X-Control-Token` で、`tesla_config.json` の `CONTROL_TOKEN`（ランダムな共有シークレット）との一致を要求する。トークンが一致しない場合はHTTP 403を返し、ページ・APIともに一切の情報を返さない。
-* **UI：** トークン付きURL（例：`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`）にアクセスすると、ON/OFFトグルボタン1つだけのモバイル向けページが表示される。スマホのホーム画面に追加（Webクリップ）しておけば、ネイティブアプリのように1タップで起動できる。
+* **起動条件：** `CONTROL_TOKEN` が文字列でない、32文字未満、または公開テンプレート値 `YOUR_RANDOM_CONTROL_TOKEN_HERE` の場合、`control_server.py` は終了コード1で起動を中止する。文字数の検証だけではトークンの推測困難性は保証されないため、`openssl rand -hex 32` で生成する。
+* **リクエスト制限：** POSTの `Content-Length` が整数でないか負数の場合はHTTP 400、本文が4096バイトを超える場合はHTTP 413を返す。`/api/override` と `/api/away_probe` の `enabled` がJSONの真偽値でない場合はHTTP 400を返す。各接続のソケット読み取りタイムアウトは5秒、同時処理数の上限は16接続であり、空き枠がない場合は新しい接続をHTTP応答なしで閉じる。
+* **レスポンスヘッダー：** 応答に `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff` を設定する。
+* **UI：** トークン付きURL（宅内LANでは`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`、Tailscale経由では`https://<MagicDNSホスト名>/?token=<CONTROL_TOKEN>`）にアクセスすると、ON/OFFトグルボタン1つだけのモバイル向けページが表示される。スマホのホーム画面に追加すれば、アイコンから起動できる。URLはブラウザー履歴とPWAの`start_url`に残るため、第三者へ共有しない。
 
 #### PWA（Progressive Web App）対応
 
@@ -83,11 +87,11 @@
 * **`/sw.js`：** インストール判定（Service Worker登録）のためだけに存在する最小限のService Worker。充電状態は常に最新を取得する必要があるため、実質的なキャッシュ戦略は持たない（オフライン時のフォールバック処理のみ）。機密情報を含まないため、トークン無しで公開配信する。
 * **アイコン画像自体（`/icons/` 以下の上記5ファイル）：** 同様に機密情報を含まないため、トークン無しで公開配信する。配信するのは `control_server.py` の `ICON_FILES` に載せたファイルだけで、それ以外のパスには404を返す。
 
-> **重要な制約（iOS/Android差異）：** iOS Safariの「ホーム画面に追加」は、平文HTTP・Service Worker無しでも `apple-touch-icon` と `apple-mobile-web-app-capable` 等のメタタグだけで機能する。一方、**Android Chromeは「インストール可能」と判定するために安全なコンテキスト（HTTPSまたは`localhost`）を要求する**ため、宅内LANの平文HTTP（`http://<ラズパイのIP>:8090/...`）ではService Workerの登録が静かに失敗し、Android側は正式なPWAインストール（ホーム画面追加は可能でも、スタンドアロン起動やインストールバナーは出ない）にはならない。Androidでも完全なPWA体験が必要な場合は、Tailscale等のVPN経由で到達可能なホスト名にTLS証明書を発行し、HTTPS経由でアクセスする構成を推奨する。
+> **接続条件：** `control_server.py` は `0.0.0.0:8090` で待ち受ける。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られるため、通信を観測できる端末に取得され得る。Tailscale ServeのHTTPS経由では通信が暗号化され、Android ChromeのService Worker登録に必要な安全なコンテキストも満たす。
 
 #### TailscaleによるHTTPS化（Funnelは意図的に不採用）
 
-上記のAndroid制約に対応するため、ラズパイをTailscale（WireGuardベースのメッシュVPN）に参加させ、`tailscale serve --https=443 http://localhost:8090` でコントロールサーバーをHTTPS化している。Tailscale導入済みの場合、`tailscale status --self` から取得できるMagicDNSホスト名（`<ホスト名>.<tailnetドメイン>.ts.net`）でHTTPS証明書が自動発行され、Android Chromeでも正式なPWAインストールが可能になる。
+ラズパイをTailscale（WireGuardベースのメッシュVPN）に参加させ、`tailscale serve --https=443 http://localhost:8090` でコントロールサーバーをHTTPS化する。`tailscale status --self` から取得できるMagicDNSホスト名（`<ホスト名>.<tailnetドメイン>.ts.net`）でアクセスする。
 
 * **Serve（採用）：** tailnet（自分の管理する端末群）内からのみHTTPSアクセス可能。同じtailnetにスマートフォンを参加させればよく、外出先からでも宅外公開なしでアクセスできる。
 * **Funnel（不採用）：** tailnetの外、つまり公開インターネット上の誰でもアクセス可能になる機能。本システムの操作対象は車両の充電（フル充電モードのON/OFF）であり、防御線が`CONTROL_TOKEN`一本のみであることを踏まえ、トークン漏洩・総当たりのリスクが公開のメリットを上回ると判断し、意図的に有効化していない。宅外からの利用は、スマートフォン側にもTailscaleアプリを入れて同じtailnetに参加させることで、Funnelなしで同等のアクセスを実現する。
