@@ -35,7 +35,8 @@ if not os.path.exists(private_key_file):
     public_key = private_key.public_key()
 
     # 秘密鍵の保存（これは絶対に他人に教えてはいけません）
-    with open(private_key_file, "wb") as f:
+    fd = os.open(private_key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
         f.write(private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -49,6 +50,8 @@ if not os.path.exists(private_key_file):
         ))
     print("→ 鍵ペアの生成が完了しました。")
 else:
+    if os.name == "posix" and os.stat(private_key_file).st_mode & 0o077:
+        raise PermissionError(f"{private_key_file} の権限を 0600 に変更してから実行してください")
     print("→ 既存の鍵ペアが見つかりました。これを使用します。")
 
 # 生成した公開鍵のテキストを読み込む
