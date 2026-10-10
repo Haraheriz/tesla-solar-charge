@@ -12,6 +12,7 @@ import importlib.util
 import itertools
 import json
 import os
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -21,7 +22,7 @@ import pytest
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 
-TOKEN = "test-control-token"
+TOKEN = "0123456789abcdef" * 4
 
 _module_counter = itertools.count()
 
@@ -64,8 +65,12 @@ def server(tmp_path):
 
     # ポート0でバインドし、OSが割り当てた番号を使う。固定ポートだと開発機で
     # 本物のコントロールサーバーが動いている場合に衝突する。
-    httpd = module.HTTPServer(("127.0.0.1", 0), module.ControlHandler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    httpd = module.ControlServer(("127.0.0.1", 0), module.ControlHandler)
+    # 既定の確認間隔0.5秒では、各テストのshutdown()が最大0.5秒待つ。
+    # テスト用サーバーだけ0.01秒にし、リクエスト処理は実装どおりに保つ。
+    thread = threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True,
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{httpd.server_address[1]}", state_file
@@ -159,9 +164,46 @@ def test_不正なバイト列をPOSTしても400を返す(server):
     assert json.loads(exc.value.read().decode("utf-8")) == {"error": "invalid json"}
 
 
+@pytest.mark.parametrize("payload", [[], {"enabled": "false"}, {"enabled": 1}, {}])
+def test_切替APIは真偽値以外を保存しない(server, payload):
+    base, state_file = server
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(f"{base}/api/override?token={TOKEN}", payload)
+    assert exc.value.code == 400
+    assert not state_file.exists()
+
+
+def test_本文が4096バイトを超えたら413を返す(server):
+    base, state_file = server
+    request = urllib.request.Request(
+        f"{base}/api/override?token={TOKEN}", data=b"x" * 4097, method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+    assert exc.value.code == 413
+    assert not state_file.exists()
+
+
+def test_ヘッダーを途中まで送った接続が他の要求を止めない(server):
+    base, _ = server
+    with socket.create_connection(("127.0.0.1", int(base.rsplit(":", 1)[1])), timeout=5) as slow:
+        slow.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+        status, _ = _get(f"{base}/api/status?token={TOKEN}")
+        assert status == 200
+        slow.sendall(b"\r\n")
+        assert b"403" in slow.recv(1024)
+
+
+def test_画面はトークンをキャッシュと参照元へ渡さない(server):
+    base, _ = server
+    with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:
+        assert res.headers["Cache-Control"] == "no-store"
+        assert res.headers["Referrer-Policy"] == "no-referrer"
+
+
 def test_BOM付き設定ファイルでも起動できる(tmp_path):
     config_file = tmp_path / "config_bom.json"
-    content = b"\xef\xbb\xbf" + json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": "bom-token"}).encode("utf-8")
+    content = b"\xef\xbb\xbf" + json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN}).encode("utf-8")
     config_file.write_bytes(content)
     previous_config = os.environ.get("TESLA_CONFIG_PATH")
     os.environ["TESLA_CONFIG_PATH"] = str(config_file)
@@ -174,7 +216,32 @@ def test_BOM付き設定ファイルでも起動できる(tmp_path):
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        assert module.CONTROL_TOKEN == "bom-token"
+        assert module.CONTROL_TOKEN == TOKEN
+    finally:
+        os.chdir(previous_cwd)
+        if previous_config is not None:
+            os.environ["TESLA_CONFIG_PATH"] = previous_config
+        else:
+            os.environ.pop("TESLA_CONFIG_PATH", None)
+
+
+@pytest.mark.parametrize("token", ["YOUR_RANDOM_CONTROL_TOKEN_HERE", "short", 123])
+def test_不正なトークンでは起動しない(tmp_path, token):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps({"CONTROL_TOKEN": token}), encoding="utf-8",
+    )
+    previous_config = os.environ.get("TESLA_CONFIG_PATH")
+    os.environ["TESLA_CONFIG_PATH"] = str(config_file)
+    previous_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        name = f"control_server_placeholder_test_{next(_module_counter)}"
+        spec = importlib.util.spec_from_file_location(name, os.path.join(PROJECT_ROOT, "control_server.py"))
+        module = importlib.util.module_from_spec(spec)
+        with pytest.raises(SystemExit) as exc:
+            spec.loader.exec_module(module)
+        assert exc.value.code == 1
     finally:
         os.chdir(previous_cwd)
         if previous_config is not None:

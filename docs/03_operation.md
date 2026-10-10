@@ -239,16 +239,21 @@ systemctl is-enabled tesla-observer.service     # disabled であること
 
 ## 3. スマホからの「フル充電モード」切替（マニュアル・オーバーライド）
 
-太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電、出発前の追加充電など）に使う機能。`tesla-override.service` が宅内LAN上で軽量Webサーバーとして常駐しており、スマートフォンのブラウザからトークン付きURLにアクセスするだけでON/OFFを切替えられる。
+太陽光の発電状況に関わらず充電したい場合（来客時の急ぎ充電、出発前の追加充電など）に使う機能。`tesla-override.service` は `0.0.0.0:8090` で待ち受ける。スマートフォンは宅内LANから直接、または同じtailnetに参加してTailscale ServeのHTTPS経由でアクセスする。
 
 ### 使い方
 
 1. **初回のみ：URLをブックマーク／ホーム画面に追加**
-ラズパイのIPアドレスと、`tesla_config.json` に設定した `CONTROL_TOKEN` を使って以下の形式のURLを開く。
+宅内LANから直接アクセスする場合は、ラズパイのIPアドレスと、`tesla_config.json` に設定した `CONTROL_TOKEN` を使って以下の形式のURLを開く。
 
 ```text
 http://<ラズパイのIPアドレス>:8090/?token=<CONTROL_TOKEN>
+```
 
+Tailscale ServeのHTTPS経由でアクセスする場合は、同じtailnetに参加したスマートフォンから以下の形式のURLを開く。
+
+```text
+https://<MagicDNSホスト名>/?token=<CONTROL_TOKEN>
 ```
 
 トークン入りURLを毎回手で組み立てる代わりに、同梱の `show_control_url.sh` を使うと、URLと端末上のQRコードを一度に表示できる。
@@ -258,11 +263,11 @@ ssh <ホスト名> "./tesla-solar-charge/show_control_url.sh"
 
 ```
 
-`tesla_config.json` の `CONTROL_TOKEN` と、Tailscaleの自ホストMagicDNS名（`tailscale status --self` から取得）からURLを組み立て、`qrencode`（事前に `sudo apt-get install qrencode` が必要）でQRコードを端末に描画する。Tailscale未導入の環境では動作しないため、その場合は上記のIPアドレス形式のURLを直接使うこと。スマホでQRコードを読み取れば、トークンを手で入力せずそのままアクセスできる。
+`tesla_config.json` の `CONTROL_TOKEN` と、Tailscaleの自ホストMagicDNS名（`tailscale status --self` から取得）からHTTPSのURLを組み立て、`qrencode`（事前に `sudo apt-get install qrencode` が必要）でQRコードを端末に描画する。スマホでQRコードを読み取れば、トークンを手で入力せずそのままアクセスできる。Tailscale Serveを設定していない場合は、上記の宅内LAN用URLを直接使う。
 
 URLが分かれば、iPhoneのSafariなら共有メニューから「ホーム画面に追加」、AndroidのChromeなら「ホーム画面に追加」を選ぶと、アイコンタップだけでアプリのように開けるようになる（PWA対応により、専用アイコン付きでスタンドアロン表示される）。
 
-> **iOS/Android差異の注意：** iOS Safariは平文HTTPでも「ホーム画面に追加」が機能する。一方、AndroidのChromeは正式なPWAインストール（Service Worker登録・スタンドアロン起動）にHTTPSまたは`localhost`を要求するため、宅内LANの平文HTTP（`http://<ラズパイのIP>:8090/...`）ではホーム画面への追加自体は可能でも、完全なPWA体験にはならない場合がある。Androidでも完全なPWA体験が必要な場合は、Tailscale等のVPN経由でTLS証明書付きのホスト名からアクセスする構成を推奨する。
+> **iOS/Android差異：** 宅内LANの平文HTTPでは、Android ChromeのService Worker登録に必要な安全なコンテキストにならない。iOS Safariの「ホーム画面に追加」は利用できる。Tailscale ServeのHTTPS経由なら、両方の端末でHTTPS接続を利用できる。
 
 2. **トグルボタンをタップ：**
 画面中央の丸いボタンをタップすると「フル充電モード：ON」に切替わり、太陽光の余剰計算を無視して `MAX_AMPS` でのフル充電が始まる（車両が就寝中の場合は自動で起動する）。もう一度タップすると通常の太陽光追従モードに復帰する。
@@ -272,8 +277,10 @@ URLが分かれば、iPhoneのSafariなら共有メニューから「ホーム�
 
 ### 注意点
 
-* 宅外からアクセスする場合は、ルーターのポート開放ではなく **Tailscale等のVPN経由でのアクセスを推奨する**（`CONTROL_TOKEN` をURLに含めて宅外公開すると、漏洩時に第三者から充電を操作されるリスクがあるため）。
+* 宅内LANの直接接続では操作トークンを平文HTTPのURLで送る。通信を観測できる端末にトークンを取得され得るため、利用するネットワークの端末と無線LANの設定を確認する。
+* 宅外からはTailscale ServeのHTTPS経由でアクセスする。ルーターで8090番ポートを開放しない。
 * `CONTROL_TOKEN` は `openssl rand -hex 32` 等で生成した推測不可能な値を `tesla_config.json` に設定すること。
+* トークン付きURLはブラウザーの履歴やホーム画面の設定に残る。画面共有やURLの転送で第三者へ開示しない。
 
 ### 就寝中の車を起こす判断（`WAKE_DEBOUNCE_CYCLES`）
 
@@ -361,13 +368,13 @@ openssl rand -hex 32
 ```
 
 2. **ラズパイ側の設定を更新：**
-`/home/<username>/tesla-solar-charge/tesla_config.json` の `CONTROL_TOKEN` を新しい値に書き換える。古いトークンを使ったリクエストはこの時点から即座に `403 Forbidden` になる。
+`/home/<username>/tesla-solar-charge/tesla_config.json` の `CONTROL_TOKEN` を新しい値に書き換える。新しい値はJSON文字列で32文字以上とし、`YOUR_RANDOM_CONTROL_TOKEN_HERE` を使わない。`docs/02_deploy.md` 第6章③の形式確認を実行する。この時点では稼働中のプロセスは旧トークンを受け付ける。
 
 3. **コントロールサーバーを再起動：**
 ```bash
 sudo systemctl restart tesla-override.service
 ```
-（`control_server.py` はプロセス起動時に `tesla_config.json` を読み込む実装のため、ファイル更新だけでは反映されない。）
+（`control_server.py` はプロセス起動時に `tesla_config.json` を読む。再起動後、旧トークンを使ったリクエストは `403 Forbidden` になる。）
 
 4. **スマホ側の再設定：**
 古いトークン入りのブックマーク・ホーム画面アイコンは無効になるため削除し、`show_control_url.sh` で新しいURL・QRコードを表示してホーム画面に追加し直す。

@@ -1,4 +1,6 @@
 import datetime
+import os
+import tempfile
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
@@ -8,12 +10,18 @@ from cryptography.hazmat.primitives import serialization
 def main():
     print("プロキシ用の証明書を生成中...")
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    with open("key.pem", "wb") as f:
-        f.write(key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
+    fd, tmp_file = tempfile.mkstemp(prefix=".key-", dir=".")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()
+            ))
+        os.replace(tmp_file, "key.pem")
+    finally:
+        if os.path.exists(tmp_file):
+            os.unlink(tmp_file)
 
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"localhost")])
     cert = x509.CertificateBuilder().subject_name(

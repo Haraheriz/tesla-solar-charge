@@ -4,8 +4,9 @@ import json
 import html
 import hmac
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Any, Dict
 
@@ -57,11 +58,17 @@ settings = Settings(config, logger.warning)
 # 0 は「OSに空きポートを割り当てさせる」を意味してしまい、
 # スマホのホーム画面から開けなくなる。下限を1にする。
 CONTROL_PORT: int = settings.integer("CONTROL_PORT", 8090, minimum=1)
-CONTROL_TOKEN: str = str(config.get("CONTROL_TOKEN", ""))
+control_token_value: Any = config.get("CONTROL_TOKEN")
 
-if not CONTROL_TOKEN:
-    logger.critical("CONTROL_TOKEN が tesla_config.json に設定されていません。第三者による無断操作を防ぐため起動を中止します。")
+if (not isinstance(control_token_value, str) or len(control_token_value) < 32
+        or control_token_value == "YOUR_RANDOM_CONTROL_TOKEN_HERE"):
+    logger.critical("CONTROL_TOKEN が文字列でない、32文字未満、またはテンプレート値です。起動を中止します。")
     sys.exit(1)
+CONTROL_TOKEN: str = control_token_value
+
+MAX_POST_BYTES: int = 4096
+CLIENT_TIMEOUT_SEC: int = 5
+MAX_CLIENTS: int = 16
 
 ICONS_DIR: str = os.path.join(BASE_DIR, "icons")
 
@@ -465,6 +472,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -472,8 +480,14 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_security_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -534,7 +548,17 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "invalid token"})
             return
 
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"error": "invalid content length"})
+            return
+        if length < 0:
+            self._send_json(400, {"error": "invalid content length"})
+            return
+        if length > MAX_POST_BYTES:
+            self._send_json(413, {"error": "request body too large"})
+            return
         raw_body = self.rfile.read(length) if length else b""
         try:
             payload: Dict[str, Any] = json.loads(raw_body.decode("utf-8")) if raw_body else {}
@@ -558,7 +582,10 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._send_json(200, status_payload())
             return
 
-        enabled = bool(payload.get("enabled"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+            self._send_json(400, {"error": "enabled must be a boolean"})
+            return
+        enabled = payload["enabled"]
 
         if parsed.path == "/api/override":
             write_override(enabled)
@@ -575,8 +602,39 @@ class ControlHandler(BaseHTTPRequestHandler):
         logger.debug(format % args)
 
 
+class ControlServer(ThreadingHTTPServer):
+    """同時接続を16件に制限し、各接続の読み取りを5秒で打ち切る。"""
+
+    request_queue_size = MAX_CLIENTS
+
+    def __init__(self, server_address: tuple, handler_class: type) -> None:
+        self._slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        super().__init__(server_address, handler_class)
+
+    def get_request(self) -> tuple:
+        request, client_address = super().get_request()
+        request.settimeout(CLIENT_TIMEOUT_SEC)
+        return request, client_address
+
+    def process_request(self, request: Any, client_address: tuple) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: tuple) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def main() -> None:
-    server = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
+    server = ControlServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
     logger.info("=========================================================================")
     logger.info(f"スマホ操作用コントロールサーバーをポート {CONTROL_PORT} で起動しました。")
     logger.info("=========================================================================")
