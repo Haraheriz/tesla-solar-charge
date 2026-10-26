@@ -368,7 +368,7 @@ openssl rand -hex 32
 ```
 
 2. **ラズパイ側の設定を更新：**
-`/home/<username>/tesla-solar-charge/tesla_config.json` の `CONTROL_TOKEN` を新しい値に書き換える。新しい値はJSON文字列で32文字以上とし、`YOUR_RANDOM_CONTROL_TOKEN_HERE` を使わない。`docs/02_deploy.md` 第6章③の形式確認を実行する。この時点では稼働中のプロセスは旧トークンを受け付ける。
+`/home/<username>/tesla-solar-charge/tesla_config.json` の `CONTROL_TOKEN` を新しい値に書き換える。新しい値はJSON文字列で32文字以上、表示可能なASCII文字（0x21〜0x7E）のみとし、`YOUR_RANDOM_CONTROL_TOKEN_HERE` を使わない。`docs/02_deploy.md` 第6章③の形式確認を実行する。この時点では稼働中のプロセスは旧トークンを受け付ける。
 
 3. **コントロールサーバーを再起動：**
 ```bash

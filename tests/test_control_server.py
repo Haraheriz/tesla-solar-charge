@@ -350,7 +350,13 @@ def test_BOM付き設定ファイルでも起動できる(tmp_path):
             os.environ.pop("TESLA_CONFIG_PATH", None)
 
 
-@pytest.mark.parametrize("token", ["YOUR_RANDOM_CONTROL_TOKEN_HERE", "short", 123])
+@pytest.mark.parametrize("token", [
+    "YOUR_RANDOM_CONTROL_TOKEN_HERE",
+    "short",
+    123,
+    "トークン" * 8,                       # 非ASCII：fetch() がヘッダー値として送れない
+    "0123456789abcdef 0123456789abcdef",  # 空白：ヘッダー値の先頭と末尾で削られる
+])
 def test_不正なトークンでは起動しない(tmp_path, token):
     config_file = tmp_path / "config.json"
     config_file.write_text(

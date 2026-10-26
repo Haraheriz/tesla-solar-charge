@@ -61,9 +61,26 @@ settings = Settings(config, logger.warning)
 CONTROL_PORT: int = settings.integer("CONTROL_PORT", 8090, minimum=1)
 control_token_value: Any = config.get("CONTROL_TOKEN")
 
+
+def is_token_charset_valid(token: str) -> bool:
+    """トークンが表示可能なASCII文字（0x21〜0x7E、空白を含まない）だけから成るかを返す。
+
+    画面の JavaScript はトークンを X-Control-Token ヘッダーで送る。HTTP のヘッダー値に
+    使える文字は RFC 9110 §5.5 で表示可能なASCII文字に限られ、ブラウザーの fetch() は
+    それ以外の文字を含むヘッダー値を送らずに失敗する。クエリパラメータなら送れる値でも
+    ヘッダーで送れなければ画面が動かないため、起動時に揃えて拒否する。
+    `openssl rand -hex 32` が生成する値はこの条件を満たす。
+    """
+    return bool(token) and all(0x21 <= ord(c) <= 0x7E for c in token)
+
+
 if (not isinstance(control_token_value, str) or len(control_token_value) < 32
-        or control_token_value == "YOUR_RANDOM_CONTROL_TOKEN_HERE"):
-    logger.critical("CONTROL_TOKEN が文字列でない、32文字未満、またはテンプレート値です。起動を中止します。")
+        or control_token_value == "YOUR_RANDOM_CONTROL_TOKEN_HERE"
+        or not is_token_charset_valid(control_token_value)):
+    logger.critical(
+        "CONTROL_TOKEN が文字列でない、32文字未満、テンプレート値、"
+        "または表示可能なASCII文字以外を含んでいます。起動を中止します。"
+    )
     sys.exit(1)
 CONTROL_TOKEN: str = control_token_value
 
