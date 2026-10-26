@@ -18,16 +18,16 @@
 
 ## 設定
 
-`tesla_config.json` に設定を書く。このファイルは認証情報を含むため `.gitignore` 対象であり、リポジトリを取得しただけでは存在しない。**`tesla_config.json.template` をコピーして作成する。**
+`tesla_config.json` に設定を書く。このファイルは認証情報を含むため `.gitignore` 対象であり、リポジトリを取得しただけでは存在しない。`tesla_config.json.template` をコピーして作成する。
 
 ```bash
 cp tesla_config.json.template tesla_config.json
 chmod 600 tesla_config.json
 ```
 
-**キーの一覧と既定値は [デプロイ手順書の「`tesla_config.json` の設定」](./docs/02_deploy.md) にある**。必須のキーはTesla・Nature Remoの認証情報のほか、次の1つがある。
+キーの一覧と既定値は [デプロイ手順書の「`tesla_config.json` の設定」](./docs/02_deploy.md) にある。必須のキーはTesla・Nature Remoの認証情報のほか、次の1つがある。
 
-* **`WALL_CONNECTOR_HOST`** — 自宅のTesla Wall Connector（Gen 3）のIPアドレス。**未設定だとシステムは充電している場所を区別せず、スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる**。車両側のAPIには接続先の充電器を識別する情報が存在しないため、宅内LANのウォールコネクターを読むことでのみ「自宅で充電しているか」を判定できる。Gen 2 やWi-Fi未接続の個体では利用できないため、その場合は空のままにする（従来どおりの動作になる）
+* `WALL_CONNECTOR_HOST` — 自宅のTesla Wall Connector（Gen 3）のIPアドレス。未設定だとシステムは充電している場所を区別せず、スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる。車両側のAPIには接続先の充電器を識別する情報が存在しないため、宅内LANのウォールコネクターを読むことでのみ「自宅で充電しているか」を判定できる。Gen 2 やWi-Fi未接続の個体では利用できないため、その場合は空のままにする（従来どおりの動作になる）
 
 未設定のまま起動した場合は、起動時に `ATTENTION` ログで通知される。
 
@@ -40,7 +40,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-`main()` の常駐ループを**仮想時間**で駆動し、Tesla API・Nature Remo API・オーバーライド状態を差し替えて動かす（実APIには一切接続しない。`tests/fixtures/ci_config.json` はダミー値）。数時間ぶんのサイクルが一瞬で回るため、「満充電の車に4時間コマンドを送り続ける」「夜通し充電が止まらない」といった**時間に依存する不具合**を検証できる。
+`main()` の常駐ループを仮想時間で駆動し、Tesla API・Nature Remo API・オーバーライド状態を差し替えて動かす（実APIには一切接続しない。`tests/fixtures/ci_config.json` はダミー値）。数時間ぶんのサイクルが一瞬で回るため、「満充電の車に4時間コマンドを送り続ける」「夜通し充電が止まらない」といった時間に依存する不具合を検証できる。
 
 テストの多くは 2026-07-15 に実際に起きた障害（フル充電モードが17時間41分継続し、ユーザーの停止操作が3分後に上書きされた事象）に対応する回帰テストである。
 
