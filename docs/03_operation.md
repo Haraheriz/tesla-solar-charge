@@ -14,7 +14,7 @@ sudo systemctl status tesla-proxy.service tesla-charger.service
 ```
 
 * 正常時の状態：両方のサービスに緑色の文字で **`active (running)`** と表示されていること。
-* 異常時の状態：赤文字で `failed` または `activating (auto-restart)` となっている場合は、何らかのエラーで起動直後に停止し、再起動を繰り返している（「3. トラブルシューティング」を参照）。
+* 異常時の状態：赤文字で `failed` または `activating (auto-restart)` となっている場合は、何らかのエラーで起動直後に停止し、再起動を繰り返している（「5. 緊急時のトラブルシューティング」を参照）。
 
 ### 2. 充電制御スクリプトのリアルタイムログ確認
 
