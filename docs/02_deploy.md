@@ -2,7 +2,7 @@
 
 ## 1. 前提条件とディレクトリ構造
 
-ハードウェア障害（SDカードの突然の故障など）やOSアップデートに伴い、システムをゼロから再構築する際の手順である。本手順は、ターゲット環境が **Linux（Raspberry Pi OS 64bit等）** であり、一般的な非特権ユーザー権限で実行されることを想定している。
+ハードウェア障害（SDカードの突然の故障など）やOSアップデートに伴い、システムをゼロから再構築する際の手順である。本手順は、ターゲット環境が Linux（Raspberry Pi OS 64bit等）であり、一般的な非特権ユーザー権限で実行されることを想定している。
 
 ```Markdown
 ### 最終的な配置ディレクトリ構造（Linux側）
@@ -23,9 +23,10 @@
 ├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-*.png, icon-maskable-*.png, apple-touch-icon-180.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
+```
 
 > **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**
-> Windows側の開発・検証スクリプト（`poc/complete_tesla_activation.py`等）は、テスラ車両コマンド用の鍵ペアを **`private-key.pem` / `public-key.pem`** という名前で生成する。一方、ラズパイ側の `systemd` サービス定義（`tesla-proxy.service`）は **`tesla_app_key.pem`** という名前を前提にしている。
+> Windows側の開発・検証スクリプト（`poc/complete_tesla_activation.py`等）は、テスラ車両コマンド用の鍵ペアを `private-key.pem` / `public-key.pem` という名前で生成する。一方、ラズパイ側の `systemd` サービス定義（`tesla-proxy.service`）は `tesla_app_key.pem` という名前を前提にしている。
 > 転送時は鍵の中身（バイト列）は同一のまま、**ファイル名だけ `tesla_app_key.pem` にリネームしてから配置すること**。リネームせずに別名のまま使う場合は、`/etc/systemd/system/tesla-proxy.service` 内の `-key-file` のパスも合わせて書き換える必要がある。
 
 ---
@@ -58,8 +59,9 @@ Linuxのコンソールで対象ディレクトリに移動し、以下の2行�
 # 1. ディレクトリ内に「venv」という名前の独立した仮想環境を生成
 python3 -m venv /home/<username>/tesla-solar-charge/venv
 
-# 2. 仮想環境専用の pip を使用して、依存ライブラリ（requests）をピンポイントで導入
-/home/<username>/tesla-solar-charge/venv/bin/pip install requests
+# 2. 仮想環境専用の pip を使用して、依存ライブラリ（requests）を導入する。
+#    版は requirements-dev.txt に固定してある値と同じにする（CIがテストした版を本番へ入れる）
+/home/<username>/tesla-solar-charge/venv/bin/pip install "$(grep '^requests==' /home/<username>/tesla-solar-charge/requirements-dev.txt)"
 
 ```
 
@@ -89,11 +91,17 @@ chmod 700 /home/<username>/tesla-solar-charge/venv/bin/*
 
 ```
 
+`tesla_solar_charger.py` と `control_server.py` は起動時に `tesla_config.json`（充電制御側は `tesla_tokens.json` も）の権限を確かめ、所有者以外に読み書き実行のいずれかを許すビットが立っていれば次の行を出す。起動は止めない。この行が出たら上記の `chmod 600` を実行する。
+
+```text
+[ATTENTION] /home/<username>/tesla-solar-charge/tesla_config.json の権限が -rw-r--r-- で、所有者以外からアクセスできます。chmod 600 /home/<username>/tesla-solar-charge/tesla_config.json を実行してください（docs/02_deploy.md 第4章）。
+```
+
 ---
 
 ## 5. 【Step 4】`tesla_config.json` の設定
 
-`tesla_config.json` は `.gitignore` 対象のため、リポジトリを取得しただけでは存在しない。**`tesla_config.json.template` をコピーして作成する。**
+`tesla_config.json` は `.gitignore` 対象のため、リポジトリを取得しただけでは存在しない。`tesla_config.json.template` をコピーして作成する。
 
 ```bash
 cp tesla_config.json.template tesla_config.json
@@ -109,11 +117,11 @@ chmod 600 tesla_config.json
 | `CLIENT_ID` / `CLIENT_SECRET` | ○ | `""` | Tesla開発者ポータルで発行したアプリケーションの資格情報 |
 | `DOMAIN` | ○ | `localhost:8000` | OAuthのリダイレクト先ドメイン |
 | `REMO_ACCESS_TOKEN` | ○ | `""` | Nature Remo のアクセストークン（余剰電力の測定に使う） |
-| **`WALL_CONNECTOR_HOST`** | **○** | `""` | **自宅ウォールコネクター（Gen 3）のIPアドレス。未設定だと外出先の充電も制御対象になる**（下記） |
+| `WALL_CONNECTOR_HOST` | ○ | `""` | 自宅ウォールコネクター（Gen 3）のIPアドレス。未設定だと外出先の充電も制御対象になる（下記） |
 | `WALL_CONNECTOR_SERIAL` | | `""` | 任意。設定するとIPアドレスが別の機器に変わった場合を起動時に検知できる |
 | `WALL_CONNECTOR_TIMEOUT_SEC` | | `5` | ウォールコネクターへのHTTPタイムアウト秒 |
 | `WALL_CONNECTOR_ATTEMPTS` | | `2` | 読み取り失敗時に、その場で取り直す回数（1回目を含む） |
-| `DISCONNECTED_PROBE_INTERVAL_SEC` | | `600` | **外出先の充電記録がONのとき**、ケーブル未接続の車両データを読み直す間隔（秒）。ON/OFFはスマホアプリで切替える |
+| `DISCONNECTED_PROBE_INTERVAL_SEC` | | `600` | 外出先の充電記録がONのとき、ケーブル未接続の車両データを読み直す間隔（秒）。ON/OFFはスマホアプリで切替える |
 | `FAST_CHARGER_POWER_KW` | | `15` | 外出先判定のフォールバック閾値 |
 | `MIN_AMPS` | | `4` | 充電を維持する下限電流。これを下回ると停止する |
 | `MAX_AMPS` | | `48` | 上限電流。**充電設備とブレーカーの容量に合わせること** |
@@ -128,22 +136,22 @@ chmod 600 tesla_config.json
 | `NIGHT_STOP_MAX_ATTEMPTS` | | `6` | 夜間の停止確認をあきらめるまでの回数 |
 | `NIGHT_GET_ATTEMPTS` | | `2` | 夜間のGETをその場で再試行する回数 |
 | `CONTROL_PORT` | | `8090` | スマホ操作用サーバーの待受ポート |
-| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。文字列でない値、32文字未満、テンプレート値では起動しない。`openssl rand -hex 32` で生成する |
+| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。文字列でない値、32文字未満、テンプレート値、表示可能なASCII文字（0x21〜0x7E）以外を含む値では起動しない。`openssl rand -hex 32` で生成する |
 
 ### `REMO_SAMPLES` を増やす前に
 
-**平滑化のつもりで増やしても効果がない。**スマートメーターの更新間隔は中央値61秒（2026-08-09〜18 の12,055回の観測で95%が60秒）であり、10秒間隔で複数回読んでも同じ値が返る。3回×10秒だった頃は、同じ値を3回平均したうえで1サイクルにつき20秒とAPI 2回分を費やしていた。
+平滑化のつもりで増やしても効果がない。スマートメーターの更新間隔は中央値61秒（2026-08-09〜18 の12,055回の観測で95%が60秒）であり、10秒間隔で複数回読んでも同じ値が返る。3回×10秒だった頃は、同じ値を3回平均したうえで1サイクルにつき20秒とAPI 2回分を費やしていた。
 
 複数の更新をまたぐには120〜180秒の窓が要るが、制御サイクル自体が180秒であるため、サイクル内では実現できない。平滑化が必要なら、サイクルをまたいで直近N回の値を使う別の設計を検討すること。
 
 ### 自宅ウォールコネクターの設定
 
-**`WALL_CONNECTOR_HOST` を設定しないと、システムは充電している場所を区別しない。**スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる（`docs/03_operation.md` の「外出先での充電を制御しない」を参照）。
+`WALL_CONNECTOR_HOST` を設定しないと、システムは充電している場所を区別しない。スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる（`docs/03_operation.md` の「外出先での充電を制御しない」を参照）。
 
-対象は **Gen 3（Wi-Fi対応）に限る。**Gen 2 や、Wi-Fiを宅内LANに接続していない個体では応答しないため、この機能は利用できない。その場合は空のままにする（全経路が従来どおり動作する）。
+対象は Gen 3（Wi-Fi対応）に限る。Gen 2 や、Wi-Fiを宅内LANに接続していない個体では応答しないため、この機能は利用できない。その場合は空のままにする（全経路が従来どおり動作する）。
 
-1. **IPアドレスを確認する。**Teslaアプリの充電器設定画面、またはルーターのDHCPクライアント一覧で調べる
-2. **ルーター側でDHCP予約を設定する。**アドレスが変わると判定不能に落ちるため、必ず固定する
+1. IPアドレスを確認する。Teslaアプリの充電器設定画面、またはルーターのDHCPクライアント一覧で調べる
+2. ルーター側でDHCP予約を設定する。アドレスが変わると判定不能に落ちるため、必ず固定する
 3. **ラズパイから到達できることを確認する。**
 
 ```bash
@@ -151,7 +159,7 @@ curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/version
 curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
 ```
 
-4. **`tesla_config.json` に設定する。**`WALL_CONNECTOR_SERIAL` には `/api/1/version` の `serial_number` を転記する
+4. `tesla_config.json` に設定する。`WALL_CONNECTOR_SERIAL` には `/api/1/version` の `serial_number` を転記する
 
 ```json
 "WALL_CONNECTOR_HOST": "<ウォールコネクターのIP>",
@@ -174,7 +182,7 @@ curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
 
 ## 6. 【Step 5】systemd へのサービス登録と自動常駐化
 
-OS起動時に「プロキシ → 充電制御スクリプト」の順で安全にバックグラウンド連動起動させるため、システムマネージャへ登録を行う。
+OS起動時に「プロキシ → 充電制御スクリプト」の順で安全にバックグラウンド連動起動させるため、システムマネージャへ登録する。
 
 ### 1. プロキシ用設定ファイルの配置
 
@@ -183,7 +191,7 @@ sudo nano /etc/systemd/system/tesla-proxy.service
 
 ```
 
-（以下をコピペして保存、`<username>` は実際の実行ユーザー名に置換すること）
+以下をコピペして保存し、`<username>` は実際の実行ユーザー名に置換すること。
 
 ```ini
 [Unit]
@@ -210,7 +218,7 @@ sudo nano /etc/systemd/system/tesla-charger.service
 
 ```
 
-（以下をコピペして保存、`<username>` は実際の実行ユーザー名に置換すること）
+以下をコピペして保存し、`<username>` は実際の実行ユーザー名に置換すること。
 
 ```ini
 [Unit]
@@ -236,7 +244,7 @@ WantedBy=multi-user.target
 
 `tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定したうえで、以下を配置する。操作サーバーは `0.0.0.0:8090` で待ち受け、宅内LANから直接アクセスできる。Tailscale経由でも利用する場合は、ラズパイとスマートフォンを同じtailnetに参加させ、ラズパイでTailscale ServeのHTTPS転送先を `http://localhost:8090` に設定する。Funnelとルーターの8090番ポート転送は有効にしない。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られる。
 
-`tesla-override.service` の起動または再起動前に、ラズパイ上で次の形式確認を実行する。`CONTROL_TOKEN` がJSON文字列でない、32文字未満、または `YOUR_RANDOM_CONTROL_TOKEN_HERE` の場合、スクリプトはエラーで終了し、`control_server.py` も起動を中止する。この確認はトークンの値を出力しない。
+`tesla-override.service` の起動または再起動前に、ラズパイ上で次の形式確認を実行する。`CONTROL_TOKEN` がJSON文字列でない、32文字未満、`YOUR_RANDOM_CONTROL_TOKEN_HERE`、または表示可能なASCII文字（0x21〜0x7E）以外を含む場合、スクリプトはエラーで終了し、`control_server.py` も起動を中止する。この確認はトークンの値を出力しない。
 
 ```bash
 cd /home/<username>/tesla-solar-charge
@@ -245,7 +253,8 @@ import json
 from pathlib import Path
 
 token = json.loads(Path("tesla_config.json").read_text(encoding="utf-8")).get("CONTROL_TOKEN")
-if not (isinstance(token, str) and len(token) >= 32 and token != "YOUR_RANDOM_CONTROL_TOKEN_HERE"):
+if not (isinstance(token, str) and len(token) >= 32 and token != "YOUR_RANDOM_CONTROL_TOKEN_HERE"
+        and all(0x21 <= ord(c) <= 0x7E for c in token)):
     raise SystemExit("CONTROL_TOKEN の形式が無効です")
 print("CONTROL_TOKEN の形式を確認しました")
 PY
@@ -256,7 +265,7 @@ sudo nano /etc/systemd/system/tesla-override.service
 
 ```
 
-（以下をコピペして保存、`<username>` は実際の実行ユーザー名に置換すること）
+以下をコピペして保存し、`<username>` は実際の実行ユーザー名に置換すること。
 
 ```ini
 [Unit]
@@ -289,7 +298,7 @@ sudo nano /etc/systemd/system/tesla-observer.service
 
 ### 5. サービスの有効化と即時起動コマンド
 
-ファイルを配置後、システムに認識させて一気に起動する。
+ファイルを配置したあと、システムに認識させて一気に起動する。
 
 ```bash
 # systemdのマネージャ設定をリロード（変更の反映）
@@ -311,7 +320,7 @@ sudo systemctl start tesla-override.service
 
 ## 7. 【Step 6】稼働・正常性確認チェック
 
-デプロイが正常に完了したか、以下のコマンドで最終確認を行う。
+デプロイが正常に完了したか、以下のコマンドで最終確認する。
 
 ```bash
 # 3つのサービスが揃って緑文字の「active (running)」になっているか確認

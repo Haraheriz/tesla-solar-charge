@@ -4,13 +4,14 @@ import json
 import html
 import hmac
 import logging
+import socket
 import threading
 from logging.handlers import RotatingFileHandler
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 from typing import Any, Dict
 
-from config_loader import Settings
+from config_loader import Settings, warn_if_accessible_by_others
 from override_state import (
     parse_charge_target,
     read_away_probe,
@@ -51,6 +52,9 @@ if not os.path.exists(CONFIG_FILE):
 with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config: Dict[str, Any] = json.load(f)
 
+# CONTROL_TOKEN を含むため、所有者以外から読める権限なら起動時に警告する（充電制御側と同じ検査）。
+warn_if_accessible_by_others(CONFIG_FILE, logger.warning)
+
 # 数値の設定は充電制御側と同じ入口を通す。片方だけ素の config.get に戻ると、
 # 「設定を読む場所は1か所」という前提がまた崩れる。
 settings = Settings(config, logger.warning)
@@ -60,15 +64,40 @@ settings = Settings(config, logger.warning)
 CONTROL_PORT: int = settings.integer("CONTROL_PORT", 8090, minimum=1)
 control_token_value: Any = config.get("CONTROL_TOKEN")
 
+
+def is_token_charset_valid(token: str) -> bool:
+    """トークンが表示可能なASCII文字（0x21〜0x7E、空白を含まない）だけから成るかを返す。
+
+    画面の JavaScript はトークンを X-Control-Token ヘッダーで送る。HTTP のヘッダー値に
+    使える文字は RFC 9110 §5.5 で表示可能なASCII文字に限られ、ブラウザーの fetch() は
+    それ以外の文字を含むヘッダー値を送らずに失敗する。クエリパラメータなら送れる値でも
+    ヘッダーで送れなければ画面が動かないため、起動時に揃えて拒否する。
+    `openssl rand -hex 32` が生成する値はこの条件を満たす。
+    """
+    return bool(token) and all(0x21 <= ord(c) <= 0x7E for c in token)
+
+
 if (not isinstance(control_token_value, str) or len(control_token_value) < 32
-        or control_token_value == "YOUR_RANDOM_CONTROL_TOKEN_HERE"):
-    logger.critical("CONTROL_TOKEN が文字列でない、32文字未満、またはテンプレート値です。起動を中止します。")
+        or control_token_value == "YOUR_RANDOM_CONTROL_TOKEN_HERE"
+        or not is_token_charset_valid(control_token_value)):
+    logger.critical(
+        "CONTROL_TOKEN が文字列でない、32文字未満、テンプレート値、"
+        "または表示可能なASCII文字以外を含んでいます。起動を中止します。"
+    )
     sys.exit(1)
 CONTROL_TOKEN: str = control_token_value
 
 MAX_POST_BYTES: int = 4096
 CLIENT_TIMEOUT_SEC: int = 5
 MAX_CLIENTS: int = 16
+
+# 1接続の処理全体（要求行・ヘッダー・本文の受信から応答まで）の締切秒。
+#
+# CLIENT_TIMEOUT_SEC は1回の受信ごとに適用される。そのため、5秒未満の間隔でヘッダーを
+# 1バイトずつ送り続ける接続は締切に掛からず、同時処理の枠（MAX_CLIENTS）を占有し続けられた。
+# 16接続でそれを行うと、正規の要求は枠が空くまで応答なしで閉じられる。
+# スマートフォンは要求を数ミリ秒で送り終えるため、15秒を超える要求は正規の利用では起きない。
+REQUEST_DEADLINE_SEC: float = 15.0
 
 ICONS_DIR: str = os.path.join(BASE_DIR, "icons")
 
@@ -90,7 +119,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Tesla充電切替</title>
-<link rel="manifest" href="/manifest.webmanifest?token=__TOKEN__">
+<link rel="manifest" href="/manifest.webmanifest?token=__TOKEN_URL__">
 <link rel="icon" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png">
 <meta name="theme-color" content="#F2F3F5" media="(prefers-color-scheme: light)">
@@ -260,7 +289,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 </main>
 
 <script>
-const TOKEN = "__TOKEN__";
+const TOKEN = "__TOKEN_JS__";
 const STATE_LABELS = { Charging: "充電中", Stopped: "停止中", Complete: "満充電", Disconnected: "ケーブル未接続",
                        NoPower: "給電なし", Starting: "開始処理中" };
 let state = null;
@@ -268,10 +297,13 @@ let pending = null;   // 画面で選んでいる目標充電率（保存前）
 let dirty = false;    // 保存前の変更があるか。あるうちは5秒ごとの再取得で上書きしない
 
 function api(path, body) {
-  const opts = body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  // トークンはURLではなくヘッダーで送る。URLに載せると中継（Tailscale Serve 等）のアクセスログに残る。
+  // ページ自体のURL（start_url）には残るため、API呼び出し分だけがログから消える。
+  const headers = { "X-Control-Token": TOKEN };
+  const opts = body === undefined ? { headers } : {
+    method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body)
   };
-  return fetch(`${path}?token=${encodeURIComponent(TOKEN)}`, opts).then((res) => {
+  return fetch(path, opts).then((res) => {
     if (!res.ok) throw new Error(path);
     return res.json();
   });
@@ -392,7 +424,7 @@ MANIFEST_TEMPLATE: str = """{
   "name": "Tesla充電切替",
   "short_name": "Tesla充電切替",
   "description": "太陽光発電の状況に関わらずフル充電モードを切替えるコントローラー",
-  "start_url": "/?token=__TOKEN__",
+  "start_url": "/?token=__TOKEN_URL__",
   "scope": "/",
   "display": "standalone",
   "background_color": "#0b0f14",
@@ -449,13 +481,42 @@ def status_payload() -> Dict[str, Any]:
     }
 
 
+def _token_for_url(token: str) -> str:
+    """URLのクエリ値としてのトークン。英数字と "_.-~" 以外はすべてパーセント符号化する。"""
+    return quote(token, safe="")
+
+
+def _token_for_js(token: str) -> str:
+    """JavaScript の文字列リテラル（引用符を含む）としてのトークン。
+
+    JSON の文字列リテラルは JavaScript の文字列リテラルとして読める。json.dumps は
+    引用符・バックスラッシュ・制御文字を符号化し、非ASCIIは \\uXXXX にする。
+    "</" を "<\\/" にするのは、値に "</script>" が含まれていても script 要素が
+    そこで閉じないようにするためである。
+    """
+    return json.dumps(token).replace("</", "<\\/")
+
+
 def render_page(token: str) -> str:
-    return PAGE_TEMPLATE.replace("__TOKEN__", html.escape(token, quote=True))
+    """トークンは2つの文脈に埋め込む。文脈ごとに符号化を分ける。
+
+    1. manifest への link 要素の href（HTML属性値の中のURLクエリ）
+       … パーセント符号化してから HTML エスケープ
+    2. script 要素の中の const TOKEN（JavaScript の文字列リテラル）
+       … JSON の文字列リテラルとして符号化。HTML エスケープは script の中では復号されず、
+         "&quot;" がそのまま値になるので使わない。
+
+    トークンは tesla_config.json の設定値であり、ここで防いでいるのは利用者の設定値が
+    画面を壊すことであって、第三者の入力ではない。
+    """
+    url_token = html.escape(_token_for_url(token), quote=True)
+    return PAGE_TEMPLATE.replace("__TOKEN_URL__", url_token).replace('"__TOKEN_JS__"', _token_for_js(token))
 
 
 def render_manifest(token: str) -> str:
-    escaped_token = json.dumps(token)[1:-1]
-    return MANIFEST_TEMPLATE.replace("__TOKEN__", escaped_token)
+    """start_url はJSON文字列の中のURLなので、パーセント符号化したうえでJSON文字列として符号化する。"""
+    url_token = json.dumps(_token_for_url(token))[1:-1]
+    return MANIFEST_TEMPLATE.replace("__TOKEN_URL__", url_token)
 
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -465,7 +526,10 @@ class ControlHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get("X-Control-Token") or query.get("token", [None])[0]
         if not supplied:
             return False
-        return hmac.compare_digest(supplied, CONTROL_TOKEN)
+        # str 同士の compare_digest は ASCII 以外の文字で TypeError を投げる。
+        # 非ASCIIのトークンを送られると応答を返さずに切断し、トレースバックが journal に残っていた。
+        # bytes に揃えれば文字種を問わず「一致しない」として 403 を返せる。
+        return hmac.compare_digest(supplied.encode("utf-8"), CONTROL_TOKEN.encode("utf-8"))
 
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -488,6 +552,10 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # 他サイトの iframe に埋め込ませない。トークン付きURLを知る相手にしか使えないため影響は
+        # 小さいが、埋め込みを許す理由もない。frame-ancestors はヘッダーでのみ有効（meta では無効）。
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -603,7 +671,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
 
 class ControlServer(ThreadingHTTPServer):
-    """同時接続を16件に制限し、各接続の読み取りを5秒で打ち切る。"""
+    """同時接続を16件に制限し、各接続の読み取りを5秒で、処理全体を15秒で打ち切る。"""
 
     request_queue_size = MAX_CLIENTS
 
@@ -626,10 +694,22 @@ class ControlServer(ThreadingHTTPServer):
             self._slots.release()
             raise
 
+    @staticmethod
+    def _abort_request(request: Any) -> None:
+        """締切を過ぎた接続を閉じる。受信待ちのスレッドは空の読み取りを受けて要求処理を終える。"""
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def process_request_thread(self, request: Any, client_address: tuple) -> None:
+        deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request,))
+        deadline.daemon = True
+        deadline.start()
         try:
             super().process_request_thread(request, client_address)
         finally:
+            deadline.cancel()
             self._slots.release()
 
 

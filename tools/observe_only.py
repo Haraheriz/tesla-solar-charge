@@ -60,8 +60,11 @@ with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
 
 # 本体（proxy_session.verify = cert.pem）と同じく自己署名証明書をピン留めして検証する。
 # 同じアクセストークンを載せる経路であり、検証を無効化する理由がない。
+# ホスト名照合も本体と同じく有効にしておく。本体は requests（urllib3）が cert.pem に対して
+# "localhost" を照合したうえで通信しており、poc/make_certs.py が作る証明書は CN と SAN の
+# 両方に localhost を持つ。ここだけ照合を外すと、cert.pem と秘密鍵を持つ相手なら
+# どのホスト名でも受け入れる状態になり、本体より検証が1段弱くなる。
 CTX = ssl.create_default_context(cafile=PROXY_CERT_PATH)
-CTX.check_hostname = False  # 証明書のCNがlocalhostと一致しないため、ホスト名照合のみ外す
 
 
 def log(message):

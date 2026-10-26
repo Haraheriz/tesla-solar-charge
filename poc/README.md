@@ -1,6 +1,6 @@
 # poc/ — 実証・検証スクリプト
 
-このフォルダは、本体プログラム（[`tesla_solar_charger.py`](../tesla_solar_charger.py)）を完成させるまでに作成した、Tesla Fleet APIおよびNature Remo APIの認証・通信フローを個別に検証するための実験用スクリプト集です。
+このフォルダは本体プログラム（[`tesla_solar_charger.py`](../tesla_solar_charger.py)）を完成させるまでに作成した、Tesla Fleet APIおよびNature Remo APIの認証・通信フローを個別に検証するための実験用スクリプト集です。
 
 本番運用には使いませんが、Tesla/Nature Remo連携を自分で組みたい方の参考用ひな形として残しています。
 

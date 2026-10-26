@@ -1,0 +1,16 @@
+# 依存の版を更新する PR を Dependabot が出す。固定している版は次の2か所にある。
+#   .github/workflows/*.yml の uses:（コミットSHA。行末コメントの版も併せて更新される）
+#   requirements-dev.txt（== で固定）
+# PR には tests.yml と claude-review.yml が走る。claude-review.yml は pull_request_target で
+# main 時点のワークフローとして動くため、claude-review.yml 自身の `uses:` を更新する PR も
+# レビューされる（AGENTS.md）。
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly

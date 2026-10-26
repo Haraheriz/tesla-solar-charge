@@ -10,7 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
-from config_loader import Settings
+from config_loader import Settings, warn_if_accessible_by_others
 from override_state import read_away_probe_state, read_charge_target, read_override_state, write_override
 from vehicle_status import load_vehicle_status, save_vehicle_status
 from wall_connector import (
@@ -75,6 +75,11 @@ if not os.path.exists(CONFIG_FILE):
 
 with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config: Dict[str, Any] = json.load(f)
+
+# 認証情報を含む2ファイルの権限を起動時に確かめる。tesla_tokens.json はまだ無いことがある
+# （初回認証前）。save_tokens() が 0o600 で作るため、無ければ検査の対象外でよい。
+warn_if_accessible_by_others(CONFIG_FILE, log_attention)
+warn_if_accessible_by_others(TOKEN_FILE, log_attention)
 
 REMO_ACCESS_TOKEN: str = str(config.get("REMO_ACCESS_TOKEN", ""))
 CLIENT_ID: str = str(config.get("CLIENT_ID", ""))

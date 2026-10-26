@@ -8,13 +8,16 @@ control_server.py は import 時に設定を読み、CONTROL_TOKEN が無けれ�
 そのため import より前に TESLA_CONFIG_PATH を一時ファイルへ向ける必要がある。
 ログも相対パスで開くので、conftest.py の _load_module と同じく tmp へ chdir しておく。
 """
+import html
 import importlib.util
 import itertools
 import json
 import os
 import socket
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -25,6 +28,15 @@ PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 TOKEN = "0123456789abcdef" * 4
 
 _module_counter = itertools.count()
+
+# server フィクスチャが読み込んだ control_server モジュール。テストから定数や関数へ触るために置く。
+# フィクスチャの戻り値は (ベースURL, 状態ファイル) のまま変えない。
+_loaded: dict = {}
+
+
+@pytest.fixture
+def control_module(server):
+    return _loaded["module"]
 
 
 @pytest.fixture
@@ -60,6 +72,7 @@ def server(tmp_path):
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        _loaded["module"] = module
     finally:
         os.chdir(previous_cwd)
 
@@ -194,11 +207,123 @@ def test_ヘッダーを途中まで送った接続が他の要求を止めな�
         assert b"403" in slow.recv(1024)
 
 
+def test_ヘッダーを小出しに送り続ける接続は締切で閉じられる(server, control_module):
+    """受信ごとの5秒タイムアウトは、5秒未満の間隔で送り続ける接続を打ち切れない。
+    処理全体の締切（REQUEST_DEADLINE_SEC）が無いと、16接続で枠を占有し続けられる。
+    締切そのものの長さ（15秒）ではなく、締切を過ぎた接続が閉じられることを見る。"""
+    base, _ = server
+    port = int(base.rsplit(":", 1)[1])
+    previous = control_module.REQUEST_DEADLINE_SEC
+    control_module.REQUEST_DEADLINE_SEC = 0.5
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
+            slow.sendall(b"GET / HTTP/1.1\r\n")
+            time.sleep(0.3)
+            slow.sendall(b"Host: localhost\r\n")   # 締切前の送信は受け付けられる
+            time.sleep(0.5)                           # ここで締切（0.5秒）を過ぎる
+            try:
+                slow.sendall(b"\r\n")
+                received = slow.recv(1024)
+            except OSError:
+                received = b""
+            assert received == b"" or b"HTTP/1.0 403" not in received
+
+        # 枠は解放され、次の正規の要求に応答する
+        status, _ = _get(f"{base}/api/status?token={TOKEN}")
+        assert status == 200
+    finally:
+        control_module.REQUEST_DEADLINE_SEC = previous
+
+
 def test_画面はトークンをキャッシュと参照元へ渡さない(server):
     base, _ = server
     with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:
         assert res.headers["Cache-Control"] == "no-store"
         assert res.headers["Referrer-Policy"] == "no-referrer"
+
+
+def test_画面と状態APIは他サイトの枠に埋め込ませない(server):
+    base, _ = server
+    for url in (f"{base}/?token={TOKEN}", f"{base}/api/status?token={TOKEN}"):
+        with urllib.request.urlopen(url, timeout=5) as res:
+            assert res.headers["X-Frame-Options"] == "DENY"
+            assert res.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+
+
+@pytest.mark.parametrize("token", ["トークン", "0123456789abcdef" * 3 + "0123456789abcdé"])
+def test_非ASCIIのトークンは403を返し切断しない(server, token):
+    """str 同士の compare_digest は非ASCIIで TypeError を投げ、応答を返さずに切断していた。"""
+    base, state_file = server
+    quoted = urllib.parse.quote(token)
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(f"{base}/api/status?token={quoted}", timeout=5)
+    assert exc.value.code == 403
+
+    request = urllib.request.Request(
+        f"{base}/api/override",
+        data=json.dumps({"enabled": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Control-Token": token.encode("utf-8")},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+    assert exc.value.code == 403
+    assert not state_file.exists()
+
+    # 同じサーバーが続けて正規の要求に応答できる
+    status, _ = _get(f"{base}/api/status?token={TOKEN}")
+    assert status == 200
+
+
+def test_ヘッダーだけでトークンを渡せる(server):
+    """画面のJavaScriptはURLではなく X-Control-Token ヘッダーでトークンを送る。"""
+    base, state_file = server
+    request = urllib.request.Request(f"{base}/api/status", headers={"X-Control-Token": TOKEN})
+    with urllib.request.urlopen(request, timeout=5) as res:
+        assert res.status == 200
+
+    request = urllib.request.Request(
+        f"{base}/api/override",
+        data=json.dumps({"enabled": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Control-Token": TOKEN},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as res:
+        assert json.loads(res.read().decode("utf-8"))["manual_override"] is True
+    assert json.loads(state_file.read_text(encoding="utf-8"))["manual_override"] is True
+
+
+@pytest.mark.parametrize("token", [
+    TOKEN,
+    'ab"c\\d</script>&e' + "'" + "f?g=h&i=j#k é" + "x" * 16,
+])
+def test_トークンは埋め込む文脈ごとに符号化される(control_module, token):
+    """引用符・バックスラッシュ・"</script>"・URL区切り・非ASCIIを含む値でも、
+    script の文字列リテラルは値そのまま、manifest の href と start_url は同じクエリ値になる。"""
+    page = control_module.render_page(token)
+    script = page[page.index("<script>"):page.index("</script>")]
+    literal = script[script.index("const TOKEN = ") + len("const TOKEN = "):]
+    literal = literal[:literal.index(";\n")]
+    assert json.loads(literal.replace("<\\/", "</")) == token
+    assert page.count("</script>") == 1
+
+    quoted = urllib.parse.quote(token, safe="")
+    href = page[page.index('href="/manifest.webmanifest?token=') + len('href="/manifest.webmanifest?token='):]
+    href = href[:href.index('"')]
+    assert urllib.parse.unquote(html.unescape(href)) == token
+
+    manifest = json.loads(control_module.render_manifest(token))
+    assert manifest["start_url"] == f"/?token={quoted}"
+    assert urllib.parse.parse_qs(urllib.parse.urlparse(manifest["start_url"]).query)["token"] == [token]
+
+
+def test_画面のスクリプトはAPI呼び出しのトークンをURLに載せない(server):
+    base, _ = server
+    _, _, raw = _get_bytes(f"{base}/?token={TOKEN}")
+    page = raw.decode("utf-8")
+    script = page[page.index("<script>"):page.index("</script>")]
+    assert '"X-Control-Token": TOKEN' in script
+    assert "?token=" not in script
 
 
 def test_BOM付き設定ファイルでも起動できる(tmp_path):
@@ -225,7 +350,13 @@ def test_BOM付き設定ファイルでも起動できる(tmp_path):
             os.environ.pop("TESLA_CONFIG_PATH", None)
 
 
-@pytest.mark.parametrize("token", ["YOUR_RANDOM_CONTROL_TOKEN_HERE", "short", 123])
+@pytest.mark.parametrize("token", [
+    "YOUR_RANDOM_CONTROL_TOKEN_HERE",
+    "short",
+    123,
+    "トークン" * 8,                       # 非ASCII：fetch() がヘッダー値として送れない
+    "0123456789abcdef 0123456789abcdef",  # 空白：ヘッダー値の先頭と末尾で削られる
+])
 def test_不正なトークンでは起動しない(tmp_path, token):
     config_file = tmp_path / "config.json"
     config_file.write_text(
