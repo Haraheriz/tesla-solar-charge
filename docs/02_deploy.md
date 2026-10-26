@@ -2,7 +2,7 @@
 
 ## 1. 前提条件とディレクトリ構造
 
-ハードウェア障害（SDカードの突然の故障など）やOSアップデートに伴い、システムをゼロから再構築する際の手順である。本手順は、ターゲット環境が **Linux（Raspberry Pi OS 64bit等）** であり、一般的な非特権ユーザー権限で実行されることを想定している。
+ハードウェア障害（SDカードの突然の故障など）やOSアップデートに伴い、システムをゼロから再構築する際の手順である。本手順は、ターゲット環境が Linux（Raspberry Pi OS 64bit等）であり、一般的な非特権ユーザー権限で実行されることを想定している。
 
 ```Markdown
 ### 最終的な配置ディレクトリ構造（Linux側）
@@ -26,7 +26,7 @@
 ```
 
 > **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**
-> Windows側の開発・検証スクリプト（`poc/complete_tesla_activation.py`等）は、テスラ車両コマンド用の鍵ペアを **`private-key.pem` / `public-key.pem`** という名前で生成する。一方、ラズパイ側の `systemd` サービス定義（`tesla-proxy.service`）は **`tesla_app_key.pem`** という名前を前提にしている。
+> Windows側の開発・検証スクリプト（`poc/complete_tesla_activation.py`等）は、テスラ車両コマンド用の鍵ペアを `private-key.pem` / `public-key.pem` という名前で生成する。一方、ラズパイ側の `systemd` サービス定義（`tesla-proxy.service`）は `tesla_app_key.pem` という名前を前提にしている。
 > 転送時は鍵の中身（バイト列）は同一のまま、**ファイル名だけ `tesla_app_key.pem` にリネームしてから配置すること**。リネームせずに別名のまま使う場合は、`/etc/systemd/system/tesla-proxy.service` 内の `-key-file` のパスも合わせて書き換える必要がある。
 
 ---
@@ -101,7 +101,7 @@ chmod 700 /home/<username>/tesla-solar-charge/venv/bin/*
 
 ## 5. 【Step 4】`tesla_config.json` の設定
 
-`tesla_config.json` は `.gitignore` 対象のため、リポジトリを取得しただけでは存在しない。**`tesla_config.json.template` をコピーして作成する。**
+`tesla_config.json` は `.gitignore` 対象のため、リポジトリを取得しただけでは存在しない。`tesla_config.json.template` をコピーして作成する。
 
 ```bash
 cp tesla_config.json.template tesla_config.json
@@ -117,11 +117,11 @@ chmod 600 tesla_config.json
 | `CLIENT_ID` / `CLIENT_SECRET` | ○ | `""` | Tesla開発者ポータルで発行したアプリケーションの資格情報 |
 | `DOMAIN` | ○ | `localhost:8000` | OAuthのリダイレクト先ドメイン |
 | `REMO_ACCESS_TOKEN` | ○ | `""` | Nature Remo のアクセストークン（余剰電力の測定に使う） |
-| **`WALL_CONNECTOR_HOST`** | **○** | `""` | **自宅ウォールコネクター（Gen 3）のIPアドレス。未設定だと外出先の充電も制御対象になる**（下記） |
+| `WALL_CONNECTOR_HOST` | ○ | `""` | 自宅ウォールコネクター（Gen 3）のIPアドレス。未設定だと外出先の充電も制御対象になる（下記） |
 | `WALL_CONNECTOR_SERIAL` | | `""` | 任意。設定するとIPアドレスが別の機器に変わった場合を起動時に検知できる |
 | `WALL_CONNECTOR_TIMEOUT_SEC` | | `5` | ウォールコネクターへのHTTPタイムアウト秒 |
 | `WALL_CONNECTOR_ATTEMPTS` | | `2` | 読み取り失敗時に、その場で取り直す回数（1回目を含む） |
-| `DISCONNECTED_PROBE_INTERVAL_SEC` | | `600` | **外出先の充電記録がONのとき**、ケーブル未接続の車両データを読み直す間隔（秒）。ON/OFFはスマホアプリで切替える |
+| `DISCONNECTED_PROBE_INTERVAL_SEC` | | `600` | 外出先の充電記録がONのとき、ケーブル未接続の車両データを読み直す間隔（秒）。ON/OFFはスマホアプリで切替える |
 | `FAST_CHARGER_POWER_KW` | | `15` | 外出先判定のフォールバック閾値 |
 | `MIN_AMPS` | | `4` | 充電を維持する下限電流。これを下回ると停止する |
 | `MAX_AMPS` | | `48` | 上限電流。**充電設備とブレーカーの容量に合わせること** |
@@ -140,18 +140,18 @@ chmod 600 tesla_config.json
 
 ### `REMO_SAMPLES` を増やす前に
 
-**平滑化のつもりで増やしても効果がない**。スマートメーターの更新間隔は中央値61秒（2026-08-09〜18 の12,055回の観測で95%が60秒）であり、10秒間隔で複数回読んでも同じ値が返る。3回×10秒だった頃は、同じ値を3回平均したうえで1サイクルにつき20秒とAPI 2回分を費やしていた。
+平滑化のつもりで増やしても効果がない。スマートメーターの更新間隔は中央値61秒（2026-08-09〜18 の12,055回の観測で95%が60秒）であり、10秒間隔で複数回読んでも同じ値が返る。3回×10秒だった頃は、同じ値を3回平均したうえで1サイクルにつき20秒とAPI 2回分を費やしていた。
 
 複数の更新をまたぐには120〜180秒の窓が要るが、制御サイクル自体が180秒であるため、サイクル内では実現できない。平滑化が必要なら、サイクルをまたいで直近N回の値を使う別の設計を検討すること。
 
 ### 自宅ウォールコネクターの設定
 
-**`WALL_CONNECTOR_HOST` を設定しないと、システムは充電している場所を区別しない**。スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる（`docs/03_operation.md` の「外出先での充電を制御しない」を参照）。
+`WALL_CONNECTOR_HOST` を設定しないと、システムは充電している場所を区別しない。スーパーチャージャーや目的地充電器での充電も停止・電流変更の対象になる（`docs/03_operation.md` の「外出先での充電を制御しない」を参照）。
 
-対象は **Gen 3（Wi-Fi対応）に限る**。Gen 2 や、Wi-Fiを宅内LANに接続していない個体では応答しないため、この機能は利用できない。その場合は空のままにする（全経路が従来どおり動作する）。
+対象は Gen 3（Wi-Fi対応）に限る。Gen 2 や、Wi-Fiを宅内LANに接続していない個体では応答しないため、この機能は利用できない。その場合は空のままにする（全経路が従来どおり動作する）。
 
-1. **IPアドレスを確認する**。Teslaアプリの充電器設定画面、またはルーターのDHCPクライアント一覧で調べる
-2. **ルーター側でDHCP予約を設定する**。アドレスが変わると判定不能に落ちるため、必ず固定する
+1. IPアドレスを確認する。Teslaアプリの充電器設定画面、またはルーターのDHCPクライアント一覧で調べる
+2. ルーター側でDHCP予約を設定する。アドレスが変わると判定不能に落ちるため、必ず固定する
 3. **ラズパイから到達できることを確認する。**
 
 ```bash
@@ -159,7 +159,7 @@ curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/version
 curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
 ```
 
-4. **`tesla_config.json` に設定する。**`WALL_CONNECTOR_SERIAL` には `/api/1/version` の `serial_number` を転記する
+4. `tesla_config.json` に設定する。`WALL_CONNECTOR_SERIAL` には `/api/1/version` の `serial_number` を転記する
 
 ```json
 "WALL_CONNECTOR_HOST": "<ウォールコネクターのIP>",
