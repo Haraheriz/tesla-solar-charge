@@ -23,6 +23,7 @@
 ├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-*.png, icon-maskable-*.png, apple-touch-icon-180.png）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
+```
 
 > **ファイル名の注意（Windows側 ↔ ラズパイ側の不一致）：**
 > Windows側の開発・検証スクリプト（`poc/complete_tesla_activation.py`等）は、テスラ車両コマンド用の鍵ペアを **`private-key.pem` / `public-key.pem`** という名前で生成する。一方、ラズパイ側の `systemd` サービス定義（`tesla-proxy.service`）は **`tesla_app_key.pem`** という名前を前提にしている。
