@@ -46,14 +46,14 @@ python -m git_filter_repo --replace-text /tmp/replacements.txt --force
 
 Tesla Developer Portalには「Client Secretのみ再生成」する機能がない（2026年時点）。そのため、**新しいアプリを作り直す**形でローテーションする。
 
-1. **新しいアプリを作成**：旧アプリと同じ設定（アプリ名・説明・OAuth付与タイプ・許可された送信元・リダイレクトURI・スコープ）で新規作成し、新しいClient ID/Secretを取得する。
-2. **新しい鍵ペアを生成**：`openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem` 等（`docs/00_onboarding.md` Phase 3参照）。
-3. **公開鍵をホスティング先（GitHub Pages等）で更新**：`.well-known/appspecific/com.tesla.3p.public-key.pem` の内容を新しい公開鍵に置き換える。
-4. **`tesla_config.json` のCLIENT_ID/CLIENT_SECRETを新しい値に書き換え、`tesla_tokens.json` を削除**して再認証フローを通す（`tesla_solar_charger.py` が自動的に認可URLを発行する）。
-5. **パートナーアカウント登録**：`poc/activate_tesla_app.py` を新しいClient ID/Secretとドメインで実行する。
+1. 新しいアプリを作成：旧アプリと同じ設定（アプリ名・説明・OAuth付与タイプ・許可された送信元・リダイレクトURI・スコープ）で新規作成し、新しいClient ID/Secretを取得する。
+2. 新しい鍵ペアを生成：`openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem` 等（`docs/00_onboarding.md` Phase 3参照）。
+3. 公開鍵をホスティング先（GitHub Pages等）で更新：`.well-known/appspecific/com.tesla.3p.public-key.pem` の内容を新しい公開鍵に置き換える。
+4. `tesla_config.json` のCLIENT_ID/CLIENT_SECRETを新しい値に書き換え、`tesla_tokens.json` を削除して再認証フローを通す（`tesla_solar_charger.py` が自動的に認可URLを発行する）。
+5. パートナーアカウント登録：`poc/activate_tesla_app.py` を新しいClient ID/Secretとドメインで実行する。
    * このとき公開鍵のホスティング更新が反映される前に実行すると `Public key hash has already been taken` で失敗する。旧アプリのアーカイブと公開鍵の差し替えの両方が必要。
-6. **旧アプリをアーカイブ申請**：新アプリでの動作確認が完全に取れてから行う（先にアーカイブすると、新アプリの設定が終わるまで車両制御が完全に止まる）。
-7. **車両への鍵承認（Virtual Key Pairing）**：`tesla-control add-key-request` はBLE必須でWindows非対応のため使えない。スマートフォンのTeslaアプリで `https://www.tesla.com/_ak/<ドメイン>` を開いて承認する（詳細：`docs/00_onboarding.md` Phase 4）。
+6. 旧アプリをアーカイブ申請：新アプリでの動作確認が完全に取れてから行う（先にアーカイブすると、新アプリの設定が終わるまで車両制御が完全に止まる）。
+7. 車両への鍵承認（Virtual Key Pairing）：`tesla-control add-key-request` はBLE必須でWindows非対応のため使えない。スマートフォンのTeslaアプリで `https://www.tesla.com/_ak/<ドメイン>` を開いて承認する（詳細：`docs/00_onboarding.md` Phase 4）。
 
 ## 5. Nature Remoアクセストークンのローテーション
 
