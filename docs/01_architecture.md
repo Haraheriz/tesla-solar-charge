@@ -236,7 +236,7 @@ HTTPS通信を確立する際、証明書を渡すフラグは `-tls-cert` で�
 3. **特権ポート（443番）の回避：**
 プロキシはデフォルトで `443` 番ポートを開こうとするが、Linuxのセキュリティ上、一般ユーザー権限では1024番未満（0〜1023番）の特権ポートを開放できない（`status=1/FAILURE` となる。Linux の capabilities(7) は `CAP_NET_BIND_SERVICE` を「1024番未満の特権ポートへの bind」と定義している）。そのため、明示的に **`-port 4443`** を指定し、非特権ポートで待ち受ける。
 4. **Python環境（venv）の実行権限：**
-Debian 12以降のシステムガードにより、グローバル環境への `pip` インストールはブロックされる。必ず `/home/<username>/tesla-solar-charge/venv` の仮想環境を通り、且つシステムサービスから呼び出すためにバイナリおよび親ディレクトリには `700`（走査権限 `x` の維持）が与えられていなければならない。
+Debian 12以降は PEP 668 により、システムの Python への `pip` インストールを拒否する（`externally-managed-environment`）。`pip` による導入とサービスからの実行は、どちらも必ず `/home/<username>/tesla-solar-charge/venv` の仮想環境の Python を使う。systemd から呼び出せるよう、venv 配下のバイナリと親ディレクトリには `700`（走査権限 `x` の維持）を与える。
 
 ---
 
