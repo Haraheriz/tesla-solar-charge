@@ -77,7 +77,7 @@ openssl ec -in tesla_app_key.pem -pubout -out tesla_app_key_public.pem
 > **注意：** Tesla公式ツール `tesla-control` の `add-key-request` コマンドは**BLE（Bluetooth）接続が必須**で、Teslaサーバー経由（クラウド）での送信はできない（`command can only be sent over BLE` エラーになる）。さらに `tesla-control` はGolangのBLEパッケージの制約により **Windows上では動作しない**（公式READMEに明記）。そのため、Windows環境で開発する本システムでは、以下の **Virtual Key Pairingリンク方式** を使う。
 
 1. **公開鍵をドメインでホスティング：**
-GitHub Pages等の静的サイトの `.well-known/appspecific/com.tesla.3p.public-key.pem` に公開鍵（`tesla_app_key_public.pem`）を配置し、Tesla Developer Portalの「許可された送信元」にそのドメインを設定したうえで、`/api/1/partner_accounts` へのパートナーアカウント登録（Phase 3〜の `activate_tesla_app.py` 相当）を完了させておく。
+GitHub Pages等の静的サイトの `.well-known/appspecific/com.tesla.3p.public-key.pem` に公開鍵（`tesla_app_key_public.pem`）を配置し、Tesla Developer Portalの「許可された送信元」にそのドメインを設定したうえで、`/api/1/partner_accounts` へのパートナーアカウント登録（`poc/activate_tesla_app.py` で実行する）を完了させておく。
 2. **Virtual Key Pairingリンクを開く：**
 車の近く（Bluetoothが繋がる距離）で、**Teslaアプリがインストールされたスマートフォン**から以下のURLを開く。
 
