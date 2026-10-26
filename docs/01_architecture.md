@@ -67,10 +67,10 @@
 * **目標充電率：** 充電率が目標以上になったら充電を止める機能。車両側の充電上限は50%未満に設定できないため、システムが `battery_level` を見て止める。仕様と設計意図は `docs/05_charge_target_design.md` にある。
 * **`manual_override: true` の場合：** `tesla_solar_charger.py` は夜間休止モードおよびNature Remoの瞬時電力に基づく漸進的フィードバック制御（第4章）をすべてスキップし、車両を起動（必要な場合）して `MAX_AMPS` でのフル充電を維持する。
 * **`manual_override: false` の場合：** 通常の太陽光追従ロジックに復帰する。
-* **認証：** `control_server.py` はクエリパラメータ `?token=` またはヘッダー `X-Control-Token` で、`tesla_config.json` の `CONTROL_TOKEN`（ランダムな共有シークレット）との一致を要求する。トークンが一致しない場合はHTTP 403を返し、ページ・APIともに一切の情報を返さない。
+* **認証：** `control_server.py` はクエリパラメータ `?token=` またはヘッダー `X-Control-Token` で、`tesla_config.json` の `CONTROL_TOKEN`（ランダムな共有シークレット）との一致を要求する。トークンが一致しない場合はHTTP 403を返し、ページ・APIともに一切の情報を返さない。比較は UTF-8 の bytes で行い、非ASCII文字を含むトークンも403になる。ページ内のJavaScriptはAPI呼び出しのトークンを `X-Control-Token` ヘッダーで送る。クエリパラメータを使うのはページと `/manifest.webmanifest` の取得だけである。
 * **起動条件：** `CONTROL_TOKEN` が文字列でない、32文字未満、または公開テンプレート値 `YOUR_RANDOM_CONTROL_TOKEN_HERE` の場合、`control_server.py` は終了コード1で起動を中止する。文字数の検証だけではトークンの推測困難性は保証されないため、`openssl rand -hex 32` で生成する。
 * **リクエスト制限：** POSTの `Content-Length` が整数でないか負数の場合はHTTP 400、本文が4096バイトを超える場合はHTTP 413を返す。`/api/override` と `/api/away_probe` の `enabled` がJSONの真偽値でない場合はHTTP 400を返す。各接続のソケット読み取りタイムアウトは5秒、同時処理数の上限は16接続であり、空き枠がない場合は新しい接続をHTTP応答なしで閉じる。
-* **レスポンスヘッダー：** 応答に `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff` を設定する。
+* **レスポンスヘッダー：** 応答に `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Content-Security-Policy: frame-ancestors 'none'` を設定する。
 * **UI：** トークン付きURL（宅内LANでは`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`、Tailscale経由では`https://<MagicDNSホスト名>/?token=<CONTROL_TOKEN>`）にアクセスすると、ON/OFFトグルボタン1つだけのモバイル向けページが表示される。スマホのホーム画面に追加すれば、アイコンから起動できる。URLはブラウザー履歴とPWAの`start_url`に残るため、第三者へ共有しない。
 
 #### PWA（Progressive Web App）対応

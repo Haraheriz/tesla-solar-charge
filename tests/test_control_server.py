@@ -15,6 +15,7 @@ import os
 import socket
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -199,6 +200,66 @@ def test_画面はトークンをキャッシュと参照元へ渡さない(serv
     with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:
         assert res.headers["Cache-Control"] == "no-store"
         assert res.headers["Referrer-Policy"] == "no-referrer"
+
+
+def test_画面と状態APIは他サイトの枠に埋め込ませない(server):
+    base, _ = server
+    for url in (f"{base}/?token={TOKEN}", f"{base}/api/status?token={TOKEN}"):
+        with urllib.request.urlopen(url, timeout=5) as res:
+            assert res.headers["X-Frame-Options"] == "DENY"
+            assert res.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+
+
+@pytest.mark.parametrize("token", ["トークン", "0123456789abcdef" * 3 + "0123456789abcdé"])
+def test_非ASCIIのトークンは403を返し切断しない(server, token):
+    """str 同士の compare_digest は非ASCIIで TypeError を投げ、応答を返さずに切断していた。"""
+    base, state_file = server
+    quoted = urllib.parse.quote(token)
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(f"{base}/api/status?token={quoted}", timeout=5)
+    assert exc.value.code == 403
+
+    request = urllib.request.Request(
+        f"{base}/api/override",
+        data=json.dumps({"enabled": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Control-Token": token.encode("utf-8")},
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+    assert exc.value.code == 403
+    assert not state_file.exists()
+
+    # 同じサーバーが続けて正規の要求に応答できる
+    status, _ = _get(f"{base}/api/status?token={TOKEN}")
+    assert status == 200
+
+
+def test_ヘッダーだけでトークンを渡せる(server):
+    """画面のJavaScriptはURLではなく X-Control-Token ヘッダーでトークンを送る。"""
+    base, state_file = server
+    request = urllib.request.Request(f"{base}/api/status", headers={"X-Control-Token": TOKEN})
+    with urllib.request.urlopen(request, timeout=5) as res:
+        assert res.status == 200
+
+    request = urllib.request.Request(
+        f"{base}/api/override",
+        data=json.dumps({"enabled": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Control-Token": TOKEN},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as res:
+        assert json.loads(res.read().decode("utf-8"))["manual_override"] is True
+    assert json.loads(state_file.read_text(encoding="utf-8"))["manual_override"] is True
+
+
+def test_画面のスクリプトはAPI呼び出しのトークンをURLに載せない(server):
+    base, _ = server
+    _, _, raw = _get_bytes(f"{base}/?token={TOKEN}")
+    page = raw.decode("utf-8")
+    script = page[page.index("<script>"):page.index("</script>")]
+    assert '"X-Control-Token": TOKEN' in script
+    assert "?token=" not in script
 
 
 def test_BOM付き設定ファイルでも起動できる(tmp_path):

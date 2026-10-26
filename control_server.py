@@ -268,10 +268,13 @@ let pending = null;   // 画面で選んでいる目標充電率（保存前）
 let dirty = false;    // 保存前の変更があるか。あるうちは5秒ごとの再取得で上書きしない
 
 function api(path, body) {
-  const opts = body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  // トークンはURLではなくヘッダーで送る。URLに載せると中継（Tailscale Serve 等）のアクセスログに残る。
+  // ページ自体のURL（start_url）には残るため、API呼び出し分だけがログから消える。
+  const headers = { "X-Control-Token": TOKEN };
+  const opts = body === undefined ? { headers } : {
+    method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body)
   };
-  return fetch(`${path}?token=${encodeURIComponent(TOKEN)}`, opts).then((res) => {
+  return fetch(path, opts).then((res) => {
     if (!res.ok) throw new Error(path);
     return res.json();
   });
@@ -465,7 +468,10 @@ class ControlHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get("X-Control-Token") or query.get("token", [None])[0]
         if not supplied:
             return False
-        return hmac.compare_digest(supplied, CONTROL_TOKEN)
+        # str 同士の compare_digest は ASCII 以外の文字で TypeError を投げる。
+        # 非ASCIIのトークンを送られると応答を返さずに切断し、トレースバックが journal に残っていた。
+        # bytes に揃えれば文字種を問わず「一致しない」として 403 を返せる。
+        return hmac.compare_digest(supplied.encode("utf-8"), CONTROL_TOKEN.encode("utf-8"))
 
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -488,6 +494,10 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # 他サイトの iframe に埋め込ませない。トークン付きURLを知る相手にしか使えないため影響は
+        # 小さいが、埋め込みを許す理由もない。frame-ancestors はヘッダーでのみ有効（meta では無効）。
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
