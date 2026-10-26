@@ -58,8 +58,9 @@ Linuxのコンソールで対象ディレクトリに移動し、以下の2行�
 # 1. ディレクトリ内に「venv」という名前の独立した仮想環境を生成
 python3 -m venv /home/<username>/tesla-solar-charge/venv
 
-# 2. 仮想環境専用の pip を使用して、依存ライブラリ（requests）をピンポイントで導入
-/home/<username>/tesla-solar-charge/venv/bin/pip install requests
+# 2. 仮想環境専用の pip を使用して、依存ライブラリ（requests）を導入する。
+#    版は requirements-dev.txt に固定してある値と同じにする（CIがテストした版を本番へ入れる）
+/home/<username>/tesla-solar-charge/venv/bin/pip install "$(grep '^requests==' /home/<username>/tesla-solar-charge/requirements-dev.txt)"
 
 ```
 
