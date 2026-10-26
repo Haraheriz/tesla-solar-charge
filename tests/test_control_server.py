@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,15 @@ PROJECT_ROOT = os.path.dirname(TESTS_DIR)
 TOKEN = "0123456789abcdef" * 4
 
 _module_counter = itertools.count()
+
+# server フィクスチャが読み込んだ control_server モジュール。テストから定数や関数へ触るために置く。
+# フィクスチャの戻り値は (ベースURL, 状態ファイル) のまま変えない。
+_loaded: dict = {}
+
+
+@pytest.fixture
+def control_module(server):
+    return _loaded["module"]
 
 
 @pytest.fixture
@@ -61,6 +71,7 @@ def server(tmp_path):
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        _loaded["module"] = module
     finally:
         os.chdir(previous_cwd)
 
@@ -193,6 +204,34 @@ def test_ヘッダーを途中まで送った接続が他の要求を止めな�
         assert status == 200
         slow.sendall(b"\r\n")
         assert b"403" in slow.recv(1024)
+
+
+def test_ヘッダーを小出しに送り続ける接続は締切で閉じられる(server, control_module):
+    """受信ごとの5秒タイムアウトは、5秒未満の間隔で送り続ける接続を打ち切れない。
+    処理全体の締切（REQUEST_DEADLINE_SEC）が無いと、16接続で枠を占有し続けられる。
+    締切そのものの長さ（15秒）ではなく、締切を過ぎた接続が閉じられることを見る。"""
+    base, _ = server
+    port = int(base.rsplit(":", 1)[1])
+    previous = control_module.REQUEST_DEADLINE_SEC
+    control_module.REQUEST_DEADLINE_SEC = 0.5
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
+            slow.sendall(b"GET / HTTP/1.1\r\n")
+            time.sleep(0.3)
+            slow.sendall(b"Host: localhost\r\n")   # 締切前の送信は受け付けられる
+            time.sleep(0.5)                           # ここで締切（0.5秒）を過ぎる
+            try:
+                slow.sendall(b"\r\n")
+                received = slow.recv(1024)
+            except OSError:
+                received = b""
+            assert received == b"" or b"HTTP/1.0 403" not in received
+
+        # 枠は解放され、次の正規の要求に応答する
+        status, _ = _get(f"{base}/api/status?token={TOKEN}")
+        assert status == 200
+    finally:
+        control_module.REQUEST_DEADLINE_SEC = previous
 
 
 def test_画面はトークンをキャッシュと参照元へ渡さない(server):

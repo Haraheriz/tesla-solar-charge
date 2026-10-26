@@ -4,6 +4,7 @@ import json
 import html
 import hmac
 import logging
+import socket
 import threading
 from logging.handlers import RotatingFileHandler
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -69,6 +70,14 @@ CONTROL_TOKEN: str = control_token_value
 MAX_POST_BYTES: int = 4096
 CLIENT_TIMEOUT_SEC: int = 5
 MAX_CLIENTS: int = 16
+
+# 1接続の処理全体（要求行・ヘッダー・本文の受信から応答まで）の締切秒。
+#
+# CLIENT_TIMEOUT_SEC は1回の受信ごとに適用される。そのため、5秒未満の間隔でヘッダーを
+# 1バイトずつ送り続ける接続は締切に掛からず、同時処理の枠（MAX_CLIENTS）を占有し続けられた。
+# 16接続でそれを行うと、正規の要求は枠が空くまで応答なしで閉じられる。
+# スマートフォンは要求を数ミリ秒で送り終えるため、15秒を超える要求は正規の利用では起きない。
+REQUEST_DEADLINE_SEC: float = 15.0
 
 ICONS_DIR: str = os.path.join(BASE_DIR, "icons")
 
@@ -613,7 +622,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
 
 class ControlServer(ThreadingHTTPServer):
-    """同時接続を16件に制限し、各接続の読み取りを5秒で打ち切る。"""
+    """同時接続を16件に制限し、各接続の読み取りを5秒で、処理全体を15秒で打ち切る。"""
 
     request_queue_size = MAX_CLIENTS
 
@@ -636,10 +645,22 @@ class ControlServer(ThreadingHTTPServer):
             self._slots.release()
             raise
 
+    @staticmethod
+    def _abort_request(request: Any) -> None:
+        """締切を過ぎた接続を閉じる。受信待ちのスレッドは空の読み取りを受けて要求処理を終える。"""
+        try:
+            request.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
     def process_request_thread(self, request: Any, client_address: tuple) -> None:
+        deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request,))
+        deadline.daemon = True
+        deadline.start()
         try:
             super().process_request_thread(request, client_address)
         finally:
+            deadline.cancel()
             self._slots.release()
 
 
