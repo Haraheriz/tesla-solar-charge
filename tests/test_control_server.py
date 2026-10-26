@@ -8,6 +8,7 @@ control_server.py は import 時に設定を読み、CONTROL_TOKEN が無けれ�
 そのため import より前に TESLA_CONFIG_PATH を一時ファイルへ向ける必要がある。
 ログも相対パスで開くので、conftest.py の _load_module と同じく tmp へ chdir しておく。
 """
+import html
 import importlib.util
 import itertools
 import json
@@ -290,6 +291,30 @@ def test_ヘッダーだけでトークンを渡せる(server):
     with urllib.request.urlopen(request, timeout=5) as res:
         assert json.loads(res.read().decode("utf-8"))["manual_override"] is True
     assert json.loads(state_file.read_text(encoding="utf-8"))["manual_override"] is True
+
+
+@pytest.mark.parametrize("token", [
+    TOKEN,
+    'ab"c\\d</script>&e' + "'" + "f?g=h&i=j#k é" + "x" * 16,
+])
+def test_トークンは埋め込む文脈ごとに符号化される(control_module, token):
+    """引用符・バックスラッシュ・"</script>"・URL区切り・非ASCIIを含む値でも、
+    script の文字列リテラルは値そのまま、manifest の href と start_url は同じクエリ値になる。"""
+    page = control_module.render_page(token)
+    script = page[page.index("<script>"):page.index("</script>")]
+    literal = script[script.index("const TOKEN = ") + len("const TOKEN = "):]
+    literal = literal[:literal.index(";\n")]
+    assert json.loads(literal.replace("<\\/", "</")) == token
+    assert page.count("</script>") == 1
+
+    quoted = urllib.parse.quote(token, safe="")
+    href = page[page.index('href="/manifest.webmanifest?token=') + len('href="/manifest.webmanifest?token='):]
+    href = href[:href.index('"')]
+    assert urllib.parse.unquote(html.unescape(href)) == token
+
+    manifest = json.loads(control_module.render_manifest(token))
+    assert manifest["start_url"] == f"/?token={quoted}"
+    assert urllib.parse.parse_qs(urllib.parse.urlparse(manifest["start_url"]).query)["token"] == [token]
 
 
 def test_画面のスクリプトはAPI呼び出しのトークンをURLに載せない(server):

@@ -8,7 +8,7 @@ import socket
 import threading
 from logging.handlers import RotatingFileHandler
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 from typing import Any, Dict
 
 from config_loader import Settings
@@ -99,7 +99,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Tesla充電切替</title>
-<link rel="manifest" href="/manifest.webmanifest?token=__TOKEN__">
+<link rel="manifest" href="/manifest.webmanifest?token=__TOKEN_URL__">
 <link rel="icon" href="/icons/icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png">
 <meta name="theme-color" content="#F2F3F5" media="(prefers-color-scheme: light)">
@@ -269,7 +269,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
 </main>
 
 <script>
-const TOKEN = "__TOKEN__";
+const TOKEN = "__TOKEN_JS__";
 const STATE_LABELS = { Charging: "充電中", Stopped: "停止中", Complete: "満充電", Disconnected: "ケーブル未接続",
                        NoPower: "給電なし", Starting: "開始処理中" };
 let state = null;
@@ -404,7 +404,7 @@ MANIFEST_TEMPLATE: str = """{
   "name": "Tesla充電切替",
   "short_name": "Tesla充電切替",
   "description": "太陽光発電の状況に関わらずフル充電モードを切替えるコントローラー",
-  "start_url": "/?token=__TOKEN__",
+  "start_url": "/?token=__TOKEN_URL__",
   "scope": "/",
   "display": "standalone",
   "background_color": "#0b0f14",
@@ -461,13 +461,42 @@ def status_payload() -> Dict[str, Any]:
     }
 
 
+def _token_for_url(token: str) -> str:
+    """URLのクエリ値としてのトークン。英数字と "_.-~" 以外はすべてパーセント符号化する。"""
+    return quote(token, safe="")
+
+
+def _token_for_js(token: str) -> str:
+    """JavaScript の文字列リテラル（引用符を含む）としてのトークン。
+
+    JSON の文字列リテラルは JavaScript の文字列リテラルとして読める。json.dumps は
+    引用符・バックスラッシュ・制御文字を符号化し、非ASCIIは \\uXXXX にする。
+    "</" を "<\\/" にするのは、値に "</script>" が含まれていても script 要素が
+    そこで閉じないようにするためである。
+    """
+    return json.dumps(token).replace("</", "<\\/")
+
+
 def render_page(token: str) -> str:
-    return PAGE_TEMPLATE.replace("__TOKEN__", html.escape(token, quote=True))
+    """トークンは2つの文脈に埋め込む。文脈ごとに符号化を分ける。
+
+    1. manifest への link 要素の href（HTML属性値の中のURLクエリ）
+       … パーセント符号化してから HTML エスケープ
+    2. script 要素の中の const TOKEN（JavaScript の文字列リテラル）
+       … JSON の文字列リテラルとして符号化。HTML エスケープは script の中では復号されず、
+         "&quot;" がそのまま値になるので使わない。
+
+    トークンは tesla_config.json の設定値であり、ここで防いでいるのは利用者の設定値が
+    画面を壊すことであって、第三者の入力ではない。
+    """
+    url_token = html.escape(_token_for_url(token), quote=True)
+    return PAGE_TEMPLATE.replace("__TOKEN_URL__", url_token).replace('"__TOKEN_JS__"', _token_for_js(token))
 
 
 def render_manifest(token: str) -> str:
-    escaped_token = json.dumps(token)[1:-1]
-    return MANIFEST_TEMPLATE.replace("__TOKEN__", escaped_token)
+    """start_url はJSON文字列の中のURLなので、パーセント符号化したうえでJSON文字列として符号化する。"""
+    url_token = json.dumps(_token_for_url(token))[1:-1]
+    return MANIFEST_TEMPLATE.replace("__TOKEN_URL__", url_token)
 
 
 class ControlHandler(BaseHTTPRequestHandler):
