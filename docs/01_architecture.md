@@ -247,12 +247,8 @@ Debian 12以降は PEP 668 により、システムの Python への `pip` イ�
 | ステータスコード / エラーメッセージ | 発生した原因 | 最終対応策（正解） |
 | --- | --- | --- |
 | **`status=203/EXEC`** | `chmod 600` により、Pythonの仮想環境（`venv`）フォルダ配下のすべての「走査権限（x）」が消失し、`systemd` から実行ファイルを呼び出せなくなった。 | `find` コマンドを使い、ディレクトリに `700`、実行バイナリに `700` をピンポイントで再付与した。 |
-| **`status=1/FAILURE`**<br>
-
-<br>`Error: private key location not provided` | 車両制御用の秘密鍵（TVCP署名鍵）の指定が不足していた、あるいは環境変数がOSの実行ユーザー階層で消失した。 | 引数に公式のフラグである `-key-file` を追加し、フル絶対パスで直接流し込んだ。 |
-| **`status=2/INVALIDARGUMENT`**<br>
-
-<br>`Server TLS private key file` | 良かれと思って引数の名前を綺麗に揃え、`-tls-cert` と記述したため、Goの引数パーサーに弾かれた。 | 引数名を公式の不揃いな仕様通り、`-cert` と `-tls-key` のコンビネーションに戻した。 |
+| **`status=1/FAILURE`**<br>`Error: private key location not provided` | 車両制御用の秘密鍵（TVCP署名鍵）の指定が不足していた、あるいは環境変数がOSの実行ユーザー階層で消失した。 | 引数に公式のフラグである `-key-file` を追加し、フル絶対パスで直接流し込んだ。 |
+| **`status=2/INVALIDARGUMENT`**<br>`Server TLS private key file` | 良かれと思って引数の名前を綺麗に揃え、`-tls-cert` と記述したため、Goの引数パーサーに弾かれた。 | 引数名を公式の不揃いな仕様通り、`-cert` と `-tls-key` のコンビネーションに戻した。 |
 | **`Error: x509: failed to parse private key`** | HTTPS通信用の鍵を入れるべき場所（`-tls-key`）と、車両用の署名鍵を入れるべき場所（`-key-file`）の両方に同じ通信用 `key.pem` を指定してしまった。 | 車両コマンド用の暗号鍵を `tesla_app_key.pem` として完全分離して指定した。 |
 
 ---
