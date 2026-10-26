@@ -1,3 +1,5 @@
+import os
+import stat
 from typing import Any, Callable, Dict
 
 # 設定ファイルの生の値を、使う前に1回だけ検証して定数へ確定させるための入口。
@@ -68,3 +70,30 @@ class Settings:
             )
             return default
         return value
+
+
+def warn_if_accessible_by_others(path: str, on_invalid: Callable[[str], None]) -> bool:
+    """所有者以外に読み書き実行のどれかを許す権限ビットが立っていれば on_invalid へ知らせる。
+
+    対象は認証情報を含むファイル（tesla_config.json・tesla_tokens.json）である。
+    docs/02_deploy.md は chmod 600 を手順にしているが、手順の実行漏れは起動しても
+    どこにも現れなかった。ssh が秘密鍵の権限を起動時に確かめるのと同じ考え方で、
+    ここで確かめてログに残す。起動は止めない（充電制御が止まるほうが被害が大きい）。
+
+    POSIX 以外（Windows の開発機）では st_mode の権限ビットに意味がないため何もしない。
+    ファイルが無い場合も何もしない（無いこと自体は呼び出し側が別に扱う）。
+    戻り値は知らせたかどうかで、テストが見るためにある。
+    """
+    if os.name != "posix":
+        return False
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False
+    if mode & 0o077 == 0:
+        return False
+    on_invalid(
+        f"{path} の権限が {stat.filemode(mode)} で、所有者以外からアクセスできます。"
+        f"chmod 600 {path} を実行してください（docs/02_deploy.md 第4章）。"
+    )
+    return True

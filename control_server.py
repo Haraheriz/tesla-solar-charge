@@ -11,7 +11,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 from typing import Any, Dict
 
-from config_loader import Settings
+from config_loader import Settings, warn_if_accessible_by_others
 from override_state import (
     parse_charge_target,
     read_away_probe,
@@ -51,6 +51,9 @@ if not os.path.exists(CONFIG_FILE):
 
 with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config: Dict[str, Any] = json.load(f)
+
+# CONTROL_TOKEN を含むため、所有者以外から読める権限なら起動時に警告する（充電制御側と同じ検査）。
+warn_if_accessible_by_others(CONFIG_FILE, logger.warning)
 
 # 数値の設定は充電制御側と同じ入口を通す。片方だけ素の config.get に戻ると、
 # 「設定を読む場所は1か所」という前提がまた崩れる。

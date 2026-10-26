@@ -309,22 +309,26 @@ def _load_module(tmp_path, config_overrides=None):
     tesla_tokens.json は .gitignore 済みなので開発機には在ってもCIには無い。
     ここで tmp 上のダミーを指しておかないと、ローカルだけ通ってCIでハングする。
     """
+    # CI用の設定を tmp へ複製して使う（差分があれば当てる）。チェックアウトした
+    # ci_config.json をそのまま指すと、権限が git と umask で決まり（通常 0644）、
+    # 起動時の権限検査（warn_if_accessible_by_others）が ATTENTION を出す。
+    # 本番は docs/02_deploy.md の手順で 0600 であり、テストもその状態で読み込ませる。
+    with open(CI_CONFIG, encoding="utf-8") as f:
+        merged = json.load(f)
     if config_overrides:
-        # 設定値ごとの起動時挙動を見るために、CI用の設定へ差分を当てた一時ファイルを作る。
-        with open(CI_CONFIG, encoding="utf-8") as f:
-            merged = json.load(f)
+        # 設定値ごとの起動時挙動を見るために、CI用の設定へ差分を当てる。
         merged.update(config_overrides)
-        config_path = tmp_path / "config.json"
-        config_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
-        os.environ["TESLA_CONFIG_PATH"] = str(config_path)
-    else:
-        os.environ["TESLA_CONFIG_PATH"] = CI_CONFIG
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+    os.chmod(config_path, 0o600)
+    os.environ["TESLA_CONFIG_PATH"] = str(config_path)
 
     token_file = tmp_path / "tesla_tokens.json"
     token_file.write_text(
         '{"access_token": "dummy", "refresh_token": "dummy", "token_expires_at": 0}',
         encoding="utf-8",
     )
+    os.chmod(token_file, 0o600)
     os.environ["TESLA_TOKEN_PATH"] = str(token_file)
 
     previous_cwd = os.getcwd()

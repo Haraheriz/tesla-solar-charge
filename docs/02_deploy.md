@@ -89,6 +89,12 @@ chmod 700 /home/<username>/tesla-solar-charge/venv/bin/*
 
 ```
 
+`tesla_solar_charger.py` と `control_server.py` は起動時に `tesla_config.json`（充電制御側は `tesla_tokens.json` も）の権限を確かめ、所有者以外に読み書き実行のいずれかを許すビットが立っていれば次の行を出す。起動は止めない。この行が出たら上記の `chmod 600` を実行する。
+
+```text
+[ATTENTION] /home/<username>/tesla-solar-charge/tesla_config.json の権限が -rw-r--r-- で、所有者以外からアクセスできます。chmod 600 /home/<username>/tesla-solar-charge/tesla_config.json を実行してください（docs/02_deploy.md 第4章）。
+```
+
 ---
 
 ## 5. 【Step 4】`tesla_config.json` の設定
