@@ -1292,7 +1292,8 @@ def main() -> None:
             night_note: str = "／夜間休止を迂回中" if not (DAY_START_HOUR <= now.tm_hour < DAY_END_HOUR) else ""
             log_attention(
                 f"フル充電モード継続中（{elapsed_label}{night_note}）："
-                f"太陽光の発電状況に関わらず最大{MAX_AMPS}Aで充電します。"
+                f"太陽光の発電状況に関わらず充電します。停止中から再開するときは{MAX_AMPS}Aを設定し、"
+                f"充電中は車両の現在の電流値を維持します（{MIN_AMPS}A 未満のときは {MIN_AMPS}A に引き上げます）。"
             )
 
         house_power: Optional[int] = None
