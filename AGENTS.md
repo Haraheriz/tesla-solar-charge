@@ -21,11 +21,24 @@ GitHub Actions（`.github/workflows/tests.yml`）が **main への push と PR**
 - **ワークフローの `uses:` はコミットSHAで固定し、行末のコメントに版を書く。** タグ（`@v7` 等）は作者が別のコミットへ付け替えられるため、固定にならない（GitHub Docs「Security hardening for GitHub Actions」）。版の更新は `.github/dependabot.yml` の設定で Dependabot が PR として出す。`requirements-dev.txt` の版も同じく `==` で固定し、Dependabot が更新する。本番の `requests` は `docs/02_deploy.md` の手順で同じ版を入れる。
 - **`claude-review.yml` は `pull_request_target` で起動し、main 時点のワークフローで PR をレビューする。** `anthropics/claude-code-action` は OIDC トークンの workflow_ref をデフォルトブランチと照合し、一致しなければ `Skipping action due to workflow validation` を出してスキップする（チェックは緑の `pass` になるがレビューされていない）。`pull_request` で起動していた頃は、このファイルを変更する PR 自身がこの照合に掛かり、レビューなしでマージするしかなかった。`pull_request_target` は main のワークフローファイルで動くため照合を通り、**`claude-review.yml` を変更する PR も main 時点の設定でレビューされる。**変更後の設定が効くのはマージ後の次の PR からである。
   - `pull_request_target` は base リポジトリの secrets を持って動く。そのため同一リポジトリのブランチからの PR に限り、作業ディレクトリには main を置き、PR の head は `pr-head/` に別に取り出して `--add-dir` で読めるようにしている（アクションの `docs/security.md` が示す構成）。PR のコードを実行する `tests.yml` はこの方式にせず `pull_request` のままにする。
+  - GitHub 側の認証には `github_token`（ジョブの `GITHUB_TOKEN`）を渡す。既定の OIDC トークンの交換は、`pull_request_target` で発行されるトークンを Anthropic のサーバーが `401 Invalid OIDC token` で拒否するため使えない（PR #48・#50）。`github_token` を渡すとアクションは交換を省き、レビューの投稿者は github-actions[bot] になる。
   - レビューの本文で「変更後のファイル」は `pr-head/` 以下、「変更前」はルートにある。レビューがルートだけを読んで「変更が見当たらない」と述べていたら、プロンプトの置き場所の説明を見直す。
 - **`claude-review.yml` は静的読解専用である。** テストを実行する権限を意図的に与えていない。このリポジトリは公開であり、`pytest` はリポジトリ内の任意のコードを実行するため。**テストが走っていないわけではない**（`tests.yml` が同じPRで実行する）。差分の外を読むための `Read` / `Glob` / `Grep` は許可してあるので、レビューが「diff範囲外なので確認していない」と述べていたら、それは権限ではなく指示の問題である。
 - **実機でしか確認できない部分は実機で確認する。** テストが通っても本番のラズパイに反映しなければ挙動は変わらない（デプロイ手順は `docs/02_deploy.md`、運用確認は `docs/03_operation.md`）。
 - **外部通信を伴う関数を追加・変更したら `tests/conftest.py` の差し替えを見直す。** 2026-08-05まで `refresh_tesla_token()` の差し替えが漏れており、トークンリフレッシュを踏むテストがあれば `auth.tesla.com` へ実際にPOSTしていた。差し替え漏れは「テストが落ちる」形では現れず、その経路を通るテストを書いて初めて実APIを呼び出す。
 - **バグ修正では、既存テストが旧挙動を仕様として固定していないか疑う。** 2026-08-05、夜間監視の欠陥（休止入り時の1回で確認を打ち切る）を修正した際、`test_夜間休止入口の停止成功後は再問い合わせしない` がその欠陥を要件として記述しており、正しい修正がテストを壊す形になっていた。修正でテストが落ちたら、実装だけでなくテストの前提も検討対象にすること。
+
+## GitHub の操作
+
+GitHub 上の操作はエージェント（Claude Code）が行う。利用者は依頼と確認を行い、GitHub の画面での操作は原則として行わない。対象は次のとおり。
+
+- ブランチの push、PR の作成と説明文の更新（説明文は英語の本文、区切り線、日本語の本文、帰属行の順。過去の PR と同じ様式）
+- PR の監視と、CI の結果・レビューコメントへの対応
+- PR のマージ
+- デプロイ後のタグの作成と push、同じ内容での Release の作成（`docs/DEPLOY_LOG.md` の方針。タグだけでは GitHub の「Releases」に反映されない）
+- Issue の作成と更新
+
+操作の前に方針を提示し、確認を得てから実行する。マージ、Release の作成、タグの付け替え、履歴の書き換えは、利用者が明示的に指示した場合だけ行う（「マージして」と指示されたらマージし、デプロイ記録の確認後に「リリースして」と指示されたらタグと Release を作る）。
 
 ## API利用料
 
