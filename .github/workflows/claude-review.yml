@@ -15,6 +15,12 @@ name: Claude Code Review
 #   3. head の checkout に認証情報を残さない（persist-credentials: false）
 # の3点を守る。アクション側の docs/security.md が示す構成と同じである。
 # tests.yml は PR のコードを実行するため、この方式にしない（pull_request のまま）。
+#
+# GitHub 側の認証は github_token（ジョブの GITHUB_TOKEN）で行う。既定の経路は OIDC トークンを
+# Anthropic のサーバーで Claude の GitHub App のトークンに交換するが、pull_request_target で
+# 発行される OIDC トークンはそのサーバーに「401 Invalid OIDC token」で拒否された（PR #48・#50、
+# 2026-10-26〜27）。github_token を渡すとアクションは交換を行わない。投稿者は claude[bot] ではなく
+# github-actions[bot] になる。
 on:
   pull_request_target:
     types: [opened, synchronize, ready_for_review]
@@ -28,8 +34,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      issues: read
-      id-token: write
+      issues: write
     steps:
       - name: Checkout base branch
         # ref を指定しないので main（PR の base）が作業ディレクトリになる
@@ -49,6 +54,7 @@ jobs:
         uses: anthropics/claude-code-action@925afb53776cf1a2b738c6bdbed37b4d4000ef13 # v1.0.262
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           track_progress: true
           prompt: |
             この PR をレビューしてください。
