@@ -44,6 +44,8 @@
 
 **自動レビュー：** PR #48 の最終コミットに対する `claude-review` は、`App token exchange failed: 401 Unauthorized - Invalid OIDC token` で失敗し、レビューは実行されなかった。リベース前の同じ内容に対しては成功していた。失敗した実行は、#47 のマージ（13:03:41 UTC）の後の最初の実行である。#47 は `claude-review.yml` の起動条件を `pull_request_target` に変更しており、この変更との関係は確認していない。pytest は成功していた。
 
+**追記（2026-10-27）：** 失敗の原因は、`pull_request_target` で発行される OIDC トークンを Anthropic のトークン交換サーバーが拒否することだった。同じワークフローが `pull_request` では成功していたため、イベントの種類だけが違いである。PR #50 で `github_token`（ジョブの `GITHUB_TOKEN`）を渡して交換を省くようにし、2026-10-27 05:49 UTC にマージした。レビューの投稿者は github-actions[bot] になる。この変更が効くかは、#50 のマージ後に作る最初の PR で確認する。
+
 ---
 
 ## 2026-10-26（要求の締切・トークン処理・設定ファイル権限の警告）
