@@ -266,7 +266,7 @@ def test_相手が閉じた接続の例外は1行で記録する(control_module,
     finally:
         httpd.server_close()
     assert "Traceback" not in capfd.readouterr().err
-    assert logged == [f"192.0.2.1 への応答を送れませんでした。接続は閉じられていました（{type(error).__name__}）。"]
+    assert logged == [f"192.0.2.1 との接続は、要求の処理中に閉じられていました（{type(error).__name__}）。"]
 
 
 def test_それ以外の例外は従来どおりトレースバックを出す(control_module, capfd):
