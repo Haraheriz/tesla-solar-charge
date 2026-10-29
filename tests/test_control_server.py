@@ -235,6 +235,53 @@ def test_ヘッダーを小出しに送り続ける接続は締切で閉じら�
         control_module.REQUEST_DEADLINE_SEC = previous
 
 
+def test_締切で閉じた接続への応答の失敗はトレースバックを出さない(server, control_module, capfd, monkeypatch):
+    """締切で閉じた接続にも、ハンドラーは受信済みの部分で応答を書こうとして BrokenPipeError になる。
+    既定の handle_error() はこれをトレースバックとして標準エラー（journal）へ出していた（DEPLOY_LOG v0.8.0）。"""
+    base, _ = server
+    port = int(base.rsplit(":", 1)[1])
+    logged = []
+    monkeypatch.setattr(control_module.logger, "info", lambda message: logged.append(message))
+    monkeypatch.setattr(control_module, "REQUEST_DEADLINE_SEC", 0.3)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
+        slow.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+        time.sleep(0.6)                               # 締切（0.3秒）を過ぎる
+    status, _ = _get(f"{base}/api/status?token={TOKEN}")
+    assert status == 200
+
+    assert "Traceback" not in capfd.readouterr().err
+    assert any("BrokenPipeError" in message or "ConnectionResetError" in message for message in logged)
+
+
+@pytest.mark.parametrize("error", [BrokenPipeError(32, "Broken pipe"), ConnectionResetError(104, "reset")])
+def test_相手が閉じた接続の例外は1行で記録する(control_module, capfd, monkeypatch, error):
+    logged = []
+    monkeypatch.setattr(control_module.logger, "info", lambda message: logged.append(message))
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    try:
+        try:
+            raise error
+        except OSError:
+            httpd.handle_error(None, ("192.0.2.1", 50000))
+    finally:
+        httpd.server_close()
+    assert "Traceback" not in capfd.readouterr().err
+    assert logged == [f"192.0.2.1 への応答を送れませんでした。接続は閉じられていました（{type(error).__name__}）。"]
+
+
+def test_それ以外の例外は従来どおりトレースバックを出す(control_module, capfd):
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    try:
+        try:
+            raise ValueError("unexpected")
+        except ValueError:
+            httpd.handle_error(None, ("192.0.2.1", 50000))
+    finally:
+        httpd.server_close()
+    err = capfd.readouterr().err
+    assert "Traceback" in err and "ValueError: unexpected" in err
+
+
 def test_画面はトークンをキャッシュと参照元へ渡さない(server):
     base, _ = server
     with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:

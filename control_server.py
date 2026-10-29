@@ -702,6 +702,18 @@ class ControlServer(ThreadingHTTPServer):
         except OSError:
             pass
 
+    def handle_error(self, request: Any, client_address: tuple) -> None:
+        """相手が閉じた接続への書き込みの失敗は1行で記録し、それ以外は既定どおりトレースバックを出す。
+
+        締切で閉じた接続（_abort_request）や、応答の前に切断したスマホへの書き込みは
+        BrokenPipeError か ConnectionResetError になる。既定の handle_error() は例外の種類に
+        かかわらずトレースバックを標準エラーへ出すため、journal で不具合と区別できなくなる。"""
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            logger.info(f"{client_address[0]} への応答を送れませんでした。接続は閉じられていました（{type(error).__name__}）。")
+            return
+        super().handle_error(request, client_address)
+
     def process_request_thread(self, request: Any, client_address: tuple) -> None:
         deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request,))
         deadline.daemon = True
