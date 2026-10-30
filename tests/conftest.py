@@ -151,6 +151,9 @@ class FakeSession:
                 "fast_charger_present": self.world.get("fast_charger_present", False),
                 "fast_charger_type": self.world.get("fast_charger_type", "<invalid>"),
                 "charger_power": self.world.get("charger_power", 0),
+                # 車両が測った電流。ログに出すだけで判定には使わない。
+                # 既定は要求値と同じ値。実際に流れる電流が要求値と異なる状況は actual_amps で再現する。
+                "charger_actual_current": self.world.get("actual_amps", self.world["amps"]),
                 # 目標充電率の判定と、車両側の充電上限の設定に使うフィールド
                 "battery_level": self.world.get("battery_level", 60),
                 "charge_limit_soc": self.world.get("charge_limit_soc", 80),
@@ -204,6 +207,7 @@ class FakeWCSession:
         wc_fail_first         最初のN回の呼び出しだけ失敗させる（再試行の検証用）
         wc_contactor_closed   vitals の contactor_closed（給電中かの判定に使う）
         wc_omit_contactor     True で contactor_closed キー自体が無い
+        wc_vehicle_current_a  vitals の vehicle_current_a（ログ表示のみに使う）
     """
 
     def __init__(self, world):
@@ -241,7 +245,8 @@ class FakeWCSession:
                 # 給電中かの判定に使う。既定は「給電中」。ケーブルが挿さったまま
                 # 充電していない状態を再現するには wc_contactor_closed=False を渡す。
                 "contactor_closed": self.world.get("wc_contactor_closed", True),
-                "vehicle_current_a": 21.3,
+                # ログに出すだけで判定には使わない。数値以外は wc_vehicle_current_a で再現する。
+                "vehicle_current_a": self.world.get("wc_vehicle_current_a", 21.3),
                 "session_energy_wh": 9738.1,
             }
             if self.world.get("wc_omit_contactor"):

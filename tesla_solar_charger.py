@@ -21,6 +21,7 @@ from wall_connector import (
     read_delivering,
     read_serial,
     read_vehicle_connected,
+    read_vehicle_current,
     take_first_attempt_failures,
 )
 
@@ -577,6 +578,7 @@ def describe_fast_charger(charge_state: Dict[str, Any]) -> str:
         f"fast_charger_type={charge_state.get('fast_charger_type')!r} "
         f"fast_charger_brand={charge_state.get('fast_charger_brand')!r} "
         f"charger_power={charge_state.get('charger_power')!r} "
+        f"charger_actual_current={charge_state.get('charger_actual_current')!r} "
         f"conn_charge_cable={charge_state.get('conn_charge_cable')!r}"
     )
 
@@ -625,6 +627,31 @@ def report_wall_connector_retries() -> None:
             f"自宅ウォールコネクターの1回目の読み取りに失敗し、2回目で成功しました（{first_attempt_failures}回）。"
             "頻度が上がるようならLANまたはウォールコネクター側を確認してください。"
         )
+
+
+def describe_measured_current(charge_state: Dict[str, Any]) -> str:
+    """車両とウォールコネクターがそれぞれ測った電流を、演算状況の行に添える文字列にする。
+
+    制御には使わない。表示するだけである。目的は2つある。
+
+    1. 自宅の充電器に繋がっている車が制御対象の車かを、2つの電流の一致で確かめられるかを
+       実データで調べる（来客や2台目のEVの判別。docs/03_operation.md「既知の制約」）
+    2. 制御の基準にしている要求値（charge_current_request）と、実際に流れている電流との
+       差を記録する。車両が要求値より少なく流し続けると、要求値だけが MAX_AMPS へ上がり、
+       余剰が減ったときの絞り込みが遅れる可能性がある（2026-10-30 の検討。未確認）
+
+    ウォールコネクターを読めない・設定していない場合は None と出す。
+    """
+    wc_current: Optional[float] = None
+    if WALL_CONNECTOR_HOST and wall_connector_available:
+        wc_current = read_vehicle_current(
+            WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+        )
+        report_wall_connector_retries()
+    return (
+        f"車両実測: {charge_state.get('charger_actual_current')!r}A"
+        f" / WC実測: {wc_current!r}A"
+    )
 
 
 def home_charger_delivering() -> bool:
@@ -1635,12 +1662,18 @@ def main() -> None:
                 else:
                     # 車両側で手動調整された電流は尊重しつつ、停止閾値未満には落とさない
                     target_amps = max(raw_amps, MIN_AMPS)
-                logger.info(f"演算状況（オーバーライド） → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
+                logger.info(
+                    f"演算状況（オーバーライド） → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})"
+                    f" [{describe_measured_current(charge_state)}]"
+                )
             else:
                 calc_base_amps = raw_amps if charging_status == STATUS_CHARGING else 0
                 adjustment_amps = int(-house_power / 200)
                 target_amps = calc_base_amps + adjustment_amps
-                logger.info(f"演算状況 → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})")
+                logger.info(
+                    f"演算状況 → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})"
+                    f" [{describe_measured_current(charge_state)}]"
+                )
 
             if charging_status == STATUS_CHARGING:
                 if target_amps < MIN_AMPS:

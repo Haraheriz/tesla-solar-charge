@@ -969,6 +969,8 @@ def test_外出先判定のログに急速充電フィールドの実値を残�
     assert res.has_log("fast_charger_present=True", level="ATTENTION")
     assert res.has_log("fast_charger_type='Combo'", level="ATTENTION")
     assert res.has_log("charger_power=90", level="ATTENTION")
+    # 外出先のAC充電（デスティネーションチャージャー等）の記録にも使うため、実電流も残す
+    assert res.has_log("charger_actual_current=21", level="ATTENTION")
 
 
 def test_シリアルが設定と一致しなければ判定を無効化する(run_loop):
@@ -1471,3 +1473,69 @@ def test_attentionレベルが登録されている(run_loop):
     assert res.module.ATTENTION == 25
     assert logging.INFO < res.module.ATTENTION < logging.WARNING
     assert logging.getLevelName(res.module.ATTENTION) == "ATTENTION"
+
+
+def test_演算状況の行に車両とウォールコネクターの実測電流を並べる(run_loop):
+    """来客や2台目のEVを判別できるかを、2つの電流の一致で調べるためのデータを残す。
+
+    あわせて、制御の基準にしている要求値（charge_current_request）と実際に流れている
+    電流の差も読めるようにする。要求値は「車両現在値」として既に同じ行に出ている。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "actual_amps": 18,
+            "wc_vehicle_current_a": 18.4,
+        },
+        start="2026-08-20 12:00:00",
+        budget_sec=1200,
+        house_power=0,
+    )
+    assert res.has_log("車両現在値: 20A"), "要求値の表示が消えている"
+    assert res.has_log("車両実測: 18A / WC実測: 18.4A")
+
+
+def test_ウォールコネクターの電流が数値でなければNoneと出す(run_loop):
+    """ファームウェア更新でフィールドの型が変わっても、誤った数値を出さない。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "wc_vehicle_current_a": True,
+        },
+        start="2026-08-20 12:00:00",
+        budget_sec=1200,
+        house_power=0,
+    )
+    assert res.has_log("WC実測: NoneA")
+
+
+def test_ウォールコネクター未設定なら電流は問い合わせずNoneと出す(run_loop):
+    res = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 20},
+        start="2026-08-20 12:00:00",
+        budget_sec=1200,
+        house_power=0,
+        wall_connector_host="",
+    )
+    assert res.wc_calls == [], "未設定なのにウォールコネクターへ問い合わせている"
+    assert res.has_log("車両実測: 20A / WC実測: NoneA")
+
+
+def test_実測電流は制御に影響しない(run_loop):
+    """実測電流は表示するだけである。要求値と大きく離れていても送るコマンドは変わらない。"""
+    common = {"start": "2026-08-20 12:00:00", "budget_sec": 3600, "house_power": [-1000, 600, -400, 1500]}
+    baseline = run_loop(
+        world={"vehicle_state": "online", "charging_state": "Charging", "amps": 20},
+        **common,
+    )
+    diverged = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "actual_amps": 6,
+            "wc_vehicle_current_a": 47.9,
+        },
+        **common,
+    )
+    assert "set_charging_amps" in baseline.commands, "比較の前提として電流変更が起きていない"
+    assert diverged.commands == baseline.commands
+    assert diverged.world["amps"] == baseline.world["amps"]
