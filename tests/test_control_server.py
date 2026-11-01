@@ -496,6 +496,20 @@ def test_処理中に発火した締切は記録して切断する(control_modul
     ]
 
 
+def test_締切の記録はロックを放してから書く(control_module, monkeypatch):
+    """ログの書き込みが遅いと、ロックの中で書いた場合は同じ接続の後始末が待たされる。
+    記録を書く時点で state.lock が空いていること、切断が済んでいることを確かめる。"""
+    state = control_module._RequestState()
+    request = _FakeRequest()
+    observed = []
+    monkeypatch.setattr(
+        control_module.logger, "info",
+        lambda message: observed.append((state.lock.locked(), request.shutdowns)),
+    )
+    control_module.ControlServer._abort_request(request, ("192.0.2.1", 50000), state)
+    assert observed == [(False, 1)]
+
+
 class _Unprintable:
     def __str__(self):
         raise RuntimeError("str")

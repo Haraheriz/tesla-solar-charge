@@ -888,17 +888,22 @@ class ControlServer(ThreadingHTTPServer):
         Timer.cancel() は発火済みのタイマーを止められない。処理が終わる直前に発火すると、
         終わった要求を「締切で閉じた」と記録してしまう。そのため、処理の完了と締切による切断は
         state.lock の中で判定し、先に来た一方だけを実行する。処理が先に終わっていれば、
-        記録も切断もしない。shutdown() は待たずに返るので、ロックの保持は短い。"""
+        記録も切断もしない。
+
+        ロックの中では判定と切断だけを行い、記録はロックを放してから書く。shutdown() は待たずに
+        返るが、ログの書き込み（ファイルと journal）は待つことがある。ロックの中で書くと、その間
+        同じ接続の後始末（process_request_thread の finally）が待たされる。切断を済ませてから
+        書くので、記録の内容は判定の結果と一致する。"""
         with state.lock:
             if state.finished:
                 return
-            logger.info(
-                f"{client_address[0]} との接続を、処理の締切（{REQUEST_DEADLINE_SEC}秒）を過ぎたため閉じました。"
-            )
             try:
                 request.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
+        logger.info(
+            f"{client_address[0]} との接続を、処理の締切（{REQUEST_DEADLINE_SEC}秒）を過ぎたため閉じました。"
+        )
 
     def handle_error(self, request: Any, client_address: tuple) -> None:
         """相手か締切が閉じた接続での読み書きの失敗は1行で記録し、それ以外は既定どおりトレースバックを出す。
