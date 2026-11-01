@@ -156,6 +156,25 @@ def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
     return WC_DELIVERING if closed else WC_NOT_DELIVERING
 
 
+def read_vehicle_current(host: str, timeout: float = 5.0, attempts: int = 2) -> Optional[float]:
+    """/api/1/vitals の vehicle_current_a を返す。読めなければ None。
+
+    ログへ出して車両側の charger_actual_current と並べるためだけに使い、判定には使わない。
+    自宅の充電器に繋がっている車が制御対象の車かを、2つの電流の一致で確かめられるかを
+    実データで調べる目的である（docs/03_operation.md「既知の制約：複数の車両に対応していない」）。
+    2つの値を同時刻に記録した観測はまだ無く、単相3線での相電流の扱いや測定時刻のずれで
+    値が離れる可能性がある。
+    """
+    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    if vitals is None:
+        return None
+    current = vitals.get("vehicle_current_a")
+    # read_vehicle_connected と同じ理由で型を確かめる。bool は int の派生型なので明示的に除く。
+    if isinstance(current, bool) or not isinstance(current, (int, float)):
+        return None
+    return float(current)
+
+
 def read_serial(host: str, timeout: float = 5.0, attempts: int = 2) -> Optional[str]:
     """/api/1/version の serial_number を返す。読めなければ None。
 
