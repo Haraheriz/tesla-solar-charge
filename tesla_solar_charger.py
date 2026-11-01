@@ -640,7 +640,7 @@ def describe_measured_current(charge_state: Dict[str, Any]) -> str:
        差を記録する。車両が要求値より少なく流し続けると、要求値だけが MAX_AMPS へ上がり、
        余剰が減ったときの絞り込みが遅れる可能性がある（2026-10-30 の検討。未確認）
 
-    ウォールコネクターを読めない・設定していない場合は None と出す。
+    値を読めない・ウォールコネクターを設定していない場合は、単位を付けずに None と出す。
     """
     wc_current: Optional[float] = None
     if WALL_CONNECTOR_HOST and wall_connector_available:
@@ -649,9 +649,19 @@ def describe_measured_current(charge_state: Dict[str, Any]) -> str:
         )
         report_wall_connector_retries()
     return (
-        f"車両実測: {charge_state.get('charger_actual_current')!r}A"
-        f" / WC実測: {wc_current!r}A"
+        f"車両実測: {format_amps(charge_state.get('charger_actual_current'))}"
+        f" / WC実測: {format_amps(wc_current)}"
     )
+
+
+def format_amps(value: Any) -> str:
+    """電流値を単位付きで表す。数値でなければ単位を付けず、値をそのまま表す。
+
+    読めなかった値に単位を付けて「NoneA」と出すと、量でないものを量として書くことになる。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return repr(value)
+    return f"{value}A"
 
 
 def home_charger_delivering() -> bool:

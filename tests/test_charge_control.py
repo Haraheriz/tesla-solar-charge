@@ -1506,7 +1506,8 @@ def test_ウォールコネクターの電流が数値でなければNoneと出�
         budget_sec=1200,
         house_power=0,
     )
-    assert res.has_log("WC実測: NoneA")
+    assert res.has_log("WC実測: None")
+    assert not res.has_log("NoneA"), "読めなかった値に単位が付いている"
 
 
 def test_ウォールコネクター未設定なら電流は問い合わせずNoneと出す(run_loop):
@@ -1518,7 +1519,7 @@ def test_ウォールコネクター未設定なら電流は問い合わせずNo
         wall_connector_host="",
     )
     assert res.wc_calls == [], "未設定なのにウォールコネクターへ問い合わせている"
-    assert res.has_log("車両実測: 20A / WC実測: NoneA")
+    assert res.has_log("車両実測: 20A / WC実測: None")
 
 
 def test_実測電流は制御に影響しない(run_loop):
