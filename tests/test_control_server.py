@@ -282,6 +282,127 @@ def test_それ以外の例外は従来どおりトレースバックを出す(c
     assert "Traceback" in err and "ValueError: unexpected" in err
 
 
+class _Recorder:
+    """logger の info・warning・debug への呼び出しを、水準ごとに集める。"""
+
+    def __init__(self, monkeypatch, logger):
+        self.lines = {"info": [], "warning": [], "debug": []}
+        for level, lines in self.lines.items():
+            monkeypatch.setattr(logger, level, lambda message, lines=lines: lines.append(message))
+
+    def all(self):
+        return [line for lines in self.lines.values() for line in lines]
+
+
+def test_403の応答はINFOで記録しトークンを含めない(server, control_module, monkeypatch):
+    """2026-10-26 19:06〜19:14 の操作は、認証失敗が DEBUG でしか記録されず、成否を確認できなかった。"""
+    base, _ = server
+    log = _Recorder(monkeypatch, control_module.logger)
+    wrong = "x" * 40
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get(f"{base}/api/status?token={wrong}")
+    assert exc.value.code == 403
+
+    assert log.lines["info"] == ["127.0.0.1 からの GET /api/status に 403 を返しました。"]
+    assert not any(wrong in line or TOKEN in line or "token=" in line for line in log.all())
+
+
+def test_画面の読み込みはINFOで記録しトークンを含めない(server, control_module, monkeypatch):
+    base, _ = server
+    log = _Recorder(monkeypatch, control_module.logger)
+    with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:
+        assert res.status == 200
+
+    assert log.lines["info"] == ["127.0.0.1 からの GET / に 200 を返しました。"]
+    assert not any(TOKEN in line for line in log.all())
+
+
+def test_状態APIの成功はINFOに出さない(server, control_module, monkeypatch):
+    """画面は5秒ごとに /api/status を取得する。INFO に出すと画面1つで1日に約17,000行になる。"""
+    base, _ = server
+    log = _Recorder(monkeypatch, control_module.logger)
+    for _ in range(3):
+        status, _ = _get(f"{base}/api/status?token={TOKEN}")
+        assert status == 200
+
+    assert log.lines["info"] == []
+    assert log.lines["debug"] == ["127.0.0.1 からの GET /api/status に 200 を返しました。"] * 3
+    assert not any(TOKEN in line for line in log.all())
+
+
+def test_解釈できない要求行は異常として記録しトークンを伏せる(server, control_module, monkeypatch):
+    """send_error() の記録には要求行がそのまま入る。要求行には ?token= が付くことがある。"""
+    base, _ = server
+    log = _Recorder(monkeypatch, control_module.logger)
+    port = int(base.rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+        conn.sendall(f"GET /api/status?token={TOKEN} extra HTTP/1.1\r\n\r\n".encode("ascii"))
+        assert b" 400 " in conn.recv(1024)
+
+    assert any("異常を検出しました" in line and "token=***" in line for line in log.lines["info"])
+    assert any(line.endswith("に 400 を返しました。") for line in log.lines["info"])
+    assert not any(TOKEN in line for line in log.all())
+
+
+def test_受信の時間切れを記録する(server, control_module, monkeypatch):
+    base, _ = server
+    log = _Recorder(monkeypatch, control_module.logger)
+    monkeypatch.setattr(control_module, "CLIENT_TIMEOUT_SEC", 0.2)
+    port = int(base.rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+        assert conn.recv(1024) == b""                  # 何も送らず、サーバーが閉じるまで待つ
+
+    assert any("異常を検出しました：Request timed out" in line for line in log.lines["info"])
+
+
+def test_締切で閉じた接続を記録する(server, control_module, monkeypatch):
+    base, _ = server
+    log = _Recorder(monkeypatch, control_module.logger)
+    monkeypatch.setattr(control_module, "REQUEST_DEADLINE_SEC", 0.3)
+    port = int(base.rsplit(":", 1)[1])
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as slow:
+        slow.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+        time.sleep(0.6)                               # 締切（0.3秒）を過ぎる
+    status, _ = _get(f"{base}/api/status?token={TOKEN}")
+    assert status == 200
+
+    assert "127.0.0.1 との接続を、処理の締切（0.3秒）を過ぎたため閉じました。" in log.lines["info"]
+
+
+def test_同時接続の上限で閉じた接続をWARNINGで記録する(control_module, monkeypatch):
+    """枠が埋まっている間の要求は応答なしで閉じられる。記録が無いと、操作が効かない原因として判別できない。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    ours, theirs = socket.socketpair()
+    try:
+        for _ in range(control_module.MAX_CLIENTS):
+            assert httpd._slots.acquire(blocking=False)
+        httpd.process_request(ours, ("192.0.2.1", 50000))
+        assert theirs.recv(1024) == b""                # 応答なしで閉じられている
+    finally:
+        theirs.close()
+        httpd.server_close()
+
+    assert log.lines["warning"] == [
+        "同時接続が上限（16件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。"
+    ]
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("/api/status?token=abc&x=1", "/api/status?token=***&x=1"),
+    ("'GET /?TOKEN=abc HTTP/1.1'", "'GET /?TOKEN=*** HTTP/1.1'"),
+    ("a\r\nb\x00", "a\\x0d\\x0ab\\x00"),
+])
+def test_記録用の文字列はトークンと制御文字を伏せる(control_module, text, expected):
+    assert control_module.text_for_log(text) == expected
+
+
+def test_記録用の文字列はトークンの値そのものも伏せ長さを抑える(control_module):
+    assert control_module.text_for_log(f"/x/{TOKEN}") == "/x/***"
+    long_text = "a" * 500
+    assert control_module.text_for_log(long_text) == "a" * control_module.LOG_TEXT_MAX_CHARS + "…"
+
+
 def test_画面はトークンをキャッシュと参照元へ渡さない(server):
     base, _ = server
     with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:

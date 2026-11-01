@@ -4,6 +4,7 @@ import json
 import html
 import hmac
 import logging
+import re
 import socket
 import threading
 from logging.handlers import RotatingFileHandler
@@ -497,6 +498,28 @@ def _token_for_js(token: str) -> str:
     return json.dumps(token).replace("</", "<\\/")
 
 
+# 要求の記録に載せる文字列の上限。相手が送った任意の文字列を記録するため、長さを抑える。
+LOG_TEXT_MAX_CHARS: int = 200
+
+_TOKEN_QUERY_PATTERN = re.compile(r"(token=)[^&\s'\"]*", re.IGNORECASE)
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def text_for_log(text: str) -> str:
+    """相手が送った文字列（パス・要求行）を記録用に整える。
+
+    1. クエリの token= の値と CONTROL_TOKEN そのものを *** に置き換える。
+       要求行には ?token= が付くため、そのまま記録するとログファイルと journal にトークンが残る。
+    2. 制御文字を \\xNN で表す。改行を含む値で偽の記録行を作らせないため。
+    3. LOG_TEXT_MAX_CHARS 文字で切る。
+    """
+    masked = _TOKEN_QUERY_PATTERN.sub(r"\1***", text).replace(CONTROL_TOKEN, "***")
+    escaped = _CONTROL_CHAR_PATTERN.sub(lambda m: f"\\x{ord(m.group()):02x}", masked)
+    if len(escaped) > LOG_TEXT_MAX_CHARS:
+        return escaped[:LOG_TEXT_MAX_CHARS] + "…"
+    return escaped
+
+
 def render_page(token: str) -> str:
     """トークンは2つの文脈に埋め込む。文脈ごとに符号化を分ける。
 
@@ -666,8 +689,43 @@ class ControlHandler(BaseHTTPRequestHandler):
         # 次のポーリング（5秒後）まで古いままになる。
         self._send_json(200, status_payload())
 
+    def _path_for_log(self) -> str:
+        """クエリ文字列を除いたパス。要求行を解釈できなかった要求には path が無いので "-" とする。"""
+        path = getattr(self, "path", None)
+        if not path:
+            return "-"
+        return text_for_log(urlparse(path).path or "-")
+
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        """応答1件を1行で記録する。
+
+        4xx・5xx と画面の読み込み（GET /）は INFO に出す。2026-10-26 19:06〜19:14 に
+        スマホの操作が効かなかった時間帯は、要求が届いていたか、403 だったかを記録から
+        確認できなかった（docs/DEPLOY_LOG.md の v0.8.0）。
+        それ以外の成功（5秒ごとの /api/status、アイコン、Service Worker）は DEBUG のままにする。
+        画面を1つ開いているだけで1日に約17,000行になり、ログファイル（5MB×4本）の
+        保存期間が短くなるため。"""
+        try:
+            status = int(code)
+        except (TypeError, ValueError):
+            status = 0
+        method = text_for_log(getattr(self, "command", None) or "-")
+        path = self._path_for_log()
+        line = f"{self.client_address[0]} からの {method} {path} に {status} を返しました。"
+        if status >= 400 or (method == "GET" and path == "/"):
+            logger.info(line)
+        else:
+            logger.debug(line)
+
+    def log_error(self, format: str, *args: Any) -> None:
+        """http.server が検出した異常（受信の時間切れ、解釈できない要求行など）を INFO で記録する。
+
+        既定の実装は log_message() を通り DEBUG になっていた。メッセージには要求行が
+        含まれることがあるため、text_for_log() でトークンを伏せる。"""
+        logger.info(f"{self.client_address[0]} との通信で異常を検出しました：{text_for_log(format % args)}")
+
     def log_message(self, format: str, *args: Any) -> None:
-        logger.debug(format % args)
+        logger.debug(text_for_log(format % args))
 
 
 class ControlServer(ThreadingHTTPServer):
@@ -686,6 +744,11 @@ class ControlServer(ThreadingHTTPServer):
 
     def process_request(self, request: Any, client_address: tuple) -> None:
         if not self._slots.acquire(blocking=False):
+            # 枠が埋まっている間、スマホの要求は応答なしで閉じられる。記録が無いと、
+            # 「操作が効かない」原因がこの拒否かどうかを後から判別できない。
+            logger.warning(
+                f"同時接続が上限（{MAX_CLIENTS}件）に達しているため、{client_address[0]} からの接続を応答せずに閉じました。"
+            )
             self.shutdown_request(request)
             return
         try:
@@ -695,8 +758,11 @@ class ControlServer(ThreadingHTTPServer):
             raise
 
     @staticmethod
-    def _abort_request(request: Any) -> None:
+    def _abort_request(request: Any, client_address: tuple) -> None:
         """締切を過ぎた接続を閉じる。受信待ちのスレッドは空の読み取りを受けて要求処理を終える。"""
+        logger.info(
+            f"{client_address[0]} との接続を、処理の締切（{REQUEST_DEADLINE_SEC}秒）を過ぎたため閉じました。"
+        )
         try:
             request.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -715,7 +781,7 @@ class ControlServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
     def process_request_thread(self, request: Any, client_address: tuple) -> None:
-        deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request,))
+        deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request, client_address))
         deadline.daemon = True
         deadline.start()
         try:
