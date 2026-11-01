@@ -1589,3 +1589,32 @@ def test_ウォールコネクターが応答しなくても読み直しは1サ�
     )
     # 判定できないときの挙動は変えない：外出先と判定せず、従来どおり制御する
     assert not res.has_log("外出先での充電と判断", level="ATTENTION")
+
+
+def test_車両データを読めないときの給電確認は同じサイクルの値を使わず読み直す(run_loop):
+    """ケーブルを挿した直後のサイクルで、車両データの取得に失敗した場合。
+
+    直前のステータスが Disconnected なので、このサイクルは車両データを読む前に
+    ウォールコネクターを読む（ケーブル未接続の確認）。その時点ではまだ給電しておらず、
+    車両データの取得に失敗した時点では給電が始まっている。保持した値を使うと
+    「給電していない」と判断して600秒待ち、その間の買電を絞り込めない（PR #57 の自動レビューの指摘）。
+    """
+    def on_poll(elapsed, world):
+        if elapsed >= 180 and world["charging_state"] == "Disconnected":
+            world["charging_state"] = "Charging"
+            world["charge_state_http"] = 408
+            # ケーブル未接続の確認では給電前、取得失敗後の確認では給電中
+            world["wc_contactor_sequence"] = [False, True]
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 46,
+            "wc_vehicle_connected": True,
+        },
+        start="2026-08-22 07:01:00",
+        budget_sec=900,
+        house_power=9579,
+        on_poll=on_poll,
+    )
+    assert res.has_log("3分待機します", level="WARNING")
+    assert not res.has_log("10分待機します", level="WARNING")

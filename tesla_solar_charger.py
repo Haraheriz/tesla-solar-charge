@@ -1533,7 +1533,11 @@ def main() -> None:
                 #
                 # 判定は自宅のウォールコネクターで行う。課金がなく、宅内LANで28msで
                 # 読める。読めない場合・給電していない場合は従来どおり10分待つ。
-                wait_sec = 180 if home_charger_delivering() else 600
+                #
+                # このサイクルで既に読んだ値は使わず、読み直す。車両を起こしたサイクルでは
+                # 保持した値が起動後の待機の分（約60〜70秒）古く、その間に給電が始まって
+                # いれば180秒で済む待機を600秒にしてしまう（PR #57 の自動レビューの指摘）。
+                wait_sec = 180 if home_charger_delivering(fresh=True) else 600
                 logger.warning(
                     f"車両データ取得エラー (HTTP {s_res.status_code})。{wait_sec // 60}分待機します。"
                 )

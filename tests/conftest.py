@@ -208,6 +208,7 @@ class FakeWCSession:
         wc_contactor_closed   vitals の contactor_closed（給電中かの判定に使う）
         wc_omit_contactor     True で contactor_closed キー自体が無い
         wc_vehicle_current_a  vitals の vehicle_current_a（ログ表示のみに使う）
+        wc_contactor_sequence vitals を読むたびに先頭から取り出す contactor_closed の列
     """
 
     def __init__(self, world):
@@ -249,6 +250,10 @@ class FakeWCSession:
                 "vehicle_current_a": self.world.get("wc_vehicle_current_a", 21.3),
                 "session_energy_wh": 9738.1,
             }
+            # 呼ばれるたびに先頭から取り出す。同じサイクルの中で給電が始まる状況の再現に使う。
+            sequence = self.world.get("wc_contactor_sequence")
+            if sequence:
+                vitals["contactor_closed"] = sequence.pop(0)
             if self.world.get("wc_omit_contactor"):
                 del vitals["contactor_closed"]
             if not self.world.get("wc_omit_field"):
