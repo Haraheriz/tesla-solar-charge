@@ -403,6 +403,9 @@ def run_loop(tmp_path):
         # 取り直し回数はモジュール共有のカウンタである。前のテストの分を持ち越すと
         # 「取り直しで復帰した」ログが別のテストで出てしまう。
         wall_connector.first_attempt_failure_count = 0
+        # 同じサイクルで読んだ vitals もモジュール共有である。main() はループの先頭で捨てるが、
+        # 前のテストの値がループに入る前の経路で使われないよう、ここでも捨てておく。
+        wall_connector.begin_cycle()
 
         start_epoch = real_time.mktime(real_time.strptime(start, "%Y-%m-%d %H:%M:%S"))
         module.time = FakeTime(start_epoch, budget_sec)
