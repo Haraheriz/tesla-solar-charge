@@ -49,6 +49,29 @@
 
 ---
 
+## 2026-11-02（充電電流の実測値の記録）
+
+**タグ：** `v0.9.0`（PR #53・#57。上の項の PR #55・#56 と同じタグ）
+
+**内容：** `tesla_solar_charger.py` と `wall_connector.py` を変更した。演算状況の行の末尾に、車両が測った電流（`charge_state` の `charger_actual_current`）と、自宅のウォールコネクターが測った電流（`/api/1/vitals` の `vehicle_current_a`）を `[車両実測: 16A / WC実測: 16.3A]` の形で追記する。2つの値は判定にも制御にも使わない。ウォールコネクターの `/api/1/vitals` は1サイクルに1回だけ読み、同じサイクルの接続判定・送電判定・電流の記録はその値を使う。充電停止後の待機ループと、408 の後の待機時間の判定では、そのつど読み直す。
+
+**理由：** 別の車が自宅の充電器を使っているとき、2つの値の関係で制御対象の車と判別できるかを、実データで調べるためである（`docs/03_operation.md`「電流の一致で判別できるかを調べている」）。2つの値を同時刻に記録した観測はまだ無い。同じ行の「車両現在値」は要求値（`charge_current_request`）であり、車両が要求値より少ない電流しか流さない状態では、要求値だけが上がって絞り込みが遅れる可能性がある。これはコードから導いた推論で未確認であり、この記録で確認する。PR #53 の時点では1サイクルに vitals を最大3回読んでいたため、PR #57 で1回にした。
+
+**作業内容：**
+- 転送元は、開発機で `git fetch origin main` の後に `git show origin/main:<ファイル名>`（main `208f758`）で取り出したファイルである。開発機の作業ツリーに未コミットの変更（`README.md`）があるため、`git pull` は行っていない。sha256 は `tesla_solar_charger.py` が `4552909b…`、`wall_connector.py` が `e6b330d0…` である
+- 転送前のラズパイ上の版は、`tesla_solar_charger.py` が v0.8.1 のコミット `9299273` の版（`c9b495e5…`）、`wall_connector.py` が 2026-08-23 のコミット `ec932b7` の版（`331d372d…`）と sha256 が一致した。旧版は `backup-20261102/` に `cp -p` で保存した
+- 2ファイルを SCP で転送し、sha256 の一致を確認した。権限を 600 にして、venv の python で `py_compile` を通した
+- `tesla-charger.service` だけを再起動した（02:55:50）。夜間休止中で、車両は `offline` だった。`tesla-override.service` と `tesla-proxy.service` はこの作業では再起動していない
+- 開発機の SSH は、最初に PATH で先に見つかる Git for Windows の ssh を使い、7回の接続がすべて `Permission denied (publickey)` になった。`ssh -v` では、ラズパイが公開鍵を受け付けた後、パスフレーズを入力できずに署名できていなかった。この ssh は Windows の ssh-agent を使わないためである。`C:\Windows\System32\OpenSSH\ssh.exe`・`scp.exe` は ssh-agent 経由で認証でき、以降の作業はこちらで行った
+
+**結果：**
+- `tesla-charger.service` は `active`、`NRestarts=0`。起動ログでトークンの読み込み、車両の捕捉、ウォールコネクターの照合（シリアル E4A25003000840）、目標充電率 42% を確認し、夜間休止に入った。ERROR・Traceback は無い
+- main で `python -m pytest`: 220件通過
+
+**未確認：** 夜間休止中のため、演算状況の行はまだ出ていない。日中の充電中に、`車両実測` と `WC実測` が数値で出るかを確認する。Fleet API の応答に `charger_actual_current` が含まれるかは、実機ではまだ確認していない。含まれない場合、`車両実測` は単位を付けずに `None` と出る。
+
+---
+
 ## 2026-11-01（締切で閉じた接続のトレースバックを1行のログに変更）
 
 **タグ：** `v0.8.2`（PR #52）
