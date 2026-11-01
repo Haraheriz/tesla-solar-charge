@@ -21,6 +21,31 @@
 
 ---
 
+## 2026-11-01（締切で閉じた接続のトレースバックを1行のログに変更）
+
+**タグ：** `v0.8.2`（PR #52）
+
+**内容：** `control_server.py` の `ControlServer.handle_error()` を書き換えた。要求の処理中に接続が閉じられていたことで起きる `BrokenPipeError` と `ConnectionResetError` は、接続元のアドレスと例外名を INFO の1行で記録する。それ以外の例外は、従来どおりトレースバックを標準エラーへ出力する。
+
+**理由：** v0.8.0 の項に未対応として記録した件の対応である。15秒の締切で接続を閉じても、ハンドラーは受信済みの部分で要求を解釈し、403 を書き込む。この書き込みが `BrokenPipeError` になる。`socketserver.BaseServer.handle_error()` は例外の種類にかかわらずトレースバックを出力するため（[Python 公式ドキュメント](https://docs.python.org/3/library/socketserver.html#socketserver.BaseServer.handle_error)）、journal では想定内の切断が不具合と同じ形で記録されていた。
+
+**作業内容：**
+- 転送前（14:42:15）に、ラズパイ上の `control_server.py` の sha256 が v0.8.1 の版（`c057c876…`）と一致することを確認した。3サービスとも `active`、手動オーバーライドは無効だった
+- 開発機の作業ツリーに未コミットの変更（`README.md`）があったため、`git pull` を行わず、`git show 5636f6b:control_server.py` で取り出したファイルを転送元にした
+- `control_server.py` だけをSCPで転送し（14:42:24）、sha256（`615515321100836c…`）の一致を確認した。権限を 600 にして `py_compile` を通した
+- `tesla-override.service` だけを再起動した（14:42:33）。`tesla-charger.service`（起動 10-26 22:06:15）と `tesla-proxy.service` の起動時刻は変わっていない
+- 転送と再起動は、開発機の Claude Code の自動判定が本番デプロイとして実行を止めたため、利用者の許可（2026-11-01）を得てから行った
+
+**結果：**
+- `tesla-override.service` は `active`・`running`、`NRestarts=0`。journal に ATTENTION・WARNING・Traceback は無い
+- `X-Control-Token` ヘッダーを付けた `/api/status` は200で、`X-Frame-Options: DENY` と `Content-Security-Policy: frame-ancestors 'none'` を返す
+- 締切の経路（14:43:51）：ヘッダーを3秒ごとに1行ずつ送り続けた接続は、15.0秒で閉じられた。14:44:06 に journal へ次の1行が出て、Traceback は出なかった
+  `[INFO] 127.0.0.1 との接続は、要求の処理中に閉じられていました（BrokenPipeError）。`
+- 受信が止まった接続（14:43:07）：ヘッダーの途中で送信を止めた接続は、5.0秒で閉じられ、journal には何も出なかった。1回の受信ごとの上限（`CLIENT_TIMEOUT_SEC`、5秒）が締切より先に適用され、`http.server` がこの打ち切りを DEBUG で記録するためである。この経路では `handle_error()` は呼ばれない
+- main で `python -m pytest`: 183件通過
+
+---
+
 ## 2026-10-26（フル充電モードの電流に関する文言の修正）
 
 **タグ：** `v0.8.1`（PR #48）
