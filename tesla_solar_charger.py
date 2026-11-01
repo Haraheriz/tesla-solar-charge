@@ -14,6 +14,7 @@ from config_loader import Settings, warn_if_accessible_by_others
 from override_state import read_away_probe_state, read_charge_target, read_override_state, write_override
 from vehicle_status import load_vehicle_status, save_vehicle_status
 from wall_connector import (
+    begin_cycle as begin_wall_connector_cycle,
     WC_CONNECTED,
     WC_DELIVERING,
     WC_NOT_CONNECTED,
@@ -664,16 +665,19 @@ def format_amps(value: Any) -> str:
     return f"{value}A"
 
 
-def home_charger_delivering() -> bool:
+def home_charger_delivering(fresh: bool = False) -> bool:
     """自宅の充電器がいま給電しているか。判定できなければ False を返す。
 
     False を返すのは、判断できないときに従来の挙動を変えないためである。
     この関数は待機の長さを短くしてよいかの判断にしか使わない。
+
+    fresh=True は、このサイクルで既に読んだ値を使わずに読み直す。待機中に給電が
+    始まったかを確かめる場合に使う（同じサイクルの値では変化を検知できない）。
     """
     if not WALL_CONNECTOR_HOST or not wall_connector_available:
         return False
     state: str = read_delivering(
-        WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+        WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS, fresh=fresh
     )
     report_wall_connector_retries()
     return state == WC_DELIVERING
@@ -899,7 +903,7 @@ def wait_watching_home_charger(total_sec: int) -> None:
         step = min(TARGET_WAIT_CHECK_SEC, total_sec - waited)
         time.sleep(step)
         waited += step
-        if waited < total_sec and home_charger_delivering():
+        if waited < total_sec and home_charger_delivering(fresh=True):
             logger.info("待機中に自宅の充電器が給電を始めました。待機を打ち切って確認します。")
             return
 
@@ -1075,6 +1079,10 @@ def main() -> None:
             night_last_observation = message
 
     while True:
+        # ウォールコネクターの vitals は1サイクルに1回だけ読み、同じサイクルの判定で使い回す
+        # （wall_connector._cycle_vitals を参照）。continue する経路が多いため、
+        # 各経路で捨てるのではなく、サイクルの先頭の1か所で捨てる。
+        begin_wall_connector_cycle()
         now = time.localtime()
         manual_override, override_updated_at = read_override_state()
         # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
@@ -1525,7 +1533,11 @@ def main() -> None:
                 #
                 # 判定は自宅のウォールコネクターで行う。課金がなく、宅内LANで28msで
                 # 読める。読めない場合・給電していない場合は従来どおり10分待つ。
-                wait_sec = 180 if home_charger_delivering() else 600
+                #
+                # このサイクルで既に読んだ値は使わず、読み直す。車両を起こしたサイクルでは
+                # 保持した値が起動後の待機の分（約60〜70秒）古く、その間に給電が始まって
+                # いれば180秒で済む待機を600秒にしてしまう（PR #57 の自動レビューの指摘）。
+                wait_sec = 180 if home_charger_delivering(fresh=True) else 600
                 logger.warning(
                     f"車両データ取得エラー (HTTP {s_res.status_code})。{wait_sec // 60}分待機します。"
                 )

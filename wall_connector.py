@@ -39,6 +39,17 @@ WC_NOT_DELIVERING: str = "not_delivering"
 # になる。このモジュールはログを持たない方針なので、数だけ持って呼び出し側に渡す。
 first_attempt_failure_count: int = 0
 
+# 同じ制御サイクルの中で読んだ /api/1/vitals の結果。begin_cycle() で捨てる。
+#
+# 1サイクルの中で、ケーブル未接続の確認・目標充電率の確認・外出先判定・実測電流の表示が
+# それぞれ vitals を読んでいた（最大4回）。ウォールコネクターが応答しないと1回あたり
+# 最大 timeout × attempts（既定5秒×2回）待つため、合計で最大40秒、電流変更が
+# 古い余剰の値に基づくことになる（PR #53 の自動レビューの指摘）。
+# 読めなかった結果（None）も保持する。同じサイクルで読み直しても回復する見込みは低く、
+# 待ち時間だけが重なるため。
+_VITALS_NOT_READ: object = object()
+_cycle_vitals: Any = _VITALS_NOT_READ
+
 # tesla_solar_charger.py の proxy_session / cloud_session とは用途が異なるため独立させる。
 # proxy_session は自己署名証明書をピン留めしたTesla プロキシ専用であり、
 # 宅内の平文HTTPとは無関係。テストではこの変数ごと差し替える。
@@ -98,6 +109,24 @@ def _get_json(host: str, path: str, timeout: float, attempts: int = 2) -> Option
     return None
 
 
+def begin_cycle() -> None:
+    """制御サイクルの始まりに呼ぶ。前のサイクルで読んだ vitals を捨てる。"""
+    global _cycle_vitals
+    _cycle_vitals = _VITALS_NOT_READ
+
+
+def _read_vitals(host: str, timeout: float, attempts: int, fresh: bool) -> Optional[Dict[str, Any]]:
+    """このサイクルの vitals を返す。未読か fresh=True なら読み、結果を保持する。
+
+    fresh=True は、同じサイクルの中で状態の変化を見たい場合（待機中に給電の開始を
+    確かめる等）に使う。読み直した結果で保持している値も置き換える。
+    """
+    global _cycle_vitals
+    if fresh or _cycle_vitals is _VITALS_NOT_READ:
+        _cycle_vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    return _cycle_vitals
+
+
 def take_first_attempt_failures() -> int:
     """前回の呼び出し以降に「1回目に失敗し2回目で成功した」回数を返し、カウンタを0に戻す。
 
@@ -110,12 +139,12 @@ def take_first_attempt_failures() -> int:
     return count
 
 
-def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
+def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2, fresh: bool = False) -> str:
     """自宅のウォールコネクターに車両が接続されているかを3値で返す。
 
     例外は外に出さない。判定できない場合はすべて WC_UNKNOWN になる。
     """
-    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    vitals = _read_vitals(host, timeout, attempts, fresh)
     if vitals is None:
         return WC_UNKNOWN
 
@@ -129,7 +158,7 @@ def read_vehicle_connected(host: str, timeout: float = 5.0, attempts: int = 2) -
     return WC_CONNECTED if connected else WC_NOT_CONNECTED
 
 
-def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
+def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2, fresh: bool = False) -> str:
     """自宅の充電器がいま給電しているかを3値で返す。
 
     vehicle_connected（ケーブルが挿さっているか）とは別の問いである。ケーブルが
@@ -144,7 +173,7 @@ def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
     電流が0のまま給電中でありうるためで、この判定は「給電しているかもしれない」と扱うほうが安い
     （誤ってそう扱っても vehicle_data 1回分の課金で済む）。
     """
-    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    vitals = _read_vitals(host, timeout, attempts, fresh)
     if vitals is None:
         return WC_UNKNOWN
 
@@ -156,7 +185,7 @@ def read_delivering(host: str, timeout: float = 5.0, attempts: int = 2) -> str:
     return WC_DELIVERING if closed else WC_NOT_DELIVERING
 
 
-def read_vehicle_current(host: str, timeout: float = 5.0, attempts: int = 2) -> Optional[float]:
+def read_vehicle_current(host: str, timeout: float = 5.0, attempts: int = 2, fresh: bool = False) -> Optional[float]:
     """/api/1/vitals の vehicle_current_a を返す。読めなければ None。
 
     ログへ出して車両側の charger_actual_current と並べるためだけに使い、判定には使わない。
@@ -165,7 +194,7 @@ def read_vehicle_current(host: str, timeout: float = 5.0, attempts: int = 2) -> 
     2つの値を同時刻に記録した観測はまだ無く、単相3線での相電流の扱いや測定時刻のずれで
     値が離れる可能性がある。
     """
-    vitals = _get_json(host, "/api/1/vitals", timeout, attempts)
+    vitals = _read_vitals(host, timeout, attempts, fresh)
     if vitals is None:
         return None
     current = vitals.get("vehicle_current_a")

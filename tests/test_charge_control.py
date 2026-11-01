@@ -1540,3 +1540,81 @@ def test_実測電流は制御に影響しない(run_loop):
     assert "set_charging_amps" in baseline.commands, "比較の前提として電流変更が起きていない"
     assert diverged.commands == baseline.commands
     assert diverged.world["amps"] == baseline.world["amps"]
+
+
+def _cycles(res):
+    return sum(1 for m in res.messages() if "定期チェック開始" in m)
+
+
+def test_ウォールコネクターのvitalsは1サイクルに1回だけ読む(run_loop):
+    """同じサイクルで、目標充電率の確認・外出先判定・実測電流の表示がそれぞれ vitals を読んでいた。
+
+    ウォールコネクターが応答しないと1回あたり最大10秒（5秒×2回）待つため、読む回数が
+    そのまま電流変更の遅れになる（PR #53 の自動レビューの指摘）。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            # 目標充電率の確認（sync_charge_limit）でも vitals を読む状況にする
+            "charge_target_soc": 90,
+        },
+        start="2026-08-20 12:00:00",
+        budget_sec=1800,
+        house_power=0,
+    )
+    cycles = _cycles(res)
+    vitals_calls = [url for url in res.wc_calls if url.endswith("/api/1/vitals")]
+    assert cycles >= 5
+    assert len(vitals_calls) <= cycles, f"{cycles}サイクルで vitals を{len(vitals_calls)}回読んでいる"
+
+
+def test_ウォールコネクターが応答しなくても読み直しは1サイクル1回分に収まる(run_loop):
+    """読めなかった結果も同じサイクルの中で使い回す。読み直しても待ち時間が重なるだけのため。"""
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "charge_target_soc": 90,
+            "wc_raise": True,
+        },
+        start="2026-08-20 12:00:00",
+        budget_sec=1800,
+        house_power=0,
+    )
+    cycles = _cycles(res)
+    vitals_calls = [url for url in res.wc_calls if url.endswith("/api/1/vitals")]
+    attempts = res.module.WALL_CONNECTOR_ATTEMPTS
+    assert cycles >= 5
+    assert len(vitals_calls) <= cycles * attempts, (
+        f"{cycles}サイクルで vitals を{len(vitals_calls)}回試みている（1サイクルあたり上限{attempts}回）"
+    )
+    # 判定できないときの挙動は変えない：外出先と判定せず、従来どおり制御する
+    assert not res.has_log("外出先での充電と判断", level="ATTENTION")
+
+
+def test_車両データを読めないときの給電確認は同じサイクルの値を使わず読み直す(run_loop):
+    """ケーブルを挿した直後のサイクルで、車両データの取得に失敗した場合。
+
+    直前のステータスが Disconnected なので、このサイクルは車両データを読む前に
+    ウォールコネクターを読む（ケーブル未接続の確認）。その時点ではまだ給電しておらず、
+    車両データの取得に失敗した時点では給電が始まっている。保持した値を使うと
+    「給電していない」と判断して600秒待ち、その間の買電を絞り込めない（PR #57 の自動レビューの指摘）。
+    """
+    def on_poll(elapsed, world):
+        if elapsed >= 180 and world["charging_state"] == "Disconnected":
+            world["charging_state"] = "Charging"
+            world["charge_state_http"] = 408
+            # ケーブル未接続の確認では給電前、取得失敗後の確認では給電中
+            world["wc_contactor_sequence"] = [False, True]
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Disconnected", "amps": 46,
+            "wc_vehicle_connected": True,
+        },
+        start="2026-08-22 07:01:00",
+        budget_sec=900,
+        house_power=9579,
+        on_poll=on_poll,
+    )
+    assert res.has_log("3分待機します", level="WARNING")
+    assert not res.has_log("10分待機します", level="WARNING")

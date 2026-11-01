@@ -208,6 +208,7 @@ class FakeWCSession:
         wc_contactor_closed   vitals の contactor_closed（給電中かの判定に使う）
         wc_omit_contactor     True で contactor_closed キー自体が無い
         wc_vehicle_current_a  vitals の vehicle_current_a（ログ表示のみに使う）
+        wc_contactor_sequence vitals を読むたびに先頭から取り出す contactor_closed の列
     """
 
     def __init__(self, world):
@@ -249,6 +250,10 @@ class FakeWCSession:
                 "vehicle_current_a": self.world.get("wc_vehicle_current_a", 21.3),
                 "session_energy_wh": 9738.1,
             }
+            # 呼ばれるたびに先頭から取り出す。同じサイクルの中で給電が始まる状況の再現に使う。
+            sequence = self.world.get("wc_contactor_sequence")
+            if sequence:
+                vitals["contactor_closed"] = sequence.pop(0)
             if self.world.get("wc_omit_contactor"):
                 del vitals["contactor_closed"]
             if not self.world.get("wc_omit_field"):
@@ -403,6 +408,9 @@ def run_loop(tmp_path):
         # 取り直し回数はモジュール共有のカウンタである。前のテストの分を持ち越すと
         # 「取り直しで復帰した」ログが別のテストで出てしまう。
         wall_connector.first_attempt_failure_count = 0
+        # 同じサイクルで読んだ vitals もモジュール共有である。main() はループの先頭で捨てるが、
+        # 前のテストの値がループに入る前の経路で使われないよう、ここでも捨てておく。
+        wall_connector.begin_cycle()
 
         start_epoch = real_time.mktime(real_time.strptime(start, "%Y-%m-%d %H:%M:%S"))
         module.time = FakeTime(start_epoch, budget_sec)
