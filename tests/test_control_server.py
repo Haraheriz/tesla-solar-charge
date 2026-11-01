@@ -403,6 +403,141 @@ def test_記録用の文字列はトークンの値そのものも伏せ長さ�
     assert control_module.text_for_log(long_text) == "a" * control_module.LOG_TEXT_MAX_CHARS + "…"
 
 
+def _refuse(httpd, address):
+    """枠が埋まった状態で1接続を渡し、応答なしで閉じられたことを確かめる。"""
+    ours, theirs = socket.socketpair()
+    try:
+        httpd.process_request(ours, (address, 50000))
+        assert theirs.recv(1024) == b""
+    finally:
+        theirs.close()
+
+
+def test_上限による拒否は間隔内は数えるだけにし枠が空いたらまとめて記録する(control_module, monkeypatch):
+    """拒否1件ごとに1行を書くと、枠を埋め続ける接続があるとき control_server.log から
+    調べたい時間帯の記録を押し出す（PR #55 の自動レビュー）。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    try:
+        for _ in range(control_module.MAX_CLIENTS):
+            assert httpd._slots.acquire(blocking=False)
+        for address in ["192.0.2.1", "192.0.2.2", "192.0.2.1", "192.0.2.3", "192.0.2.2"]:
+            _refuse(httpd, address)
+        assert log.lines["warning"] == [
+            "同時接続が上限（16件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。"
+        ]
+
+        # 枠が1つ空き、次の接続を受け付けた時点で、数えた4件を1行で記録する
+        httpd._slots.release()
+        ours, theirs = socket.socketpair()
+        theirs.close()                                  # 要求を送らずに閉じた接続として処理させる
+        httpd.process_request(ours, ("192.0.2.9", 50000))
+    finally:
+        httpd.server_close()
+
+    assert log.lines["warning"][1:] == [
+        "同時接続の上限による拒否が終わりました。前回の記録の後に、同じ理由で 4 件を閉じていました"
+        "（相手：192.0.2.2、192.0.2.1、192.0.2.3）。"
+    ]
+
+
+def test_上限による拒否は間隔を過ぎたら数えた件数とともに記録する(control_module, monkeypatch):
+    log = _Recorder(monkeypatch, control_module.logger)
+    clock = [1000.0]
+    monkeypatch.setattr(control_module, "time", type("Clock", (), {"monotonic": staticmethod(lambda: clock[0])}))
+    monkeypatch.setattr(control_module, "REFUSAL_LOG_MAX_ADDRESSES", 2)
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    try:
+        for _ in range(control_module.MAX_CLIENTS):
+            assert httpd._slots.acquire(blocking=False)
+        _refuse(httpd, "192.0.2.1")
+        for address in ["192.0.2.2", "192.0.2.3", "192.0.2.4"]:
+            clock[0] += 10.0
+            _refuse(httpd, address)
+        clock[0] += 31.0                                # 最初の記録から61秒
+        _refuse(httpd, "192.0.2.5")
+    finally:
+        httpd.server_close()
+
+    assert log.lines["warning"] == [
+        "同時接続が上限（16件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。",
+        "同時接続が上限（16件）に達しているため、192.0.2.5 からの接続を応答せずに閉じました。"
+        "前回の記録の後に、同じ理由で 3 件を閉じていました（相手：192.0.2.2、192.0.2.3 ほか）。",
+    ]
+
+
+class _FakeRequest:
+    def __init__(self):
+        self.shutdowns = 0
+
+    def shutdown(self, how):
+        self.shutdowns += 1
+
+
+def test_処理が終わった後に発火した締切は記録も切断もしない(control_module, monkeypatch):
+    """Timer.cancel() は発火済みのタイマーを止められない。終わった要求を「締切で閉じた」と記録しない。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    state = control_module._RequestState()
+    state.finished = True
+    request = _FakeRequest()
+    control_module.ControlServer._abort_request(request, ("192.0.2.1", 50000), state)
+    assert request.shutdowns == 0
+    assert log.all() == []
+
+
+def test_処理中に発火した締切は記録して切断する(control_module, monkeypatch):
+    log = _Recorder(monkeypatch, control_module.logger)
+    state = control_module._RequestState()
+    request = _FakeRequest()
+    control_module.ControlServer._abort_request(request, ("192.0.2.1", 50000), state)
+    assert request.shutdowns == 1
+    assert log.lines["info"] == [
+        f"192.0.2.1 との接続を、処理の締切（{control_module.REQUEST_DEADLINE_SEC}秒）を過ぎたため閉じました。"
+    ]
+
+
+class _Unprintable:
+    def __str__(self):
+        raise RuntimeError("str")
+
+    def __repr__(self):
+        raise RuntimeError("repr")
+
+
+@pytest.mark.parametrize("format_, args, expected", [
+    ("100% の要求", (), "100% の要求"),                                    # 引数が無ければ展開しない
+    ("%s と %s", ("a",), "書式を展開できませんでした：'%s と %s' ('a')"),        # 引数の数が合わない
+    ("%d 件", ("a",), "書式を展開できませんでした：'%d 件' ('a')"),              # 型が合わない
+    ("%(x)s", {"y": 1}, "書式を展開できませんでした：'%(x)s' ('y')"),            # KeyError
+    ("%s", (_Unprintable(),), "書式を展開できませんでした：'%s' (<表示できない値>)"),  # str() も repr() も失敗する
+])
+def test_記録の組み立てはどう呼ばれても例外を出さない(control_module, format_, args, expected):
+    assert control_module.format_for_log(format_, args) == expected
+
+
+def test_記録の組み立てでも要求行のトークンを伏せる(control_module):
+    assert control_module.format_for_log("code %d, message %s", (400, f"Bad request syntax ('GET /?token={TOKEN} x')")) \
+        == "code 400, message Bad request syntax ('GET /?token=*** x')"
+
+
+QUOTED_TOKEN = "a'b\"c\\d" + "z" * 30
+
+
+@pytest.mark.parametrize("text", [
+    repr(f"GET /x/{QUOTED_TOKEN} HTTP/1.1"),                               # repr() でエスケープされた形
+    repr(f"GET /?token={QUOTED_TOKEN}"),                                    # 値の途中と直後に引用符がある
+    f"/x/{urllib.parse.quote(QUOTED_TOKEN, safe='')}",                      # URL 符号化した形
+    f"/x/{QUOTED_TOKEN}",                                                   # 生の形
+])
+def test_引用符やバックスラッシュを含むトークンもどの形でも伏せる(control_module, monkeypatch, text):
+    monkeypatch.setattr(control_module, "_TOKEN_FORMS", control_module._token_forms(QUOTED_TOKEN))
+    assert "z" * 30 not in control_module.text_for_log(text)
+
+
+def test_改行として扱われうる文字をエスケープする(control_module):
+    assert control_module.text_for_log("a\x85b\u2028c\u2029d\x9be\x7f") == "a\\x85b\\u2028c\\u2029d\\x9be\\x7f"
+
+
 def test_画面はトークンをキャッシュと参照元へ渡さない(server):
     base, _ = server
     with urllib.request.urlopen(f"{base}/?token={TOKEN}", timeout=5) as res:

@@ -7,10 +7,11 @@ import logging
 import re
 import socket
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from config_loader import Settings, warn_if_accessible_by_others
 from override_state import (
@@ -99,6 +100,11 @@ MAX_CLIENTS: int = 16
 # 16接続でそれを行うと、正規の要求は枠が空くまで応答なしで閉じられる。
 # スマートフォンは要求を数ミリ秒で送り終えるため、15秒を超える要求は正規の利用では起きない。
 REQUEST_DEADLINE_SEC: float = 15.0
+
+# 同時接続の上限による拒否は、直前の記録からこの秒数の間は数えるだけにし、まとめて記録する。
+# まとめの行に載せる相手の IP は最大 REFUSAL_LOG_MAX_ADDRESSES 件とし、メモリと行の長さを抑える。
+REFUSAL_LOG_INTERVAL_SEC: float = 60.0
+REFUSAL_LOG_MAX_ADDRESSES: int = 16
 
 ICONS_DIR: str = os.path.join(BASE_DIR, "icons")
 
@@ -501,23 +507,87 @@ def _token_for_js(token: str) -> str:
 # 要求の記録に載せる文字列の上限。相手が送った任意の文字列を記録するため、長さを抑える。
 LOG_TEXT_MAX_CHARS: int = 200
 
-_TOKEN_QUERY_PATTERN = re.compile(r"(token=)[^&\s'\"]*", re.IGNORECASE)
-_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+# token= の値は & か空白までを伏せる。引用符では止めない。repr() を通した要求行では、
+# 値の途中の引用符がエスケープされたり、値の直後に閉じ引用符が付いたりするため。
+_TOKEN_QUERY_PATTERN = re.compile(r"(token=)[^&\s]*", re.IGNORECASE)
+
+# 表示する道具によって改行として扱われる文字。ASCII の制御文字、DEL、C1 制御文字（U+0085 を含む）、
+# 行区切り（U+2028）、段落区切り（U+2029）。
+_LINE_BREAKING_PATTERN = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _token_forms(token: str) -> tuple:
+    """記録の中にトークンが現れうる形。長いものから順に置き換える。
+
+    - 生の形（X-Control-Token や、符号化しないクライアントのクエリ）
+    - URL 符号化した形（画面と manifest はこの形でクエリに載せる。_token_for_url）
+    - repr() でエスケープされた形（http.server は要求行を %r で記録に渡す。
+      バックスラッシュは常に2つになり、引用符は文字列全体の内容によってエスケープされる）
+    """
+    escaped = token.replace("\\", "\\\\")
+    forms = {
+        token,
+        quote(token, safe=""),
+        escaped,
+        escaped.replace("'", "\\'"),
+        escaped.replace('"', '\\"'),
+    }
+    return tuple(sorted((form for form in forms if form), key=len, reverse=True))
+
+
+def _escape_line_breaking(match: "re.Match") -> str:
+    code = ord(match.group())
+    return f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}"
 
 
 def text_for_log(text: str) -> str:
     """相手が送った文字列（パス・要求行）を記録用に整える。
 
-    1. クエリの token= の値と CONTROL_TOKEN そのものを *** に置き換える。
+    1. クエリの token= の値と、トークンそのもの（_token_forms の各形）を *** に置き換える。
        要求行には ?token= が付くため、そのまま記録するとログファイルと journal にトークンが残る。
-    2. 制御文字を \\xNN で表す。改行を含む値で偽の記録行を作らせないため。
-    3. LOG_TEXT_MAX_CHARS 文字で切る。
+       キーを %74oken= のように符号化した形は対象外である（アプリはこの形で送らない）。
+       その場合も、値がトークンの生の形か URL 符号化した形であれば、2番目の置換で伏せる。
+    2. 改行として扱われうる文字を \\xNN・\\uNNNN で表す。偽の記録行を作らせないため。
+    3. LOG_TEXT_MAX_CHARS 文字で切る。切るのは伏せた後なので、トークンの一部が残ることはない。
     """
-    masked = _TOKEN_QUERY_PATTERN.sub(r"\1***", text).replace(CONTROL_TOKEN, "***")
-    escaped = _CONTROL_CHAR_PATTERN.sub(lambda m: f"\\x{ord(m.group()):02x}", masked)
+    masked = _TOKEN_QUERY_PATTERN.sub(r"\1***", text)
+    for form in _TOKEN_FORMS:
+        masked = masked.replace(form, "***")
+    escaped = _LINE_BREAKING_PATTERN.sub(_escape_line_breaking, masked)
     if len(escaped) > LOG_TEXT_MAX_CHARS:
         return escaped[:LOG_TEXT_MAX_CHARS] + "…"
     return escaped
+
+
+def _safe_repr(value: Any) -> str:
+    try:
+        return repr(value)
+    except Exception:
+        return "<表示できない値>"
+
+
+def format_for_log(format_: Any, args: tuple) -> str:
+    """log_error()・log_message() の書式と引数から、記録する1行を作る。どう呼ばれても例外を出さない。
+
+    http.server は書式を固定の文字列にし、相手が送った文字列は引数で渡している。ただしこれは
+    標準ライブラリの書き方による性質で、保証ではない。相手の文字列が書式に入ると、% を含む
+    要求行1つで TypeError・ValueError・KeyError を起こせる。記録の処理で例外が出ると、
+    その接続は応答なしで切断され、トレースバックが journal に出る。
+
+    - 引数が無ければ % で展開せず、書式をそのまま使う
+    - 展開に失敗したら、書式と引数を repr() で並べる（repr() の失敗も受ける）
+    - BaseException（KeyboardInterrupt など）は受けない
+    最後に text_for_log() を通す。トークンは引数の側から入るため、組み立てた後に伏せる。
+    """
+    try:
+        text = str(format_) % args if args else str(format_)
+    except Exception:
+        text = f"書式を展開できませんでした：{_safe_repr(format_)} " \
+               f"({', '.join(_safe_repr(arg) for arg in args)})"
+    return text_for_log(text)
+
+
+_TOKEN_FORMS: tuple = _token_forms(CONTROL_TOKEN)
 
 
 def render_page(token: str) -> str:
@@ -721,11 +791,21 @@ class ControlHandler(BaseHTTPRequestHandler):
         """http.server が検出した異常（受信の時間切れ、解釈できない要求行など）を INFO で記録する。
 
         既定の実装は log_message() を通り DEBUG になっていた。メッセージには要求行が
-        含まれることがあるため、text_for_log() でトークンを伏せる。"""
-        logger.info(f"{self.client_address[0]} との通信で異常を検出しました：{text_for_log(format % args)}")
+        含まれることがあるため、format_for_log() の中の text_for_log() でトークンを伏せる。"""
+        logger.info(f"{self.client_address[0]} との通信で異常を検出しました：{format_for_log(format, args)}")
 
     def log_message(self, format: str, *args: Any) -> None:
-        logger.debug(text_for_log(format % args))
+        logger.debug(format_for_log(format, args))
+
+
+class _RequestState:
+    """1接続の処理が終わったかどうか。締切のタイマーと処理のスレッドが lock の中で読み書きする。"""
+
+    __slots__ = ("lock", "finished")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.finished = False
 
 
 class ControlServer(ThreadingHTTPServer):
@@ -735,6 +815,11 @@ class ControlServer(ThreadingHTTPServer):
 
     def __init__(self, server_address: tuple, handler_class: type) -> None:
         self._slots = threading.BoundedSemaphore(MAX_CLIENTS)
+        # 上限による拒否の記録を間引くための状態。_refusal_lock の中でだけ読み書きする。
+        self._refusal_lock = threading.Lock()
+        self._refusal_logged_at: Optional[float] = None
+        self._refused_count = 0
+        self._refused_addresses: List[str] = []
         super().__init__(server_address, handler_class)
 
     def get_request(self) -> tuple:
@@ -742,15 +827,54 @@ class ControlServer(ThreadingHTTPServer):
         request.settimeout(CLIENT_TIMEOUT_SEC)
         return request, client_address
 
+    def _record_refusal(self, address: str) -> None:
+        """上限による拒否を記録する。直前の記録から REFUSAL_LOG_INTERVAL_SEC 秒以内の拒否は数えるだけにする。
+
+        枠が埋まっている間、スマホの要求は応答なしで閉じられる。記録が無いと、「操作が効かない」
+        原因がこの拒否かどうかを後から判別できない。一方で、拒否1件ごとに1行を書くと、枠を
+        埋め続ける接続があるとき1秒に数十行になり、control_server.log（5MB×4本）から調べたい
+        時間帯の記録を押し出す。数えた拒否は、次に記録するとき（間隔を過ぎた拒否か、枠が空いて
+        受け付けた接続）に1行にまとめる。"""
+        with self._refusal_lock:
+            now = time.monotonic()
+            if self._refusal_logged_at is not None and now - self._refusal_logged_at < REFUSAL_LOG_INTERVAL_SEC:
+                self._refused_count += 1
+                if address not in self._refused_addresses and len(self._refused_addresses) < REFUSAL_LOG_MAX_ADDRESSES:
+                    self._refused_addresses.append(address)
+                return
+            summary = self._take_refusal_summary()
+            self._refusal_logged_at = now
+        logger.warning(
+            f"同時接続が上限（{MAX_CLIENTS}件）に達しているため、{address} からの接続を応答せずに閉じました。{summary}"
+        )
+
+    def _take_refusal_summary(self) -> str:
+        """数えた拒否の件数と相手を1文にし、数え直す。_refusal_lock の中で呼ぶ。"""
+        if not self._refused_count:
+            return ""
+        addresses = "、".join(self._refused_addresses)
+        if self._refused_count > len(self._refused_addresses) and len(self._refused_addresses) >= REFUSAL_LOG_MAX_ADDRESSES:
+            addresses += " ほか"
+        summary = f"前回の記録の後に、同じ理由で {self._refused_count} 件を閉じていました（相手：{addresses}）。"
+        self._refused_count = 0
+        self._refused_addresses = []
+        return summary
+
+    def _flush_refusals(self) -> None:
+        """枠が空いて接続を受け付けたとき、数えたまま記録していない拒否を1行で記録する。"""
+        with self._refusal_lock:
+            summary = self._take_refusal_summary()
+            if summary:
+                self._refusal_logged_at = None
+        if summary:
+            logger.warning(f"同時接続の上限による拒否が終わりました。{summary}")
+
     def process_request(self, request: Any, client_address: tuple) -> None:
         if not self._slots.acquire(blocking=False):
-            # 枠が埋まっている間、スマホの要求は応答なしで閉じられる。記録が無いと、
-            # 「操作が効かない」原因がこの拒否かどうかを後から判別できない。
-            logger.warning(
-                f"同時接続が上限（{MAX_CLIENTS}件）に達しているため、{client_address[0]} からの接続を応答せずに閉じました。"
-            )
+            self._record_refusal(client_address[0])
             self.shutdown_request(request)
             return
+        self._flush_refusals()
         try:
             super().process_request(request, client_address)
         except Exception:
@@ -758,15 +882,23 @@ class ControlServer(ThreadingHTTPServer):
             raise
 
     @staticmethod
-    def _abort_request(request: Any, client_address: tuple) -> None:
-        """締切を過ぎた接続を閉じる。受信待ちのスレッドは空の読み取りを受けて要求処理を終える。"""
-        logger.info(
-            f"{client_address[0]} との接続を、処理の締切（{REQUEST_DEADLINE_SEC}秒）を過ぎたため閉じました。"
-        )
-        try:
-            request.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+    def _abort_request(request: Any, client_address: tuple, state: "_RequestState") -> None:
+        """締切を過ぎた接続を閉じる。受信待ちのスレッドは空の読み取りを受けて要求処理を終える。
+
+        Timer.cancel() は発火済みのタイマーを止められない。処理が終わる直前に発火すると、
+        終わった要求を「締切で閉じた」と記録してしまう。そのため、処理の完了と締切による切断は
+        state.lock の中で判定し、先に来た一方だけを実行する。処理が先に終わっていれば、
+        記録も切断もしない。shutdown() は待たずに返るので、ロックの保持は短い。"""
+        with state.lock:
+            if state.finished:
+                return
+            logger.info(
+                f"{client_address[0]} との接続を、処理の締切（{REQUEST_DEADLINE_SEC}秒）を過ぎたため閉じました。"
+            )
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def handle_error(self, request: Any, client_address: tuple) -> None:
         """相手か締切が閉じた接続での読み書きの失敗は1行で記録し、それ以外は既定どおりトレースバックを出す。
@@ -781,12 +913,15 @@ class ControlServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
     def process_request_thread(self, request: Any, client_address: tuple) -> None:
-        deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request, client_address))
+        state = _RequestState()
+        deadline = threading.Timer(REQUEST_DEADLINE_SEC, self._abort_request, args=(request, client_address, state))
         deadline.daemon = True
         deadline.start()
         try:
             super().process_request_thread(request, client_address)
         finally:
+            with state.lock:
+                state.finished = True
             deadline.cancel()
             self._slots.release()
 
