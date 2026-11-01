@@ -60,7 +60,7 @@
 **作業内容：**
 - 転送元は、開発機で `git fetch origin main` の後に `git show origin/main:<ファイル名>`（main `208f758`）で取り出したファイルである。開発機の作業ツリーに未コミットの変更（`README.md`）があるため、`git pull` は行っていない。sha256 は `tesla_solar_charger.py` が `4552909b…`、`wall_connector.py` が `e6b330d0…` である
 - 転送前のラズパイ上の版は、`tesla_solar_charger.py` が v0.8.1 のコミット `9299273` の版（`c9b495e5…`）、`wall_connector.py` が 2026-08-23 のコミット `ec932b7` の版（`331d372d…`）と sha256 が一致した。旧版は `backup-20261102/` に `cp -p` で保存した
-- 2ファイルを SCP で転送し、sha256 の一致を確認した。権限を 600 にして、venv の python で `py_compile` を通した
+- 2ファイルを SCP で転送し、ラズパイ上の sha256 が `208f758` の版（上記の値）と一致することを確認した。権限を 600 にして、venv の python で `py_compile` を通した
 - `tesla-charger.service` だけを再起動した（02:55:50）。夜間休止中で、車両は `offline` だった。`tesla-override.service` と `tesla-proxy.service` はこの作業では再起動していない
 - 開発機の SSH は、最初に PATH で先に見つかる Git for Windows の ssh を使い、7回の接続がすべて `Permission denied (publickey)` になった。`ssh -v` では、ラズパイが公開鍵を受け付けた後、パスフレーズを入力できずに署名できていなかった。この ssh は Windows の ssh-agent を使わないためである。`C:\Windows\System32\OpenSSH\ssh.exe`・`scp.exe` は ssh-agent 経由で認証でき、以降の作業はこちらで行った
 
