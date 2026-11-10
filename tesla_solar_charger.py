@@ -225,6 +225,9 @@ if TERMINAL_WAKE_SUPPRESS_SEC <= TERMINAL_BACKOFF_SEC:
     )
     TERMINAL_WAKE_SUPPRESS_SEC = TERMINAL_BACKOFF_SEC * 6
 
+# 起動時に選んだ VIN が車両リストから消えている。状態が変わったときだけログに出す。
+controlled_vin_missing: bool = False
+
 # 充電している場所の判定結果。「自宅である」という値は持たない。
 # 自宅の充電器に何かが繋がっていることは分かっても、それが制御対象の車である保証が
 # ないため（ローカルAPIはVINを返さない）。断定できるのは「外出先である」ことだけで、
@@ -776,6 +779,32 @@ def classify_charging_site(charge_state: Dict[str, Any]) -> Tuple[str, str]:
     return SITE_UNKNOWN, ""
 
 
+def find_controlled_vehicle(vehicles: list, vin: str) -> Optional[Dict[str, Any]]:
+    """起動時に選んだ VIN の要素を返す。VIN が空ならリストの先頭を返す。
+
+    先頭は毎サイクル上書きしない。リストの順序が変わっても、コマンドの宛先を変えない。
+    """
+    if not vin:
+        return vehicles[0] if vehicles else None
+    for vehicle in vehicles:
+        if isinstance(vehicle, dict) and vehicle.get("vin") == vin:
+            return vehicle
+    return None
+
+
+def note_controlled_vehicle(present: bool, vin: str) -> None:
+    """選んだ VIN がリストにあるかが変わったときだけログする。"""
+    global controlled_vin_missing
+    if present:
+        if controlled_vin_missing:
+            logger.info(f"VIN {vin} が車両リストに戻りました。")
+            controlled_vin_missing = False
+        return
+    if not controlled_vin_missing:
+        log_attention(f"起動時に選んだ VIN {vin} が車両リストにありません。コマンドは送りません。")
+        controlled_vin_missing = True
+
+
 def wake_up_vehicle(vin: str, headers: Dict[str, str]) -> bool:
     logger.info("車両へ起動命令（Wake Up）を送信します...")
     url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/wake_up"
@@ -1169,7 +1198,10 @@ def main() -> None:
                     headers["Authorization"] = f"Bearer {access_token}"
                 v_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles", headers)
                 vehicles = v_res.json().get("response") or [] if v_res.status_code == 200 else []
-                vehicle = vehicles[0] if vehicles else {}
+                vehicle = find_controlled_vehicle(vehicles, vin)
+                vin_absent = bool(vin) and bool(vehicles) and vehicle is None
+                if vehicle is None:
+                    vehicle = {}
                 vehicle_state = str(vehicle.get("state", ""))
 
                 # 判定に使う事実を、分岐に入る前に確定させる。elif の条件式の中で
@@ -1197,6 +1229,11 @@ def main() -> None:
                         and time.time() >= next_disconnected_probe_at
                     )
 
+                if vin_absent:
+                    note_controlled_vehicle(False, vin)
+                elif vehicle:
+                    note_controlled_vehicle(True, vin)
+
                 if v_res.status_code == 401:
                     # 日中ループと同じ扱いにする。クライアント側の期限推定より早く
                     # サーバー側で失効した場合（クロックずれ・失効の前倒し等）、
@@ -1207,6 +1244,9 @@ def main() -> None:
                     logger.warning(
                         f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
                     )
+                elif vin_absent:
+                    # 通信失敗ではない。選んだ VIN が戻るまでコマンドを送らない。
+                    night_stop_failures = 0
                 elif not vehicle:
                     # 車両リストが取れないうちは「充電していない」と断定できないため、次の巡回で再試行する。
                     night_stop_failures += 1
@@ -1241,7 +1281,6 @@ def main() -> None:
                         "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
                     )
                 else:
-                    vin = vehicle.get("vin", "") or vin
                     s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
                     if s_res.status_code == 401:
                         token_expires_at = 0.0
@@ -1413,8 +1452,12 @@ def main() -> None:
             if not vehicles:
                 return 180
 
-            vin = (vehicles[0] or {}).get("vin", "") or vin
-            vehicle_state: str = str((vehicles[0] or {}).get("state", ""))
+            chosen = find_controlled_vehicle(vehicles, vin)
+            if chosen is None:
+                note_controlled_vehicle(False, vin)
+                return 180
+            note_controlled_vehicle(True, vin)
+            vehicle_state: str = str(chosen.get("state", ""))
             power_label: str = "オーバーライド中（太陽光は無視）" if manual_override else f"{house_power} W"
             logger.info(f"車両状態: 『{vehicle_state}』 (RemoE平均電力: {power_label})")
 
