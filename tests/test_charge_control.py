@@ -1044,6 +1044,27 @@ def test_未知のステータスでは安全側の動作としてコマンド�
     assert res.has_log("未知の充電ステータス", level="WARNING")
 
 
+def test_日中の401は180秒待ってから取り直す(run_loop):
+    """日中の vehicle_data が 401 のとき、次の取得まで 180 秒以上空くこと。
+
+    待機が無いと、更新に成功したあとも 401 が続くあいだ課金対象の取得を繰り返す。
+    仮想時計は sleep でしか進まない。待機が無ければ pytest の timeout に掛かる。
+    """
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 20,
+            "charge_state_http": 401,
+        },
+        start="2026-08-22 10:00:00",
+        budget_sec=600,
+        house_power=-5000,
+    )
+    assert res.vehicle_data_calls >= 2
+    assert res.vehicle_data_calls <= 5, f"周期を守れていない（vehicle_data {res.vehicle_data_calls}回）"
+    assert res.has_log("3分後に再取得します", level="WARNING")
+    assert all(sec >= 180 for sec in res.module.time.slept)
+
+
 def test_responseが無い応答でも制御周期を守る(run_loop):
     """HTTP 200 で本文に response が無いとき、ログも待機も無く回り続けないこと。
 
