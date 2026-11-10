@@ -13,7 +13,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
 from typing import Any, Dict, List, Optional
 
-from config_loader import Settings, warn_if_accessible_by_others
+from config_loader import DAY_END_HOUR, DAY_START_HOUR, Settings, warn_if_accessible_by_others
 from override_state import (
     parse_charge_target,
     read_snapshot,
@@ -62,6 +62,7 @@ settings = Settings(config, logger.warning)
 # 0 は「OSに空きポートを割り当てさせる」を意味してしまい、
 # スマホのホーム画面から開けなくなる。下限を1にする。
 CONTROL_PORT: int = settings.integer("CONTROL_PORT", 8090, minimum=1)
+MAX_AMPS: int = settings.integer("MAX_AMPS", 48, minimum=1)
 control_token_value: Any = config.get("CONTROL_TOKEN")
 
 
@@ -272,7 +273,7 @@ PAGE_TEMPLATE: str = """<!DOCTYPE html>
     <p class="note" id="limit-note"></p>
     <button type="button" class="btn" id="set-target" disabled>設定済み</button>
     <button type="button" class="btn text" id="clear-target" hidden>目標充電率を解除する</button>
-    <p class="fine">目標以上になったら止め、目標より下では止めません。最大電流（48A）のときは1%程度超えて止まることがあります。</p>
+    <p class="fine" id="overshoot-note"></p>
   </section>
 
   <section aria-labelledby="mode-label">
@@ -375,11 +376,14 @@ function render() {
   const full = state.manual_override;
   el("mode-solar").setAttribute("aria-pressed", String(!full));
   el("mode-full").setAttribute("aria-pressed", String(full));
+  const hh = (hour) => String(hour).padStart(2, "0") + ":00";
+  el("overshoot-note").textContent =
+    `目標以上になったら止め、目標より下では止めません。最大電流（${state.max_amps}A）のときは1%程度超えて止まることがあります。`;
   el("mode-note").textContent = !full
-    ? "余剰電力の範囲で充電します。夜間（18:00〜7:00）は充電しません。"
+    ? `余剰電力の範囲で充電します。夜間（${hh(state.day_end_hour)}〜${hh(state.day_start_hour)}）は充電しません。`
     : (target !== null && level !== null && level >= target
       ? "現在の充電率が目標充電率以上のため、次の確認（最大3分後）でフル充電モードを解除し、太陽光追従に戻ります。"
-      : "太陽光に関係なく充電します。夜間も充電します。停止中から再開するときは48Aを設定し、充電中は車両の現在の電流値を維持します。" +
+      : `太陽光に関係なく充電します。夜間も充電します。停止中から再開するときは${state.max_amps}Aを設定し、充電中は車両の現在の電流値を維持します。` +
         (target !== null ? `目標充電率 ${target}% に達したら停止し、太陽光追従に戻ります。` : "車両側の上限まで充電します。"));
   el("probe").setAttribute("aria-checked", String(state.away_probe));
 }
@@ -483,6 +487,9 @@ def status_payload() -> Dict[str, Any]:
         "manual_override": snap["manual_override"],
         "away_probe": snap["away_probe"],
         "charge_target_soc": snap["charge_target_soc"],
+        "max_amps": MAX_AMPS,
+        "day_start_hour": DAY_START_HOUR,
+        "day_end_hour": DAY_END_HOUR,
         "vehicle": {key: vehicle.get(key) for key in VEHICLE_STATUS_KEYS},
     }
 

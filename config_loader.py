@@ -2,6 +2,11 @@ import os
 import stat
 from typing import Any, Callable, Dict
 
+# 日中として制御する時刻。この範囲の外は夜間休止。設定ファイルには無い。
+# 充電制御と操作画面が同じ値を使う。
+DAY_START_HOUR: int = 7
+DAY_END_HOUR: int = 18
+
 # 設定ファイルの生の値を、使う前に1回だけ検証して定数へ確定させるための入口。
 #
 # 以前は、下限の検査が「その値を使う関数の中」に散っていた。

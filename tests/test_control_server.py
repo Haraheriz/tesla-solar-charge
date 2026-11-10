@@ -118,6 +118,9 @@ def test_状態は各スイッチと目標充電率と車両の状態を返す(s
     assert body["manual_override"] is False
     assert body["away_probe"] is False
     assert body["charge_target_soc"] is None
+    assert body["max_amps"] == 48
+    assert body["day_start_hour"] == 7
+    assert body["day_end_hour"] == 18
     # 制御ループがまだ車両を読んでいない状態。キーは揃っていて値が None になる。
     assert body["vehicle"]["battery_level"] is None
 
@@ -641,6 +644,9 @@ def test_画面のスクリプトはAPI呼び出しのトークンをURLに載�
     script = page[page.index("<script>"):page.index("</script>")]
     assert '"X-Control-Token": TOKEN' in script
     assert "?token=" not in script
+    assert "state.max_amps" in script
+    assert "state.day_end_hour" in script
+    assert "48Aを設定" not in script
 
 
 def test_BOM付き設定ファイルでも起動できる(tmp_path):
