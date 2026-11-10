@@ -1140,6 +1140,213 @@ def main() -> None:
             logger.info(message)
             night_last_observation = message
 
+    def run_night_cycle() -> int:
+        """夜間休止の1周。戻り値は次に time.sleep する秒。待機は呼び出し側が行う。
+
+        夜間の判定と待機秒は、この関数へ移す前と同じである。
+        """
+        nonlocal night_stop_failures, night_stop_exhausted, night_last_observation
+        nonlocal prev_charging_status, vin, next_disconnected_probe_at
+        global token_expires_at
+
+        logger.info("--- 定期チェック開始 ---")
+        logger.info(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
+
+        # 夜間帯は「毎サイクル」充電の有無を確認する。充電中のまま休止に入ると
+        # 余剰の有無に関わらず朝まで系統充電が続いてしまうため。
+        #
+        # 以前は休止に入った最初の1回で確認を打ち切っていた。そのため確認より後に
+        # 始まった充電（車両側のスケジュール充電、帰宅後のケーブル接続、こちらの停止後の
+        # 車両側からの再開）は朝まで完全に無検知だった。実際 2026-07-31 18:07 に
+        # 停止を確認したあと夜間に充電が再開し、08-01 09:40 に満充電で復帰している。
+        #
+        # 毎サイクル呼び出すのは車両リスト（/api/1/vehicles）だけで、これは車両を起こさない。
+        # asleep/offline の車両は充電していないため、そこで打ち切れば
+        # 「寝ている車を起こさない」という設計思想（Insomnia Defense）は維持できる。
+        if not night_stop_exhausted:
+            try:
+                if time.time() > token_expires_at and refresh_tesla_token():
+                    headers["Authorization"] = f"Bearer {access_token}"
+                v_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles", headers)
+                vehicles = v_res.json().get("response") or [] if v_res.status_code == 200 else []
+                vehicle = vehicles[0] if vehicles else {}
+                vehicle_state = str(vehicle.get("state", ""))
+
+                # 判定に使う事実を、分岐に入る前に確定させる。elif の条件式の中で
+                # 評価してしまうと、「記録スイッチのために読んだのか」を後段の
+                # 観測ログへ渡せない。ログにその理由が出ないと、課金された夜を
+                # 後から見て理由を追えなくなる。
+                #
+                # 車両リストが取れなかった場合（401 を含む）は vehicle が空になるため、
+                # ウォールコネクターへの問い合わせも行わない。
+                cable_absent: bool = False
+                probe_read: bool = False
+                if vehicle and vehicle_state not in ("asleep", "offline"):
+                    cable_absent = (
+                        prev_charging_status == STATUS_DISCONNECTED
+                        # ウォールコネクターの確認を、記録の判定より先に行う。日中側と同じ順序である。
+                        # 後回しにすると、記録がONで読み直し時刻に達したサイクルでは
+                        # 一度も問い合わせず、read_wall_connector() が担っている
+                        # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
+                        # 追加で発生するのは宅内LANへのGET 1回（無課金・28ms）である。
+                        and read_wall_connector() == WC_NOT_CONNECTED
+                    )
+                    probe_read = (
+                        cable_absent
+                        and away_probe
+                        and time.time() >= next_disconnected_probe_at
+                    )
+
+                if v_res.status_code == 401:
+                    # 日中ループと同じ扱いにする。クライアント側の期限推定より早く
+                    # サーバー側で失効した場合（クロックずれ・失効の前倒し等）、
+                    # これを単なる取得失敗として扱うと同じ失効トークンで上限まで
+                    # 失敗し、その夜の監視が止まる。
+                    token_expires_at = 0.0
+                    night_stop_failures += 1
+                    logger.warning(
+                        f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
+                    )
+                elif not vehicle:
+                    # 車両リストが取れないうちは「充電していない」と断定できないため、次の巡回で再試行する。
+                    night_stop_failures += 1
+                    logger.warning(
+                        f"夜間休止中の車両リスト取得に失敗しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再確認します。"
+                    )
+                elif vehicle_state in ("asleep", "offline"):
+                    # 就寝中の車両は充電していない。充電が始まれば車両は自らオンラインになるため、
+                    # 次の巡回で検知できる。
+                    night_stop_failures = 0
+                    log_night_observation(
+                        f"車両は『{vehicle_state}』のため充電していないと判断し、そのまま休止します。"
+                    )
+                elif cable_absent and not probe_read:
+                    # 日中と同じ根拠である。自宅の充電器に何も繋がっていなければ、この車は
+                    # 自宅で充電していない。夜間ループが車両データを読むのは自宅の系統充電を
+                    # 止めるためであり、止めるべきものが無いなら読む理由も無い。
+                    #
+                    # 夜間帯は13時間・78サイクルあるため、外出先で車が起きたまま夜を跨ぐと
+                    # 約¥22を費やす。日中側（2026-08-22 の実績で約¥6.6）より大きい。
+                    #
+                    # night_stop_failures は消費せず0へ戻す。通信の失敗ではなく、
+                    # 「充電していないと確認できた」側だからである（asleep/offline と同じ扱い）。
+                    #
+                    # ケーブルが挿し直されれば vehicle_connected が true に戻り、次の巡回で
+                    # 通常の経路に入る。ウォールコネクターを読み取れない場合も成立せず、
+                    # 従来どおり毎サイクル読む。
+                    night_stop_failures = 0
+                    # 車両は起きている。車両側の充電上限を目標に合わせたまま外出させない（R4）。
+                    restore_charge_limit_without_reading(vin, headers, vehicle_status)
+                    log_night_observation(
+                        "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
+                    )
+                else:
+                    vin = vehicle.get("vin", "") or vin
+                    s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
+                    if s_res.status_code == 401:
+                        token_expires_at = 0.0
+                        night_stop_failures += 1
+                        logger.warning(
+                            f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
+                        )
+                    elif s_res.status_code != 200:
+                        night_stop_failures += 1
+                        logger.warning(
+                            f"夜間休止中の充電状態取得に失敗しました (HTTP {s_res.status_code})（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再確認します。"
+                        )
+                    else:
+                        night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
+                        record_vehicle_observation(vehicle_status, night_charge_state)
+                        sync_charge_limit(vin, headers, night_charge_state, charge_target, vehicle_status)
+                        night_status = str(night_charge_state.get("charging_state") or "")
+                        prev_charging_status = night_status
+                        if night_status == STATUS_DISCONNECTED:
+                            # 次に読み直してよい時刻。日中側と同じ基準で更新しておかないと、
+                            # 夜をまたいだ時点で外出先の充電記録の間隔がずれる。
+                            next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
+                        night_site, night_site_reason = (
+                            classify_charging_site(night_charge_state)
+                            if night_status == STATUS_CHARGING else (SITE_UNKNOWN, "")
+                        )
+                        if night_status == STATUS_CHARGING and night_site == SITE_AWAY:
+                            # 自宅のウォールコネクターに繋がっていない。利用者が意図した
+                            # 外出先の充電であり、止めてはいけない。
+                            #
+                            # ここで night_stop_failures を加算しないこと。通信の失敗では
+                            # ないため、リトライ上限（NIGHT_STOP_MAX_ATTEMPTS）を消費させると
+                            # 長い外出先充電のあいだにその夜の監視が打ち切られ、帰宅後の
+                            # 自宅充電を止められなくなる。
+                            night_stop_failures = 0
+                            # 状況が変わったので、帰宅後に停止したときは必ずログへ残す。
+                            night_last_observation = ""
+                            # 抑制せず毎サイクル出す。「意図して停止を見送っている」ことを
+                            # 利用者に見せ続ける（フル充電モードの継続通知と同じ扱い）。
+                            log_attention(
+                                f"夜間休止中に充電を検知しましたが、{night_site_reason}"
+                                "外出先での充電と判断して停止しません。"
+                                f" [{describe_fast_charger(night_charge_state)}]"
+                            )
+                        elif night_status == STATUS_CHARGING:
+                            # 状況が変わったので、次に停止を確認できたときは必ずログへ残す。
+                            night_last_observation = ""
+                            logger.info(
+                                "夜間休止中に充電を検知しました。『一時停止』します"
+                                f"（{night_stop_failures + 1}/{NIGHT_STOP_MAX_ATTEMPTS}回目）..."
+                            )
+                            if send_charge_command(vin, headers, "charge_stop"):
+                                logger.info("充電の停止を確認しました。")
+                                night_stop_failures = 0
+                                prev_charging_status = STATUS_STOPPED
+                            else:
+                                night_stop_failures += 1
+                                logger.error(
+                                    f"夜間休止中の充電停止に失敗しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再試行します。"
+                                )
+                        else:
+                            # 停止操作が不要だったこと自体を残す。ログを出さずに済ませると
+                            # 「夜間チェックが本当に走ったのか」を後から追えない。
+                            night_stop_failures = 0
+                            # 記録スイッチのために読んだ場合は、その旨を同じ行へ添える。
+                            # 別行にすると log_night_observation の重複抑止が効かず、
+                            # 10分ごとに同じ行が並んで変化が見つけにくくなる。
+                            probe_note: str = "（外出先の充電記録により取得）" if probe_read else ""
+                            log_night_observation(
+                                f"車両は『{vehicle_state}』・充電状態『{night_status or '不明'}』のため、"
+                                f"停止操作は不要と判断しました。{probe_note}"
+                            )
+            except Exception as e:
+                night_stop_failures += 1
+                logger.error(
+                    f"夜間休止中の充電状態確認でエラー（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）: {e}"
+                )
+
+            if night_stop_failures >= NIGHT_STOP_MAX_ATTEMPTS:
+                # 通信もコマンドも通らない状態でこれ以上呼び出し続けても回復せず、429を発生させるだけ。
+                # 朝まで確認を行わなくなるため、必ずCRITICALで記録する。
+                night_stop_exhausted = True
+                logger.critical(
+                    f"夜間休止中の充電状態を{NIGHT_STOP_MAX_ATTEMPTS}回連続で確認できませんでした。"
+                    "系統からの充電が継続している可能性があります。手動で確認してください。"
+                )
+
+        # 夜間の待機は、日中の開始（DAY_START_HOUR）を越える手前で切り上げる。
+        #
+        # 固定の600秒で回すと、1サイクルごとの処理時間が積み上がって位相がずれ、
+        # 日中の開始をまたぐ最初の巡回が 07:00〜07:10 のどこに落ちるかが日によって
+        # 変わる。車両側のスケジュール充電は 07:00 に始まる設定であり
+        # （docs/03_operation.md「車両側スケジュール充電の運用方針」）、このずれが
+        # そのまま「充電が始まっているのに観測していない時間」になる。
+        #
+        # 2026-08-07〜09-01 の実測で、この時間は 0.7〜9.8分（平均4.6分）だった。
+        # そのあいだ車両は最大9.6kWを消費しており、18日で 6.7kWh を買電していた。
+        #
+        # サイクル数は増えない。夜間最後の待機が短くなるだけで、車両リストの取得は
+        # 課金対象外、日中の最初の巡回は以前も行っていたものである。
+        wait_sec: int = min(NIGHT_SLEEP_SEC, seconds_until_hour(DAY_START_HOUR))
+        wait_label: str = format_duration(wait_sec) if wait_sec >= 60 else f"{wait_sec}秒"
+        logger.info(f"次の稼働チェックまで{wait_label}間スリープします...")
+        return wait_sec
+
     while True:
         # ウォールコネクターの vitals は1サイクルに1回だけ読み、同じサイクルの判定で使い回す
         # （wall_connector._cycle_vitals を参照）。continue する経路が多いため、
@@ -1178,203 +1385,7 @@ def main() -> None:
         wake_surplus_streak, wake_surplus_count = wake_surplus_count, 0
 
         if not manual_override and not FORCE_RUN and not (DAY_START_HOUR <= now.tm_hour < DAY_END_HOUR):
-            logger.info("--- 定期チェック開始 ---")
-            logger.info(f"夜間休止モード中（現在時刻 {time.strftime('%H:%M:%S')}）")
-
-            # 夜間帯は「毎サイクル」充電の有無を確認する。充電中のまま休止に入ると
-            # 余剰の有無に関わらず朝まで系統充電が続いてしまうため。
-            #
-            # 以前は休止に入った最初の1回で確認を打ち切っていた。そのため確認より後に
-            # 始まった充電（車両側のスケジュール充電、帰宅後のケーブル接続、こちらの停止後の
-            # 車両側からの再開）は朝まで完全に無検知だった。実際 2026-07-31 18:07 に
-            # 停止を確認したあと夜間に充電が再開し、08-01 09:40 に満充電で復帰している。
-            #
-            # 毎サイクル呼び出すのは車両リスト（/api/1/vehicles）だけで、これは車両を起こさない。
-            # asleep/offline の車両は充電していないため、そこで打ち切れば
-            # 「寝ている車を起こさない」という設計思想（Insomnia Defense）は維持できる。
-            if not night_stop_exhausted:
-                try:
-                    if time.time() > token_expires_at and refresh_tesla_token():
-                        headers["Authorization"] = f"Bearer {access_token}"
-                    v_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles", headers)
-                    vehicles = v_res.json().get("response") or [] if v_res.status_code == 200 else []
-                    vehicle = vehicles[0] if vehicles else {}
-                    vehicle_state = str(vehicle.get("state", ""))
-
-                    # 判定に使う事実を、分岐に入る前に確定させる。elif の条件式の中で
-                    # 評価してしまうと、「記録スイッチのために読んだのか」を後段の
-                    # 観測ログへ渡せない。ログにその理由が出ないと、課金された夜を
-                    # 後から見て理由を追えなくなる。
-                    #
-                    # 車両リストが取れなかった場合（401 を含む）は vehicle が空になるため、
-                    # ウォールコネクターへの問い合わせも行わない。
-                    cable_absent: bool = False
-                    probe_read: bool = False
-                    if vehicle and vehicle_state not in ("asleep", "offline"):
-                        cable_absent = (
-                            prev_charging_status == STATUS_DISCONNECTED
-                            # ウォールコネクターの確認を、記録の判定より先に行う。日中側と同じ順序である。
-                            # 後回しにすると、記録がONで読み直し時刻に達したサイクルでは
-                            # 一度も問い合わせず、read_wall_connector() が担っている
-                            # 「読めなくなった／回復した」の状態変化検知がそのサイクルだけ飛ぶ。
-                            # 追加で発生するのは宅内LANへのGET 1回（無課金・28ms）である。
-                            and read_wall_connector() == WC_NOT_CONNECTED
-                        )
-                        probe_read = (
-                            cable_absent
-                            and away_probe
-                            and time.time() >= next_disconnected_probe_at
-                        )
-
-                    if v_res.status_code == 401:
-                        # 日中ループと同じ扱いにする。クライアント側の期限推定より早く
-                        # サーバー側で失効した場合（クロックずれ・失効の前倒し等）、
-                        # これを単なる取得失敗として扱うと同じ失効トークンで上限まで
-                        # 失敗し、その夜の監視が止まる。
-                        token_expires_at = 0.0
-                        night_stop_failures += 1
-                        logger.warning(
-                            f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
-                        )
-                    elif not vehicle:
-                        # 車両リストが取れないうちは「充電していない」と断定できないため、次の巡回で再試行する。
-                        night_stop_failures += 1
-                        logger.warning(
-                            f"夜間休止中の車両リスト取得に失敗しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再確認します。"
-                        )
-                    elif vehicle_state in ("asleep", "offline"):
-                        # 就寝中の車両は充電していない。充電が始まれば車両は自らオンラインになるため、
-                        # 次の巡回で検知できる。
-                        night_stop_failures = 0
-                        log_night_observation(
-                            f"車両は『{vehicle_state}』のため充電していないと判断し、そのまま休止します。"
-                        )
-                    elif cable_absent and not probe_read:
-                        # 日中と同じ根拠である。自宅の充電器に何も繋がっていなければ、この車は
-                        # 自宅で充電していない。夜間ループが車両データを読むのは自宅の系統充電を
-                        # 止めるためであり、止めるべきものが無いなら読む理由も無い。
-                        #
-                        # 夜間帯は13時間・78サイクルあるため、外出先で車が起きたまま夜を跨ぐと
-                        # 約¥22を費やす。日中側（2026-08-22 の実績で約¥6.6）より大きい。
-                        #
-                        # night_stop_failures は消費せず0へ戻す。通信の失敗ではなく、
-                        # 「充電していないと確認できた」側だからである（asleep/offline と同じ扱い）。
-                        #
-                        # ケーブルが挿し直されれば vehicle_connected が true に戻り、次の巡回で
-                        # 通常の経路に入る。ウォールコネクターを読み取れない場合も成立せず、
-                        # 従来どおり毎サイクル読む。
-                        night_stop_failures = 0
-                        # 車両は起きている。車両側の充電上限を目標に合わせたまま外出させない（R4）。
-                        restore_charge_limit_without_reading(vin, headers, vehicle_status)
-                        log_night_observation(
-                            "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
-                        )
-                    else:
-                        vin = vehicle.get("vin", "") or vin
-                        s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
-                        if s_res.status_code == 401:
-                            token_expires_at = 0.0
-                            night_stop_failures += 1
-                            logger.warning(
-                                f"夜間休止中にアクセストークンの失効を検知しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再取得します。"
-                            )
-                        elif s_res.status_code != 200:
-                            night_stop_failures += 1
-                            logger.warning(
-                                f"夜間休止中の充電状態取得に失敗しました (HTTP {s_res.status_code})（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再確認します。"
-                            )
-                        else:
-                            night_charge_state = (s_res.json().get("response") or {}).get("charge_state") or {}
-                            record_vehicle_observation(vehicle_status, night_charge_state)
-                            sync_charge_limit(vin, headers, night_charge_state, charge_target, vehicle_status)
-                            night_status = str(night_charge_state.get("charging_state") or "")
-                            prev_charging_status = night_status
-                            if night_status == STATUS_DISCONNECTED:
-                                # 次に読み直してよい時刻。日中側と同じ基準で更新しておかないと、
-                                # 夜をまたいだ時点で外出先の充電記録の間隔がずれる。
-                                next_disconnected_probe_at = time.time() + DISCONNECTED_PROBE_INTERVAL_SEC
-                            night_site, night_site_reason = (
-                                classify_charging_site(night_charge_state)
-                                if night_status == STATUS_CHARGING else (SITE_UNKNOWN, "")
-                            )
-                            if night_status == STATUS_CHARGING and night_site == SITE_AWAY:
-                                # 自宅のウォールコネクターに繋がっていない。利用者が意図した
-                                # 外出先の充電であり、止めてはいけない。
-                                #
-                                # ここで night_stop_failures を加算しないこと。通信の失敗では
-                                # ないため、リトライ上限（NIGHT_STOP_MAX_ATTEMPTS）を消費させると
-                                # 長い外出先充電のあいだにその夜の監視が打ち切られ、帰宅後の
-                                # 自宅充電を止められなくなる。
-                                night_stop_failures = 0
-                                # 状況が変わったので、帰宅後に停止したときは必ずログへ残す。
-                                night_last_observation = ""
-                                # 抑制せず毎サイクル出す。「意図して停止を見送っている」ことを
-                                # 利用者に見せ続ける（フル充電モードの継続通知と同じ扱い）。
-                                log_attention(
-                                    f"夜間休止中に充電を検知しましたが、{night_site_reason}"
-                                    "外出先での充電と判断して停止しません。"
-                                    f" [{describe_fast_charger(night_charge_state)}]"
-                                )
-                            elif night_status == STATUS_CHARGING:
-                                # 状況が変わったので、次に停止を確認できたときは必ずログへ残す。
-                                night_last_observation = ""
-                                logger.info(
-                                    "夜間休止中に充電を検知しました。『一時停止』します"
-                                    f"（{night_stop_failures + 1}/{NIGHT_STOP_MAX_ATTEMPTS}回目）..."
-                                )
-                                if send_charge_command(vin, headers, "charge_stop"):
-                                    logger.info("充電の停止を確認しました。")
-                                    night_stop_failures = 0
-                                    prev_charging_status = STATUS_STOPPED
-                                else:
-                                    night_stop_failures += 1
-                                    logger.error(
-                                        f"夜間休止中の充電停止に失敗しました（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）。次の巡回で再試行します。"
-                                    )
-                            else:
-                                # 停止操作が不要だったこと自体を残す。ログを出さずに済ませると
-                                # 「夜間チェックが本当に走ったのか」を後から追えない。
-                                night_stop_failures = 0
-                                # 記録スイッチのために読んだ場合は、その旨を同じ行へ添える。
-                                # 別行にすると log_night_observation の重複抑止が効かず、
-                                # 10分ごとに同じ行が並んで変化が見つけにくくなる。
-                                probe_note: str = "（外出先の充電記録により取得）" if probe_read else ""
-                                log_night_observation(
-                                    f"車両は『{vehicle_state}』・充電状態『{night_status or '不明'}』のため、"
-                                    f"停止操作は不要と判断しました。{probe_note}"
-                                )
-                except Exception as e:
-                    night_stop_failures += 1
-                    logger.error(
-                        f"夜間休止中の充電状態確認でエラー（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）: {e}"
-                    )
-
-                if night_stop_failures >= NIGHT_STOP_MAX_ATTEMPTS:
-                    # 通信もコマンドも通らない状態でこれ以上呼び出し続けても回復せず、429を発生させるだけ。
-                    # 朝まで確認を行わなくなるため、必ずCRITICALで記録する。
-                    night_stop_exhausted = True
-                    logger.critical(
-                        f"夜間休止中の充電状態を{NIGHT_STOP_MAX_ATTEMPTS}回連続で確認できませんでした。"
-                        "系統からの充電が継続している可能性があります。手動で確認してください。"
-                    )
-
-            # 夜間の待機は、日中の開始（DAY_START_HOUR）を越える手前で切り上げる。
-            #
-            # 固定の600秒で回すと、1サイクルごとの処理時間が積み上がって位相がずれ、
-            # 日中の開始をまたぐ最初の巡回が 07:00〜07:10 のどこに落ちるかが日によって
-            # 変わる。車両側のスケジュール充電は 07:00 に始まる設定であり
-            # （docs/03_operation.md「車両側スケジュール充電の運用方針」）、このずれが
-            # そのまま「充電が始まっているのに観測していない時間」になる。
-            #
-            # 2026-08-07〜09-01 の実測で、この時間は 0.7〜9.8分（平均4.6分）だった。
-            # そのあいだ車両は最大9.6kWを消費しており、18日で 6.7kWh を買電していた。
-            #
-            # サイクル数は増えない。夜間最後の待機が短くなるだけで、車両リストの取得は
-            # 課金対象外、日中の最初の巡回は以前も行っていたものである。
-            wait_sec: int = min(NIGHT_SLEEP_SEC, seconds_until_hour(DAY_START_HOUR))
-            wait_label: str = format_duration(wait_sec) if wait_sec >= 60 else f"{wait_sec}秒"
-            logger.info(f"次の稼働チェックまで{wait_label}間スリープします...")
-            time.sleep(wait_sec)
+            time.sleep(run_night_cycle())
             continue
 
         night_stop_failures = 0
