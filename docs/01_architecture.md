@@ -24,6 +24,7 @@
          │  ┌────────────────────────┐                            │
          │  │ tesla_solar_charger.py │                            │
          │  │ (Python venv / 3分ループ)│                            │
+         │  │ tesla_auth.py          │  トークンファイルの読み書き │
          │  └───────────┬────────────┘                            │
          │              │                                         │
          │              ▼ (ローカルHTTPS / ポート:4443)            │
@@ -53,16 +54,32 @@
          ▼
   ┌────────────────────────┐
   │   control_server.py     │  ← override_state.json を読み書き
+  │   control_templates/    │     画面・マニフェスト・Service Worker
   │   (stdlib http.server)  │
   └───────────┬─────────────┘
-              │ (ファイル共有: override_state.json)
+              │ (ファイル共有: override_state.json。更新中は flock)
               ▼
   ┌────────────────────────┐
-  │ tesla_solar_charger.py │  ← 毎サイクル override_state.json を確認
+  │ tesla_solar_charger.py │  ← 毎サイクル read_snapshot() で3値を1回読む
   └────────────────────────┘
 ```
 
-* `override_state.json`： `{"manual_override": true/false, "updated_at": ...}` を保持する共有状態ファイル。`override_state.py` が原子的な読み書き（`save_tokens`と同様の tmp→rename 方式）を提供する。外出先の充電記録（`away_probe`）と目標充電率（`charge_target_soc`、1〜100 の整数または `null`）も同じファイルに置く。
+Python モジュールは次のとおりである。
+
+| モジュール | 役割 |
+| --- | --- |
+| `tesla_solar_charger.py` | 充電制御。`main()` が `configure_logging()`、`load_runtime_config()`、`ensure_http_sessions()`、`ensure_access_token()` の順に呼んでから常駐ループに入る。`import` では設定を読まない |
+| `tesla_auth.py` | `tesla_tokens.json` の読み書き（期限は `expires_in` の 1800 秒前）と、更新中の `flock`。充電制御と `tools/observe_only.py` が使う。瞬時電力の `epc` 231 の取り出しもここにある |
+| `config_loader.py` | 数値設定の下限検査。日中の開始時 `DAY_START_HOUR`（7）と終了時 `DAY_END_HOUR`（18）もここにある。設定ファイルにはこの2つは無い |
+| `override_state.py` | フル充電モード、外出先の充電記録、目標充電率。書き込みは読み始めてから `os.replace` まで `flock` を取る。`read_snapshot()` は3つを1回の読みで返す |
+| `vehicle_status.py` | 最後に読んだ車両状態と、車両側充電上限の復元値。書き手は充電制御だけ |
+| `wall_connector.py` | 自宅ウォールコネクターのローカル API。1サイクルに vitals を1回読む |
+| `control_server.py` | 操作サーバー。画面の本文は `control_templates/page.html`、マニフェストは `manifest.webmanifest`、Service Worker は `sw.js` |
+| `tools/observe_only.py` | 読み取り専用。トークンファイルは充電制御と共有し、ロックを取れないときは自分では更新せず読み直す |
+
+ループの1周は `run_night_cycle()` または `run_day_cycle()` が戻り値の秒数を返し、呼び出し側が `time.sleep` する。夜間は 7:00 未満または 18:00 以降で、フル充電モードでも `FORCE_RUN` でもないときである。
+
+* `override_state.json`： `{"manual_override": true/false, "updated_at": ...}` を保持する共有状態ファイル。`override_state.py` が一時ファイルへ書いてから `os.replace` する。外出先の充電記録（`away_probe`）と目標充電率（`charge_target_soc`、1〜100 の整数または `null`）も同じファイルに置く。2プロセスが同時に書いても、ロックを持っているあいだの読み書きは重ならない。
 * `vehicle_status.json`：制御ループが最後に読んだ車両の状態（`battery_level`・`charging_state`・`charge_limit_soc` など）と、車両側の充電上限の元の値を保持する。書き手は `tesla_solar_charger.py` だけで、`control_server.py` は画面表示のために読むだけである。`override_state.json` と分けているのは、上限の元の値を2プロセスの書き込み競合に巻き込まないためである（`docs/05_charge_target_design.md` 第5.2節）。
 * 目標充電率：充電率が目標以上になったら充電を止める機能。車両側の充電上限は50%未満に設定できないため、システムが `battery_level` を見て止める。仕様と設計意図は `docs/05_charge_target_design.md` にある。
 * `manual_override: true` の場合： `tesla_solar_charger.py` は夜間休止モードおよびNature Remoの瞬時電力に基づく漸進的フィードバック制御（第4章）をすべてスキップし、車両を起動（必要な場合）する。充電が停止中から再開するときは `MAX_AMPS` を設定し、充電中は車両側の現在の電流値を維持する（`MIN_AMPS` 未満のときは `MIN_AMPS` に引き上げる）。
@@ -71,7 +88,7 @@
 * 起動条件： `CONTROL_TOKEN` が文字列でない、32文字未満、公開テンプレート値 `YOUR_RANDOM_CONTROL_TOKEN_HERE`、または表示可能なASCII文字（0x21〜0x7E）以外を含む場合、`control_server.py` は終了コード1で起動を中止する。文字種を限るのは、画面の JavaScript がトークンを `X-Control-Token` ヘッダーで送り、HTTP のヘッダー値にはこの範囲の文字しか使えないためである（RFC 9110 §5.5）。文字数の検証だけではトークンの推測困難性は保証されないため、`openssl rand -hex 32` で生成する。
 * リクエスト制限： POSTの `Content-Length` が整数でないか負数の場合はHTTP 400、本文が4096バイトを超える場合はHTTP 413を返す。`/api/override` と `/api/away_probe` の `enabled` がJSONの真偽値でない場合はHTTP 400を返す。各接続のソケット読み取りタイムアウトは5秒、同時処理数の上限は16接続であり、空き枠がない場合は新しい接続をHTTP応答なしで閉じる。読み取りタイムアウトは1回の受信ごとに適用されるため、別に1接続の処理全体に15秒の締切を設け、過ぎた接続は応答なしで閉じる。5秒未満の間隔でヘッダーを分割送信し続ける接続が枠を占有し続けることを防ぐためである。
 * レスポンスヘッダー：応答に `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Content-Security-Policy: frame-ancestors 'none'` を設定する。
-* UI：トークン付きURL（宅内LANでは`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`、Tailscale経由では`https://<MagicDNSホスト名>/?token=<CONTROL_TOKEN>`）にアクセスすると、ON/OFFトグルボタン1つだけのモバイル向けページが表示される。スマホのホーム画面に追加すれば、アイコンから起動できる。URLはブラウザー履歴とPWAの`start_url`に残るため、第三者へ共有しない。
+* UI：トークン付きURL（宅内LANでは`http://<ラズパイのIP>:8090/?token=<CONTROL_TOKEN>`、Tailscale経由では`https://<MagicDNSホスト名>/?token=<CONTROL_TOKEN>`）にアクセスすると、充電率、目標充電率、フル充電モード、外出先の充電記録を操作するページが表示される。最大電流と夜間の時刻は状態 API の `max_amps`、`day_start_hour`、`day_end_hour` を表示する。スマホのホーム画面に追加すれば、アイコンから起動できる。URLはブラウザー履歴とPWAの`start_url`に残るため、第三者へ共有しない。
 
 #### PWA（Progressive Web App）対応
 
@@ -83,8 +100,8 @@
   * `apple-touch-icon-180.png`：iOSのホーム画面用。不透明で、角丸はiOSが付ける
 
   `any` と `maskable` を1つの画像で兼ねると、`any` として表示するときは余白が余分になり、`maskable` として切り抜くときは図柄の端が欠けるため、別ファイルにしている。
-* `/manifest.webmanifest`：アプリ名・テーマカラー・アイコン・`start_url` を定義するWebアプリマニフェスト。`start_url` に実際の `CONTROL_TOKEN` を埋め込むため、このエンドポイントは他のページと同様にトークン必須（トークン漏洩防止のため）。
-* `/sw.js`：インストール判定（Service Worker登録）のためだけに存在する最小限のService Worker。充電状態は常に最新を取得する必要があるため、実質的なキャッシュ戦略は持たない（オフライン時のフォールバック処理のみ）。機密情報を含まないため、トークン無しで公開配信する。
+* `/manifest.webmanifest`：アプリ名・テーマカラー・アイコン・`start_url` を定義するWebアプリマニフェスト。本文は `control_templates/manifest.webmanifest` で、`start_url` に実際の `CONTROL_TOKEN` を埋め込む。このエンドポイントは他のページと同様にトークン必須（トークン漏洩防止のため）。
+* `/sw.js`：インストール判定（Service Worker登録）のためだけに存在する最小限のService Worker。本文は `control_templates/sw.js`。充電状態は常に最新を取得する必要があるため、実質的なキャッシュ戦略は持たない（オフライン時のフォールバック処理のみ）。機密情報を含まないため、トークン無しで公開配信する。
 * アイコン画像自体（`/icons/` 以下の上記5ファイル）：同様に機密情報を含まないため、トークン無しで公開配信する。配信するのは `control_server.py` の `ICON_FILES` に載せたファイルだけで、それ以外のパスには404を返す。
 
 > 接続条件： `control_server.py` は `0.0.0.0:8090` で待ち受ける。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られるため、通信を観測できる端末に取得され得る。Tailscale ServeのHTTPS経由では通信が暗号化され、Android ChromeのService Worker登録に必要な安全なコンテキストも満たす。
@@ -127,7 +144,9 @@ GET http://<WALL_CONNECTOR_HOST>/api/1/version  → serial_number（起動時の
 
 エンドポイントはTeslaが公式に文書化したものではない。塞がれた場合は判定不能となり、自動的に従来動作へ縮退する。
 
-この判定は車両が1台であることを前提にしている。ウォールコネクターのローカルAPIが返す `vehicle_connected` が示すのは「何らかの車が自宅の充電器に繋がっている」ことであって、「制御対象の車が繋がっている」ことではない（`/api/1/vitals` にVINは含まれない）。また制御対象は常に車両リストの先頭1台であり、2台目は扱えない。テスラ車の複数所有、および自宅のウォールコネクターを複数の車両が使う運用は現時点で未対応であり、将来的に対応が必要である。制約の詳細と対応の方向は `docs/03_operation.md` の「既知の制約：複数の車両に対応していない」を参照。
+この判定は車両が1台であることを前提にしている。ウォールコネクターのローカルAPIが返す `vehicle_connected` が示すのは「何らかの車が自宅の充電器に繋がっている」ことであって、「制御対象の車が繋がっている」ことではない（`/api/1/vitals` にVINは含まれない）。制御対象は、起動時の車両リストの先頭1台の VIN である。プロセスが動いているあいだはその VIN をリストから探す。順序が変わってもコマンド先は変わらない。その VIN がリストに無いサイクルはコマンドを送らない。設定キー `TESLA_VIN` はまだ無い。テスラ車の複数所有、および自宅のウォールコネクターを複数の車両が使う運用は現時点で未対応であり、将来的に対応が必要である。制約の詳細と対応の方向は `docs/03_operation.md` の「既知の制約：複数の車両に対応していない」を参照。
+
+外出先と断定できたとき（`classify_charging_site`）、電流の変更・停止・開始に加えて、目標充電率のための `set_charge_limit` も「自宅」としては送らない。DC 急速充電、または給電が `FAST_CHARGER_POWER_KW` を超えるときは、ウォールコネクターが `connected` でも自宅にしない。断定できないときは、従来どおりウォールコネクターが接続中のときだけ上限を合わせる。
 
 
 ---
@@ -198,10 +217,14 @@ Fleet APIは2025年1月から従量課金である。無料枠という形では
 本システムの核心部分である「何Aに設定すべきか」の判定は、太陽光の発電量から絶対値として毎回ゼロ計算しているのではなく、現在の充電電流値を基準に、Nature Remoが示す買電/売電量（W）に応じて加減算する漸進的フィードバック制御である（サーモスタットの動作に近い）。
 
 ```python
-calc_base_amps = raw_amps if charging_status == "Charging" else 0   # 充電中なら現在のA値を基準にする
-adjustment_amps = int(-house_power / 200)                            # 買電/売電量(W)をA換算（200Wあたり1A）
+target_amps = compute_target_amps(raw_amps, house_power, charging_status == "Charging")
+# 中身は次のとおり。WATTS_PER_AMP は 200（200 V × 1 A）。int() は 0 へ向かって切り捨てる。
+calc_base_amps = raw_amps if charging else 0
+adjustment_amps = int(-house_power / WATTS_PER_AMP)
 target_amps = calc_base_amps + adjustment_amps
 ```
+
+`set_charging_amps()` は送る前に `clamp_amps()` で `MIN_AMPS` 以上 `MAX_AMPS` 以下にする。範囲外を渡したときはその範囲へ切り詰めてから送る。5 A 未満を 1 試行につき 2 回送る回数は、切り詰めたあとの値で数える。
 
 * `house_power` が負（売電中・余剰あり）の場合：`adjustment_amps` は正の値になり、電流を増やす方向に働く。
 * `house_power` が正（買電中・余剰なし）の場合：`adjustment_amps` は負の値になり、電流を減らす方向に働く。
@@ -348,6 +371,6 @@ WantedBy=multi-user.target
 
 ```
 
-`tools/observe_only.py` は車両へコマンドを送らないが、車両状態を10分ごとに独立して問い合わせるため Tesla API の課金が発生する。2026-08-09〜18 の8.92日で `vehicle_data` を約660回呼び、約¥190（¥21/日）を消費した。同期間の制御ループ自体の実績は約¥15/日であり、観測ツールを動かすと費用が倍以上になる。
+`tools/observe_only.py` は車両へコマンドを送らないが、車両状態を10分ごとに独立して問い合わせるため Tesla API の課金が発生する。トークンファイルは充電制御と共有し、`tesla_auth.py` のロックを取れないときは自分では更新せずファイルを読み直す。2026-08-09〜18 の8.92日で `vehicle_data` を約660回呼び、約¥190（¥21/日）を消費した。同期間の制御ループ自体の実績は約¥15/日であり、観測ツールを動かすと費用が倍以上になる。
 
 そのため `enable` せず、`systemctl start` で明示的に起動したときだけ動く状態にしてある。`Restart=on-failure` は異常終了時の復帰のためで、`systemctl stop` した場合は再起動しない。

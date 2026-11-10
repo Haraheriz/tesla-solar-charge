@@ -49,7 +49,7 @@ Tesla Developer Portalには「Client Secretのみ再生成」する機能がな
 1. 新しいアプリを作成：旧アプリと同じ設定（アプリ名・説明・OAuth付与タイプ・許可された送信元・リダイレクトURI・スコープ）で新規作成し、新しいClient ID/Secretを取得する。
 2. 新しい鍵ペアを生成：`openssl ecparam -name prime256v1 -genkey -noout -out private-key.pem` 等（`docs/00_onboarding.md` Phase 3参照）。
 3. 公開鍵をホスティング先（GitHub Pages等）で更新：`.well-known/appspecific/com.tesla.3p.public-key.pem` の内容を新しい公開鍵に置き換える。
-4. `tesla_config.json` のCLIENT_ID/CLIENT_SECRETを新しい値に書き換え、`tesla_tokens.json` を削除して再認証フローを通す（`tesla_solar_charger.py` が自動的に認可URLを発行する）。
+4. `tesla_config.json` のCLIENT_ID/CLIENT_SECRETを新しい値に書き換え、手元のPC（標準入力が端末の環境）で `tesla_tokens.json` を削除してから `tesla_solar_charger.py` を実行し、認可URLで再認証する。ラズパイ上でトークンファイルを削除して `tesla-charger.service` を再起動しても、認可URLは出ない。標準入力が端末ではないため、終了コード 1 で止まる。生成した `tesla_tokens.json` は第6章のとおり転送する。
 5. パートナーアカウント登録：`poc/activate_tesla_app.py` を新しいClient ID/Secretとドメインで実行する。
    * 公開鍵のホスティング更新が反映される前に実行すると `Public key hash has already been taken` で失敗する。旧アプリに登録済みの公開鍵と同じハッシュになるためで、新しい公開鍵の配置が反映されてから実行する。
 6. 旧アプリをアーカイブ申請：旧アプリのアーカイブは新アプリの利用可否に影響しない。旧アプリの資格情報を誤って使わないよう、また後で取り違えないようにアーカイブする。

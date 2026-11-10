@@ -16,13 +16,15 @@
 ├── tesla_tokens.json          # [転送] テスラAPIリフレッシュトークン
 ├── tesla-http-proxy           # [転送] Go言語ネイティブバイナリ
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
+├── tesla_auth.py              # [転送] トークンファイルの読み書きと更新ロック。充電制御と観測ツールが import する
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
-├── control_templates/         # [転送] 操作画面の HTML・マニフェスト・Service Worker
+├── control_templates/         # [転送] 操作画面。中身は page.html、manifest.webmanifest、sw.js
 ├── override_state.py          # [転送] フル充電モード・外出先の充電記録・目標充電率の状態を共有するモジュール
 ├── vehicle_status.py          # [転送] 最後に読んだ車両の状態と、車両側の充電上限の元の値を保存するモジュール
-├── config_loader.py           # [転送] 設定値を起動時に検証して確定させるモジュール
+├── config_loader.py           # [転送] 設定値を起動時に検証して確定させるモジュール。日中の時刻（7時と18時）もここにある
 ├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-*.png, icon-maskable-*.png, apple-touch-icon-180.png）
+├── tools/observe_only.py      # [転送・任意] 読み取り専用の観測ツール。使うときだけ置く
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 ```
 
@@ -79,8 +81,17 @@ sudo chown -R <username>:<username> /home/<username>/tesla-solar-charge/
 # 2. ディレクトリ本体を「所有者以外立ち入り禁止（700）」に設定
 chmod 700 /home/<username>/tesla-solar-charge/
 
-# 3. 内部の通常ファイルをすべて一旦「所有者のみ読み書き（600）」に制限
+# 3. 直下の通常ファイルを「所有者のみ読み書き（600）」に制限
+#    このコマンドはディレクトリにも当たる。control_templates / icons / tools の走査権限（x）が
+#    消えると、操作サーバーはテンプレートを開けず、アイコンも配信できない。直後の find で戻す。
 chmod 600 /home/<username>/tesla-solar-charge/*
+for d in control_templates icons tools; do
+  dir="/home/<username>/tesla-solar-charge/$d"
+  if [ -d "$dir" ]; then
+    find "$dir" -type d -exec chmod 700 {} +
+    find "$dir" -type f -exec chmod 600 {} +
+  fi
+done
 
 # 4. Goプロキシバイナリに「実行権限（700）」を付与
 chmod 700 /home/<username>/tesla-solar-charge/tesla-http-proxy
@@ -92,7 +103,12 @@ chmod 700 /home/<username>/tesla-solar-charge/venv/bin/*
 
 ```
 
-`tesla_solar_charger.py` と `control_server.py` は起動時に `tesla_config.json`（充電制御側は `tesla_tokens.json` も）の権限を確かめ、所有者以外に読み書き実行のいずれかを許すビットが立っていれば次の行を出す。起動は止めない。この行が出たら上記の `chmod 600` を実行する。
+`tesla_solar_charger.py` は `main()` の `load_runtime_config()` で、`control_server.py` はプロセス起動時に、`tesla_config.json`（充電制御側は `tesla_tokens.json` も）の権限を確かめる。所有者以外に読み書き実行のいずれかを許すビットが立っていれば次の行を出す。起動は止めない。この行が出たら上記の `chmod 600` を実行する。`import` しただけでは設定ファイルは読まれない。
+
+トークン更新と操作状態の更新は、実行中にロックファイルを作る。転送しない。権限はプロセスが `0600` で作る。
+
+* `tesla_tokens.json.lock` … `tesla_auth.py`。充電制御と観測ツールがトークンを更新するあいだだけ取る
+* `override_state.json.lock` … `override_state.py`。フル充電モード、外出先の充電記録、目標充電率を書き換えるあいだだけ取る
 
 ```text
 [ATTENTION] /home/<username>/tesla-solar-charge/tesla_config.json の権限が -rw-r--r-- で、所有者以外からアクセスできます。chmod 600 /home/<username>/tesla-solar-charge/tesla_config.json を実行してください（docs/02_deploy.md 第4章）。
@@ -295,7 +311,9 @@ WantedBy=multi-user.target
 sudo nano /etc/systemd/system/tesla-observer.service
 ```
 
-定義は `docs/01_architecture.md` 第7章④を参照。配置後は `sudo systemctl daemon-reload` のみ実行し、次項の一括 `enable` の対象には含めない。
+定義は `docs/01_architecture.md` 第7章④を参照。配置後は `sudo systemctl daemon-reload` のみ実行し、次項の一括 `enable` の対象には含めない。`tools/observe_only.py` は同じディレクトリの `tesla_auth.py` を import する。`tesla_auth.py` が無いと観測ツールは起動しない。トークンファイルは充電制御と分けない。
+
+ユニットファイルの `ExecStart` は変えていない。`tesla_auth.py` と `control_templates/` は、作業ディレクトリ（`/home/<username>/tesla-solar-charge`）からの import とファイル読み込みで使われる。ユニットのパスを書き換える必要はない。
 
 ### 5. サービスの有効化と即時起動コマンド
 
@@ -331,3 +349,58 @@ sudo systemctl status tesla-proxy.service tesla-charger.service tesla-override.s
 ps aux | grep tesla
 
 ```
+
+`tesla_auth.py` が無い状態で `tesla-charger.service` を起動すると、`import` に失敗して終了コード 1 になり、`Restart=always` が 30 秒ごとに再起動する。`control_templates/` が無い、またはディレクトリの走査権限が無い状態で `tesla-override.service` を起動すると、テンプレートを開けずに終了する。
+
+---
+
+## 8. 既に動いているラズパイへ、この版のファイルを足す
+
+ユニット定義は変えない。次のファイルを、いまの配置へ上書きする。`venv/`、`tesla_tokens.json`、`tesla_config.json`、`*.pem`、`tesla-http-proxy` は、この版のためだけには転送しない。
+
+| ファイル | 無いときに止まるサービス |
+| --- | --- |
+| `tesla_solar_charger.py` | `tesla-charger.service` |
+| `tesla_auth.py` | `tesla-charger.service`。観測ツールを置くなら `tesla-observer.service` も |
+| `override_state.py` | 充電制御と操作サーバーの両方 |
+| `config_loader.py` | 充電制御と操作サーバーの両方 |
+| `wall_connector.py` | `tesla-charger.service` |
+| `vehicle_status.py` | 充電制御と操作サーバーの両方 |
+| `control_server.py` | `tesla-override.service` |
+| `control_templates/page.html` | `tesla-override.service` |
+| `control_templates/manifest.webmanifest` | `tesla-override.service` |
+| `control_templates/sw.js` | `tesla-override.service` |
+| `tools/observe_only.py` | 観測ツールを使うときだけ |
+
+開発機のリポジトリで、転送元は `git show origin/main:<パス>` のように、作業ツリーではなく `main` のファイルを使う。例は次のとおり。`<host>` はラズパイの SSH 先、`<username>` は実行ユーザーである。
+
+```bash
+cd /path/to/tesla-solar-charge
+git fetch origin main
+DEST=<username>@<host>:/home/<username>/tesla-solar-charge
+for f in tesla_solar_charger.py tesla_auth.py override_state.py config_loader.py wall_connector.py vehicle_status.py control_server.py; do
+  git show "origin/main:$f" > "/tmp/$f"
+  scp "/tmp/$f" "$DEST/$f"
+done
+mkdir -p /tmp/control_templates
+for f in page.html manifest.webmanifest sw.js; do
+  git show "origin/main:control_templates/$f" > "/tmp/control_templates/$f"
+done
+scp -r /tmp/control_templates "$DEST/"
+```
+
+観測ツールも更新するときは、同じ要領で `tools/observe_only.py` を `.../tesla-solar-charge/tools/observe_only.py` へ置く。`rsync -a` でディレクトリごと置く場合も、上の一覧が揃っていることを確認する。`venv/` は送らない。
+
+転送後、ラズパイで権限と構文を確認してから、プロキシ以外を再起動する。プロキシのバイナリを変えていなければ `tesla-proxy.service` は再起動しない。
+
+```bash
+cd /home/<username>/tesla-solar-charge
+chmod 600 tesla_solar_charger.py tesla_auth.py override_state.py config_loader.py wall_connector.py vehicle_status.py control_server.py
+find control_templates -type d -exec chmod 700 {} +
+find control_templates -type f -exec chmod 600 {} +
+./venv/bin/python -m py_compile tesla_solar_charger.py tesla_auth.py override_state.py config_loader.py wall_connector.py vehicle_status.py control_server.py
+sudo systemctl restart tesla-charger.service tesla-override.service
+sudo systemctl status tesla-charger.service tesla-override.service
+```
+
+`py_compile` が `ModuleNotFoundError: tesla_auth` になるときは、`tesla_auth.py` が作業ディレクトリに無い。操作サーバーが `FileNotFoundError` で `control_templates` を名指すときは、ディレクトリか中の3ファイルが無い。反映の記録は `docs/DEPLOY_LOG.md` に書く。

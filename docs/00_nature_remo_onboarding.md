@@ -83,7 +83,7 @@ curl -X GET "https://api.nature.global/1/appliances" \
 
 ```
 
-* ※ 各プロパティを識別するのは `code` ではなく **`epc`**（10進数の整数）である。瞬時電力計測値は **`epc: 231`**（`name: "measured_instantaneous"`）。この **`val`** に入っている数値（上記例では `-3500`）が、現在のリアルタイムな家全体の瞬時電力（W）である（`tesla_solar_charger.py` の `get_remo_power()` も `epc == 231` で判定している）。
+* ※ 各プロパティを識別するのは `code` ではなく **`epc`**（10進数の整数）である。瞬時電力計測値は **`epc: 231`**（`name: "measured_instantaneous"`）。この **`val`** に入っている数値（上記例では `-3500`）が、現在のリアルタイムな家全体の瞬時電力（W）である。取り出しは `tesla_auth.epc_value()` で、`tesla_solar_charger.py` の `get_remo_power()` と `tools/observe_only.py` が同じ関数を使う。
 
 ---
 
