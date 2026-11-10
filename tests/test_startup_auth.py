@@ -1,10 +1,11 @@
 """起動時のトークン更新。ポート8000で待たないことと、ファイルを消さないことを見る。"""
+import importlib.util
 import json
 import os
 
 import pytest
 
-from conftest import CapturingHandler, FakeTime, StopSim, _load_module
+from conftest import PROJECT_ROOT, CapturingHandler, FakeTime, StopSim, _load_module
 
 
 class _Stdin:
@@ -22,6 +23,24 @@ def _no_tty(monkeypatch, module):
 
 def _refuse_server(*args, **kwargs):
     raise AssertionError("初回認証の待受を開始した")
+
+
+def test_importは設定を読まず終了しない(tmp_path, monkeypatch):
+    monkeypatch.setenv("TESLA_CONFIG_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.chdir(tmp_path)
+    spec = importlib.util.spec_from_file_location(
+        "tsc_import_only", os.path.join(PROJECT_ROOT, "tesla_solar_charger.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.proxy_session is None
+    assert not (tmp_path / "tesla_solar_charger.log").exists()
+    capture = CapturingHandler()
+    module.logger.addHandler(capture)
+    with pytest.raises(SystemExit) as exc:
+        module.load_runtime_config()
+    assert exc.value.code == 1
+    assert any("見つかりません" in message for _, message in capture.records)
 
 
 def test_トークンが無く端末が無ければ待たずに終了する(tmp_path, monkeypatch):
