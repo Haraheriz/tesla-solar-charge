@@ -33,7 +33,7 @@ jobs:
 
       - name: Compile check
         # 構文エラーは実機へ持ち込む前にここで落とす
-        run: python -m py_compile tesla_solar_charger.py override_state.py control_server.py
+        run: python -m py_compile tesla_solar_charger.py override_state.py control_server.py wall_connector.py config_loader.py vehicle_status.py tesla_auth.py
 
       - name: Run tests
         # 充電制御ループを仮想時間・擬似Tesla APIで駆動する回帰テスト。

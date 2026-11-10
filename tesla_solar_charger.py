@@ -10,7 +10,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
-from config_loader import Settings, warn_if_accessible_by_others
+from config_loader import DAY_END_HOUR, DAY_START_HOUR, Settings, warn_if_accessible_by_others
 import tesla_auth
 from override_state import read_away_probe_state, read_charge_target, read_override_state, read_snapshot, write_override
 from vehicle_status import load_vehicle_status, save_vehicle_status
@@ -189,9 +189,7 @@ WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 # 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
 FAST_CHARGER_POWER_KW: float = settings.number("FAST_CHARGER_POWER_KW", 15, minimum=1)
 
-# 太陽光追従で制御する時間帯。これ以外は夜間休止に入る。
-DAY_START_HOUR: int = 7
-DAY_END_HOUR: int = 18
+# 日中の時間帯は config_loader.DAY_START_HOUR / DAY_END_HOUR。操作画面と同じ値である。
 
 # 夜間休止中の巡回間隔（秒）。ただし DAY_START_HOUR をまたぐ手前で切り上げる。
 NIGHT_SLEEP_SEC: int = 600
@@ -1422,7 +1420,7 @@ def main() -> None:
                             )
             except Exception as e:
                 night_stop_failures += 1
-                logger.error(
+                logger.exception(
                     f"夜間休止中の充電状態確認でエラー（{night_stop_failures}/{NIGHT_STOP_MAX_ATTEMPTS}回目）: {e}"
                 )
 
@@ -1884,7 +1882,7 @@ def main() -> None:
                         logger.error("充電の開始を確認できませんでした。次のサイクルで再試行します。")
 
         except Exception as e:
-            logger.error(f"ループ内例外発生: {e}")
+            logger.exception(f"ループ内例外発生: {e}")
 
         return 180
 
