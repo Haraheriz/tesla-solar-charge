@@ -625,6 +625,41 @@ def night_proxy_get(url: str, headers: Dict[str, str]) -> Any:
         )
 
 
+def proxy_get(url: str, headers: Dict[str, str], *, retry_server_errors: bool) -> Any:
+    """プロキシ経由の GET。夜間だけ通信エラーと 5xx をその場で取り直す。
+
+    日中は取り直さない。500 未満は課金対象であり、408 は直後に再送しても回復しない。
+    再試行回数は NIGHT_GET_ATTEMPTS（既定 2）のままである。
+    """
+    if retry_server_errors:
+        return night_proxy_get(url, headers)
+    return proxy_session.get(url, headers=headers, timeout=10)
+
+
+def fetch_vehicle_list(headers: Dict[str, str], *, retry_server_errors: bool) -> Any:
+    return proxy_get(f"{PROXY_HOST}/api/1/vehicles", headers, retry_server_errors=retry_server_errors)
+
+
+def fetch_charge_state(vin: str, headers: Dict[str, str], *, retry_server_errors: bool) -> Any:
+    url = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
+    return proxy_get(url, headers, retry_server_errors=retry_server_errors)
+
+
+def day_vehicle_data_wait_sec(status_code: int, delivering: bool) -> int:
+    """日中に vehicle_data が失敗したとき、次まで待つ秒。
+
+    401 は 180 秒、429 は 3600 秒、それ以外は給電中 180 秒、給電していないとき 600 秒。
+    夜間はこの表を使わない。夜間は巡回間隔で待つ。
+    """
+    if status_code == 401:
+        return 180
+    if status_code == 429:
+        return 3600
+    if delivering:
+        return 180
+    return 600
+
+
 def describe_fast_charger(charge_state: Dict[str, Any]) -> str:
     """急速充電フィールドの実値を、ログに残せる1行にまとめる。
 
@@ -1211,7 +1246,7 @@ def main() -> None:
             try:
                 if time.time() > token_expires_at and refresh_tesla_token():
                     headers["Authorization"] = f"Bearer {access_token}"
-                v_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles", headers)
+                v_res = fetch_vehicle_list(headers, retry_server_errors=True)
                 vehicles = v_res.json().get("response") or [] if v_res.status_code == 200 else []
                 vehicle = find_controlled_vehicle(vehicles, vin)
                 vin_absent = bool(vin) and bool(vehicles) and vehicle is None
@@ -1296,7 +1331,7 @@ def main() -> None:
                         "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
                     )
                 else:
-                    s_res = night_proxy_get(f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state", headers)
+                    s_res = fetch_charge_state(vin, headers, retry_server_errors=True)
                     if s_res.status_code == 401:
                         token_expires_at = 0.0
                         night_stop_failures += 1
@@ -1458,7 +1493,7 @@ def main() -> None:
                     return 180
 
         try:
-            v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
+            v_res = fetch_vehicle_list(headers, retry_server_errors=False)
             if v_res.status_code != 200:
                 logger.warning(f"車両リスト取得エラー (HTTP {v_res.status_code})。10分待機します。")
                 return 600
@@ -1595,18 +1630,17 @@ def main() -> None:
                     )
                     return TERMINAL_BACKOFF_SEC
 
-            state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
-            s_res = proxy_session.get(state_url, headers=headers, timeout=10)
+            s_res = fetch_charge_state(vin, headers, retry_server_errors=False)
 
             if s_res.status_code == 401:
                 # continue のまま次の周回へ戻ると、更新が成功しても 401 が続くあいだ
                 # 180秒の制御周期を飛ばし、課金対象の vehicle_data を待機なしで繰り返す。
                 token_expires_at = 0.0
                 logger.warning("アクセストークンの失効を検知しました。3分後に再取得します。")
-                return 180
+                return day_vehicle_data_wait_sec(401, False)
             elif s_res.status_code == 429:
                 logger.error("テスラAPIレートリミット(429)。1時間処理を退避します。")
-                return 3600
+                return day_vehicle_data_wait_sec(429, False)
             elif s_res.status_code != 200:
                 # 車両データを読めない間は電流を動かせない。待機の長さは
                 # 車両データを取得できない時間に発生する買電で決める。給電中なら、絞り込めない1分が
@@ -1628,7 +1662,9 @@ def main() -> None:
                 # このサイクルで既に読んだ値は使わず、読み直す。車両を起こしたサイクルでは
                 # 保持した値が起動後の待機の分（約60〜70秒）古く、その間に給電が始まって
                 # いれば180秒で済む待機を600秒にしてしまう（PR #57 の自動レビューの指摘）。
-                wait_sec = 180 if home_charger_delivering(fresh=True) else 600
+                wait_sec = day_vehicle_data_wait_sec(
+                    s_res.status_code, home_charger_delivering(fresh=True)
+                )
                 logger.warning(
                     f"車両データ取得エラー (HTTP {s_res.status_code})。{wait_sec // 60}分待機します。"
                 )
