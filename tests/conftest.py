@@ -318,14 +318,11 @@ def _load_module(tmp_path, config_overrides=None):
 
     ログはRotatingFileHandlerが相対パスで開くため、import前にtmpへchdirしておく。
 
-    トークンファイルの用意が重要。main() は
-
-        if not os.path.exists(TOKEN_FILE) or refresh_token is None:
-            ... HTTPServer(('127.0.0.1', 8000)) を立てて認証コールバックを待つ ...
-
-    という初回認証フローを持っており、ファイルが無いと **永久にブロックする**。
-    tesla_tokens.json は .gitignore 済みなので開発機には在ってもCIには無い。
-    ここで tmp 上のダミーを指しておかないと、ローカルだけ通ってCIでハングする。
+    トークンファイルの用意が重要。ensure_access_token() は、トークンが無く標準入力が
+    端末のときだけポート8000で待つ。テストは端末ではないので、ファイルが無いと終了コード1で
+    終わる。tesla_tokens.json は .gitignore 済みなので、ここでは tmp 上のダミーを指す。
+    設定の読み込みは import 時ではなく load_runtime_config() で行う。ログファイルは
+    相対パスなので、その呼び出しのあいだだけ tmp へ chdir する。
     """
     # CI用の設定を tmp へ複製して使う（差分があれば当てる）。チェックアウトした
     # ci_config.json をそのまま指すと、権限が git と umask で決まり（通常 0644）、
@@ -358,6 +355,8 @@ def _load_module(tmp_path, config_overrides=None):
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module.configure_logging()
+        module.load_runtime_config()
         return module
     finally:
         os.chdir(previous_cwd)
@@ -380,9 +379,9 @@ def run_loop(tmp_path):
 
     def _run(world, start, budget_sec, override=False, house_power=-3000, on_poll=None,
              wall_connector_host=None, wall_connector_serial=None, config_overrides=None):
-        # 設定の検証は import 時に実行される。モジュール読み込みより後にハンドラーを付けると
-        # その行を取り逃すため、先にルートロガーへ付けておく（SolarCharger ロガーは
-        # 既定で propagate するので、ルートに付けた時点で拾える）。
+        # 設定の検証は _load_module の中の load_runtime_config() で実行される。
+        # その時点ではモジュールのロガーにハンドラーを付けていないため、先にルートロガーへ
+        # 付けておく（SolarCharger ロガーは既定で propagate するので、ルートに付けた時点で拾える）。
         capture = CapturingHandler()
         root_logger = logging.getLogger()
         root_logger.addHandler(capture)

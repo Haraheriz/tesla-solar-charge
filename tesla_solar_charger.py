@@ -27,15 +27,9 @@ from wall_connector import (
     take_first_attempt_failures,
 )
 
-# Windows環境での標準出力のエンコーディング問題を解決
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8")
-
-# ==========================================
-# 構造化ロギングの設定
-# ==========================================
+# Windows環境での標準出力のエンコーディングと、ログファイルの作成は main() から行う。
+# import しただけでは設定ファイルを読まず、終了もしない。
+BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE: str = "tesla_solar_charger.log"
 MAX_LOG_SIZE: int = 5 * 1024 * 1024  # 5MB
 BACKUP_COUNT: int = 3
@@ -45,193 +39,225 @@ BACKUP_COUNT: int = 3
 # WARNING では意味が強すぎる。一方でINFOの行に紛れて切り忘れに気づけないため、
 # 「異常ではないが人間の注意を向けたい事実」を専用レベルとして分離する。
 ATTENTION: int = 25
-logging.addLevelName(ATTENTION, "ATTENTION")
 
 logger = logging.getLogger("SolarCharger")
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
+_logging_ready: bool = False
+_config_ready: bool = False
+
 
 def log_attention(message: str) -> None:
     logger.log(ATTENTION, message)
 
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8")
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
 
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+def configure_logging() -> None:
+    """標準出力の文字コードと、ファイル・コンソールへのログ出力を用意する。2回目は何もしない。"""
+    global _logging_ready
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+    logging.addLevelName(ATTENTION, "ATTENTION")
+    if _logging_ready:
+        return
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    _logging_ready = True
 
-# ==========================================
-# 設定ファイルの自動読み込み ＆ 型ガード
-# ==========================================
-# 実行時のカレントディレクトリに依存しないよう、スクリプト自身の場所を基準に解決する。
-# 環境ごとに置き場所を変えたい場合は環境変数 TESLA_CONFIG_PATH / TESLA_TOKEN_PATH で上書き可能。
-BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE: str = os.environ.get("TESLA_CONFIG_PATH", os.path.join(BASE_DIR, "tesla_config.json"))
-TOKEN_FILE: str = os.environ.get("TESLA_TOKEN_PATH", os.path.join(BASE_DIR, "tesla_tokens.json"))
 
-if not os.path.exists(CONFIG_FILE):
-    logger.critical(f"設定ファイル（{CONFIG_FILE}）が見つかりません。")
-    sys.exit(1)
+def load_runtime_config() -> None:
+    """設定ファイルを読み、数値の下限とキー同士の関係を確定する。2回目は何もしない。
 
-with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
-    config: Dict[str, Any] = json.load(f)
+    起動時の ATTENTION（権限、下限、キー同士の関係）は、この関数が初めて呼ばれたときに出す。
+    """
+    global _config_ready
+    global CONFIG_FILE, TOKEN_FILE
+    global REMO_ACCESS_TOKEN, CLIENT_ID, CLIENT_SECRET, DOMAIN
+    global MIN_AMPS, MAX_AMPS, START_AMPS, STOP_DEBOUNCE_CYCLES
+    global REMO_SAMPLES, REMO_SAMPLE_INTERVAL_SEC, WAKE_DEBOUNCE_CYCLES
+    global COMMAND_RETRIES, TERMINAL_BACKOFF_SEC, TERMINAL_WAKE_SUPPRESS_SEC
+    global NIGHT_STOP_MAX_ATTEMPTS, NIGHT_GET_ATTEMPTS
+    global WALL_CONNECTOR_HOST, WALL_CONNECTOR_TIMEOUT_SEC, WALL_CONNECTOR_ATTEMPTS
+    global DISCONNECTED_PROBE_INTERVAL_SEC, WALL_CONNECTOR_SERIAL, FAST_CHARGER_POWER_KW
+    global FORCE_RUN, WATTS_PER_AMP, NIGHT_SLEEP_SEC
+    if _config_ready:
+        return
+    # 実行時のカレントディレクトリに依存しないよう、スクリプト自身の場所を基準に解決する。
+    # 環境ごとに置き場所を変えたい場合は環境変数 TESLA_CONFIG_PATH / TESLA_TOKEN_PATH で上書き可能。
+    CONFIG_FILE = os.environ.get("TESLA_CONFIG_PATH", os.path.join(BASE_DIR, "tesla_config.json"))
+    TOKEN_FILE = os.environ.get("TESLA_TOKEN_PATH", os.path.join(BASE_DIR, "tesla_tokens.json"))
+    if not os.path.exists(CONFIG_FILE):
+        logger.critical(f"設定ファイル（{CONFIG_FILE}）が見つかりません。")
+        sys.exit(1)
+    with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
+        config = json.load(f)
 
-# 認証情報を含む2ファイルの権限を起動時に確かめる。tesla_tokens.json はまだ無いことがある
-# （初回認証前）。save_tokens() が 0o600 で作るため、無ければ検査の対象外でよい。
-warn_if_accessible_by_others(CONFIG_FILE, log_attention)
-warn_if_accessible_by_others(TOKEN_FILE, log_attention)
+    # 認証情報を含む2ファイルの権限を起動時に確かめる。tesla_tokens.json はまだ無いことがある
+    # （初回認証前）。save_tokens() が 0o600 で作るため、無ければ検査の対象外でよい。
+    warn_if_accessible_by_others(CONFIG_FILE, log_attention)
+    warn_if_accessible_by_others(TOKEN_FILE, log_attention)
 
-REMO_ACCESS_TOKEN: str = str(config.get("REMO_ACCESS_TOKEN", ""))
-CLIENT_ID: str = str(config.get("CLIENT_ID", ""))
-CLIENT_SECRET: str = str(config.get("CLIENT_SECRET", ""))
-DOMAIN: str = str(config.get("DOMAIN", "localhost:8000"))
+    REMO_ACCESS_TOKEN = str(config.get("REMO_ACCESS_TOKEN", ""))
+    CLIENT_ID = str(config.get("CLIENT_ID", ""))
+    CLIENT_SECRET = str(config.get("CLIENT_SECRET", ""))
+    DOMAIN = str(config.get("DOMAIN", "localhost:8000"))
 
-settings = Settings(config, log_attention)
+    settings = Settings(config, log_attention)
 
-MIN_AMPS: int = settings.integer("MIN_AMPS", 4, minimum=1)
-MAX_AMPS: int = settings.integer("MAX_AMPS", 48, minimum=1)
+    MIN_AMPS = settings.integer("MIN_AMPS", 4, minimum=1)
+    MAX_AMPS = settings.integer("MAX_AMPS", 48, minimum=1)
 
-# 200 V × 1 A = 200 W。買電・売電（W）を電流（A）へ換算する。int() は 0 へ向かって切り捨てる。
-WATTS_PER_AMP: int = 200
+    # 200 V × 1 A = 200 W。買電・売電（W）を電流（A）へ換算する。int() は 0 へ向かって切り捨てる。
+    WATTS_PER_AMP = 200
 
-# ヒステリシス用の開始閾値。充電開始・車両起動はSTART_AMPS以上の余剰を要求し、
-# 停止判定はMIN_AMPS未満で行う。開始直後は車両自身の消費で余剰が減るため、
-# 閾値が1本だと開始→即停止の発振が起きる。
-START_AMPS: int = settings.integer("START_AMPS", MIN_AMPS + 2, minimum=1)
+    # ヒステリシス用の開始閾値。充電開始・車両起動はSTART_AMPS以上の余剰を要求し、
+    # 停止判定はMIN_AMPS未満で行う。開始直後は車両自身の消費で余剰が減るため、
+    # 閾値が1本だと開始→即停止の発振が起きる。
+    START_AMPS = settings.integer("START_AMPS", MIN_AMPS + 2, minimum=1)
 
-# 停止判定のデバウンス回数。余剰不足がこの回数連続したときだけ充電を停止する。
-# 0 はデバウンスなし（1サイクルで停止）を意味する。値域の中の1値に「無効」の意味を
-# 載せているため、下限を 0 にしてよいキーであることをここに明記しておく。
-STOP_DEBOUNCE_CYCLES: int = settings.integer("STOP_DEBOUNCE_CYCLES", 2, minimum=0)
+    # 停止判定のデバウンス回数。余剰不足がこの回数連続したときだけ充電を停止する。
+    # 0 はデバウンスなし（1サイクルで停止）を意味する。値域の中の1値に「無効」の意味を
+    # 載せているため、下限を 0 にしてよいキーであることをここに明記しておく。
+    STOP_DEBOUNCE_CYCLES = settings.integer("STOP_DEBOUNCE_CYCLES", 2, minimum=0)
 
-# Remo E瞬時電力のサンプル数と間隔秒。
-#
-# 1 にしてある。平滑化のつもりで3回×10秒（20秒の窓）で平均していたが、
-# 2026-08-09〜18 の12,055回の観測で、スマートメーターの更新間隔は中央値61秒
-# （95%が60秒）と確定した。20秒の窓は大半が1回の更新に収まり、同じ値を3回
-# 平均しているにすぎない。情報は増えず、1サイクルにつき20秒とAPI 2回分を
-# 費やしていた。
-#
-# 窓を広げる案は採れない。複数の更新をまたぐには120〜180秒を要し、
-# 制御サイクル（180秒）のほぼ全部を占める。平滑化が要るなら、サイクルを
-# またいで直近N回の値を使う別の設計にすること。
-REMO_SAMPLES: int = settings.integer("REMO_SAMPLES", 1, minimum=1)
-REMO_SAMPLE_INTERVAL_SEC: int = settings.integer("REMO_SAMPLE_INTERVAL_SEC", 10, minimum=1)
+    # Remo E瞬時電力のサンプル数と間隔秒。
+    #
+    # 1 にしてある。平滑化のつもりで3回×10秒（20秒の窓）で平均していたが、
+    # 2026-08-09〜18 の12,055回の観測で、スマートメーターの更新間隔は中央値61秒
+    # （95%が60秒）と確定した。20秒の窓は大半が1回の更新に収まり、同じ値を3回
+    # 平均しているにすぎない。情報は増えず、1サイクルにつき20秒とAPI 2回分を
+    # 費やしていた。
+    #
+    # 窓を広げる案は採れない。複数の更新をまたぐには120〜180秒を要し、
+    # 制御サイクル（180秒）のほぼ全部を占める。平滑化が要るなら、サイクルを
+    # またいで直近N回の値を使う別の設計にすること。
+    REMO_SAMPLES = settings.integer("REMO_SAMPLES", 1, minimum=1)
+    REMO_SAMPLE_INTERVAL_SEC = settings.integer("REMO_SAMPLE_INTERVAL_SEC", 10, minimum=1)
 
-# 就寝中の車両を起こす判断に要求する、余剰が開始閾値以上だった連続サイクル数。
-#
-# 開始閾値を超えた余剰の58%は2分以内に終息する（2026-08-09〜18、81区間中47件）。
-# 1サンプルで起こすと、消えた余剰のためにウェイク（¥2.75、最も単価が高い）を
-# 費やすことになる。2026-08-13 12:42 に実際にそうなった。
-#
-# 既に online の車の充電開始は遅らせない。そちらの誤発火は約¥0.3であり、
-# 3分の遅れによる損失のほうが大きい。
-# 0 はデバウンスなし（1サイクルで起こす）を意味する。STOP_DEBOUNCE_CYCLES と同様。
-WAKE_DEBOUNCE_CYCLES: int = settings.integer("WAKE_DEBOUNCE_CYCLES", 2, minimum=0)
+    # 就寝中の車両を起こす判断に要求する、余剰が開始閾値以上だった連続サイクル数。
+    #
+    # 開始閾値を超えた余剰の58%は2分以内に終息する（2026-08-09〜18、81区間中47件）。
+    # 1サンプルで起こすと、消えた余剰のためにウェイク（¥2.75、最も単価が高い）を
+    # 費やすことになる。2026-08-13 12:42 に実際にそうなった。
+    #
+    # 既に online の車の充電開始は遅らせない。そちらの誤発火は約¥0.3であり、
+    # 3分の遅れによる損失のほうが大きい。
+    # 0 はデバウンスなし（1サイクルで起こす）を意味する。STOP_DEBOUNCE_CYCLES と同様。
+    WAKE_DEBOUNCE_CYCLES = settings.integer("WAKE_DEBOUNCE_CYCLES", 2, minimum=0)
 
-# 充電コマンド（charge_start / charge_stop / set_charging_amps）のリトライ回数。
-# Tesla APIは車両が通信圏外・スリープ移行中などで HTTP 408 や result=false を頻繁に返すため、
-# 「投げっぱなしで成功したことにする」と停止漏れがそのまま夜通しの系統充電になる。
-COMMAND_RETRIES: int = settings.integer("COMMAND_RETRIES", 3, minimum=1)
+    # 充電コマンド（charge_start / charge_stop / set_charging_amps）のリトライ回数。
+    # Tesla APIは車両が通信圏外・スリープ移行中などで HTTP 408 や result=false を頻繁に返すため、
+    # 「投げっぱなしで成功したことにする」と停止漏れがそのまま夜通しの系統充電になる。
+    COMMAND_RETRIES = settings.integer("COMMAND_RETRIES", 3, minimum=1)
 
-# 満充電・ケーブル未接続などの「終端ステータス」を観測したあと、次のサイクルまでの待機秒。
-TERMINAL_BACKOFF_SEC: int = settings.integer("TERMINAL_BACKOFF_SEC", 600, minimum=1)
+    # 満充電・ケーブル未接続などの「終端ステータス」を観測したあと、次のサイクルまでの待機秒。
+    TERMINAL_BACKOFF_SEC = settings.integer("TERMINAL_BACKOFF_SEC", 600, minimum=1)
 
-# 終端ステータスを観測してから、就寝中の車両をWake Upしてよいと再び判断するまでの秒数。
-# 必ず TERMINAL_BACKOFF_SEC より十分長くすること。同じ値にすると、待機明けの時点で
-# ちょうど期限切れになり抑止が一度も効かない（満充電の車へ wake_up を繰り返し送る）。
-# 満充電・ケーブル未接続が解消されるとき（乗車・充電上限の変更・ケーブル接続）は
-# 車両が自分からオンラインになるため、その場合は待たずに通常の問い合わせ経路に入る。
-TERMINAL_WAKE_SUPPRESS_SEC: int = settings.integer("TERMINAL_WAKE_SUPPRESS_SEC", 3600, minimum=1)
+    # 終端ステータスを観測してから、就寝中の車両をWake Upしてよいと再び判断するまでの秒数。
+    # 必ず TERMINAL_BACKOFF_SEC より十分長くすること。同じ値にすると、待機明けの時点で
+    # ちょうど期限切れになり抑止が一度も効かない（満充電の車へ wake_up を繰り返し送る）。
+    # 満充電・ケーブル未接続が解消されるとき（乗車・充電上限の変更・ケーブル接続）は
+    # 車両が自分からオンラインになるため、その場合は待たずに通常の問い合わせ経路に入る。
+    TERMINAL_WAKE_SUPPRESS_SEC = settings.integer("TERMINAL_WAKE_SUPPRESS_SEC", 3600, minimum=1)
 
-# 夜間休止に入る際の充電停止確認を、成功するまで再試行する上限回数（1回=10分間隔）。
-# 無制限に再試行するとAPIレートリミット(429)を誘発するため上限を設ける。
-NIGHT_STOP_MAX_ATTEMPTS: int = settings.integer("NIGHT_STOP_MAX_ATTEMPTS", 6, minimum=1)
+    # 夜間休止に入る際の充電停止確認を、成功するまで再試行する上限回数（1回=10分間隔）。
+    # 無制限に再試行するとAPIレートリミット(429)を誘発するため上限を設ける。
+    NIGHT_STOP_MAX_ATTEMPTS = settings.integer("NIGHT_STOP_MAX_ATTEMPTS", 6, minimum=1)
 
-# 夜間休止中のGETを、通信エラー・5xxのときに即座に試行する回数（1回目を含む）。
-# 巡回間隔（10分）を待たずにその場で取り直すためのもの。
-NIGHT_GET_ATTEMPTS: int = settings.integer("NIGHT_GET_ATTEMPTS", 2, minimum=1)
+    # 夜間休止中のGETを、通信エラー・5xxのときに即座に試行する回数（1回目を含む）。
+    # 巡回間隔（10分）を待たずにその場で取り直すためのもの。
+    NIGHT_GET_ATTEMPTS = settings.integer("NIGHT_GET_ATTEMPTS", 2, minimum=1)
 
-# 自宅のTesla Wall Connector (Gen 3) のIPアドレス。空なら外出先判定を行わない
-# （設定していない環境では全経路が従来どおりの動作になる）。
-# DHCPでアドレスが変わると判定不能に落ちるため、ルーター側でIPを予約すること。
-WALL_CONNECTOR_HOST: str = str(config.get("WALL_CONNECTOR_HOST", ""))
-WALL_CONNECTOR_TIMEOUT_SEC: float = settings.number("WALL_CONNECTOR_TIMEOUT_SEC", 5, minimum=0.1)
+    # 自宅のTesla Wall Connector (Gen 3) のIPアドレス。空なら外出先判定を行わない
+    # （設定していない環境では全経路が従来どおりの動作になる）。
+    # DHCPでアドレスが変わると判定不能に落ちるため、ルーター側でIPを予約すること。
+    WALL_CONNECTOR_HOST = str(config.get("WALL_CONNECTOR_HOST", ""))
+    WALL_CONNECTOR_TIMEOUT_SEC = settings.number("WALL_CONNECTOR_TIMEOUT_SEC", 5, minimum=0.1)
 
-# ウォールコネクターを読めなかったときに、その場で取り直す回数（1回目を含む）。
-# 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
-WALL_CONNECTOR_ATTEMPTS: int = settings.integer("WALL_CONNECTOR_ATTEMPTS", 2, minimum=1)
+    # ウォールコネクターを読めなかったときに、その場で取り直す回数（1回目を含む）。
+    # 制御サイクルは昼3分・夜10分あり、次のサイクルまで持ち越すとその間ずっと判定できない。
+    WALL_CONNECTOR_ATTEMPTS = settings.integer("WALL_CONNECTOR_ATTEMPTS", 2, minimum=1)
 
-# 「外出先の充電記録」が有効なとき、ケーブル未接続の車両データを読み直す間隔（秒）。
-#
-# 自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。車両データを読んでも
-# 電流調整・停止・開始のどの判断も変わらないため、既定では読まない。2026-08-22 の
-# 11:51〜15:32 は10分ごとに問い合わせ続けており、その日の vehicle_data 38件のうち
-# 23件（約¥6.6）をこの状態に費やしていた。
-#
-# 読むことに意味があるのは、外出先での充電を記録したいときだけである。急速充電器が返す
-# フィールドの実値は未観測のものが多く（docs/03_operation.md の観測記録を参照）、
-# 記録できるのは充電中に読んだときに限られる。そのため有効・無効はスマホから切替える
-# （override_state.json の away_probe）。設定ファイルは起動時にしか読まないため、
-# 出発の直前や充電器の前では変更できないからである。
-#
-# ここが決めるのは有効時の間隔だけである。0以下は指定できない（無効化はフラグ側が担う）。
-DISCONNECTED_PROBE_INTERVAL_SEC: int = settings.integer("DISCONNECTED_PROBE_INTERVAL_SEC", 600, minimum=1)
+    # 「外出先の充電記録」が有効なとき、ケーブル未接続の車両データを読み直す間隔（秒）。
+    #
+    # 自宅の充電器に何も繋がっていなければ、自宅では充電を開始できない。車両データを読んでも
+    # 電流調整・停止・開始のどの判断も変わらないため、既定では読まない。2026-08-22 の
+    # 11:51〜15:32 は10分ごとに問い合わせ続けており、その日の vehicle_data 38件のうち
+    # 23件（約¥6.6）をこの状態に費やしていた。
+    #
+    # 読むことに意味があるのは、外出先での充電を記録したいときだけである。急速充電器が返す
+    # フィールドの実値は未観測のものが多く（docs/03_operation.md の観測記録を参照）、
+    # 記録できるのは充電中に読んだときに限られる。そのため有効・無効はスマホから切替える
+    # （override_state.json の away_probe）。設定ファイルは起動時にしか読まないため、
+    # 出発の直前や充電器の前では変更できないからである。
+    #
+    # ここが決めるのは有効時の間隔だけである。0以下は指定できない（無効化はフラグ側が担う）。
+    DISCONNECTED_PROBE_INTERVAL_SEC = settings.integer("DISCONNECTED_PROBE_INTERVAL_SEC", 600, minimum=1)
 
-# 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
-WALL_CONNECTOR_SERIAL: str = str(config.get("WALL_CONNECTOR_SERIAL", ""))
+    # 任意。設定した場合のみ、起動時に /api/1/version の serial_number と照合する。
+    WALL_CONNECTOR_SERIAL = str(config.get("WALL_CONNECTOR_SERIAL", ""))
 
-# ウォールコネクターを読めなかったときのフォールバック閾値（kW）。
-# 自宅の上限は MAX_AMPS(48A) × 200V = 9.6kW であり、これを超える給電は
-# 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
-FAST_CHARGER_POWER_KW: float = settings.number("FAST_CHARGER_POWER_KW", 15, minimum=1)
+    # ウォールコネクターを読めなかったときのフォールバック閾値（kW）。
+    # 自宅の上限は MAX_AMPS(48A) × 200V = 9.6kW であり、これを超える給電は
+    # 自宅では起こりえない。スーパーチャージャーは概ね50kW以上になる。
+    FAST_CHARGER_POWER_KW = settings.number("FAST_CHARGER_POWER_KW", 15, minimum=1)
 
-# 日中の時間帯は config_loader.DAY_START_HOUR / DAY_END_HOUR。操作画面と同じ値である。
+    # 日中の時間帯は config_loader.DAY_START_HOUR / DAY_END_HOUR。操作画面と同じ値である。
 
-# 夜間休止中の巡回間隔（秒）。ただし DAY_START_HOUR をまたぐ手前で切り上げる。
-NIGHT_SLEEP_SEC: int = 600
+    # 夜間休止中の巡回間隔（秒）。ただし DAY_START_HOUR をまたぐ手前で切り上げる。
+    NIGHT_SLEEP_SEC = 600
 
-# キーどうしの関係は、個々の下限では表せない。以下はいずれもコメントとして
-# 書かれていながら強制されておらず、破ったときの症状が分かりにくいものである。
-if MAX_AMPS < MIN_AMPS:
-    log_attention(
-        f"設定 MAX_AMPS（{MAX_AMPS}）が MIN_AMPS（{MIN_AMPS}）を下回っています。"
-        f"MAX_AMPS を {MIN_AMPS} として起動します。"
-    )
-    MAX_AMPS = MIN_AMPS
+    # キーどうしの関係は、個々の下限では表せない。以下はいずれもコメントとして
+    # 書かれていながら強制されておらず、破ったときの症状が分かりにくいものである。
+    if MAX_AMPS < MIN_AMPS:
+        log_attention(
+            f"設定 MAX_AMPS（{MAX_AMPS}）が MIN_AMPS（{MIN_AMPS}）を下回っています。"
+            f"MAX_AMPS を {MIN_AMPS} として起動します。"
+        )
+        MAX_AMPS = MIN_AMPS
 
-if START_AMPS <= MIN_AMPS:
-    # 開始と停止の閾値が同じだと、開始した直後に車両自身の消費で余剰が減り、
-    # 開始→即停止の発振が起きる（START_AMPS の定義を参照）。
-    log_attention(
-        f"設定 START_AMPS（{START_AMPS}）が MIN_AMPS（{MIN_AMPS}）以下です。"
-        "開始と停止の閾値が重なると発振するため、"
-        f"START_AMPS を {MIN_AMPS + 2} として起動します。"
-    )
-    START_AMPS = MIN_AMPS + 2
+    if START_AMPS <= MIN_AMPS:
+        # 開始と停止の閾値が同じだと、開始した直後に車両自身の消費で余剰が減り、
+        # 開始→即停止の発振が起きる（START_AMPS の定義を参照）。
+        log_attention(
+            f"設定 START_AMPS（{START_AMPS}）が MIN_AMPS（{MIN_AMPS}）以下です。"
+            "開始と停止の閾値が重なると発振するため、"
+            f"START_AMPS を {MIN_AMPS + 2} として起動します。"
+        )
+        START_AMPS = MIN_AMPS + 2
 
-if TERMINAL_WAKE_SUPPRESS_SEC <= TERMINAL_BACKOFF_SEC:
-    # 同じ値にすると、待機明けの時点でちょうど期限切れになり抑止が一度も効かない
-    # （満充電の車を延々と起こす。TERMINAL_WAKE_SUPPRESS_SEC の定義を参照）。
-    log_attention(
-        f"設定 TERMINAL_WAKE_SUPPRESS_SEC（{TERMINAL_WAKE_SUPPRESS_SEC}）が "
-        f"TERMINAL_BACKOFF_SEC（{TERMINAL_BACKOFF_SEC}）以下です。"
-        "この関係では車両を起こさない抑止が一度も効かないため、"
-        f"{TERMINAL_BACKOFF_SEC * 6} として起動します。"
-    )
-    TERMINAL_WAKE_SUPPRESS_SEC = TERMINAL_BACKOFF_SEC * 6
+    if TERMINAL_WAKE_SUPPRESS_SEC <= TERMINAL_BACKOFF_SEC:
+        # 同じ値にすると、待機明けの時点でちょうど期限切れになり抑止が一度も効かない
+        # （満充電の車を延々と起こす。TERMINAL_WAKE_SUPPRESS_SEC の定義を参照）。
+        log_attention(
+            f"設定 TERMINAL_WAKE_SUPPRESS_SEC（{TERMINAL_WAKE_SUPPRESS_SEC}）が "
+            f"TERMINAL_BACKOFF_SEC（{TERMINAL_BACKOFF_SEC}）以下です。"
+            "この関係では車両を起こさない抑止が一度も効かないため、"
+            f"{TERMINAL_BACKOFF_SEC * 6} として起動します。"
+        )
+        TERMINAL_WAKE_SUPPRESS_SEC = TERMINAL_BACKOFF_SEC * 6
 
-_home_max_kw = MAX_AMPS * WATTS_PER_AMP / 1000
-if _home_max_kw >= FAST_CHARGER_POWER_KW:
-    # 閾値は自動では変えない。観測で 9 kW と 51 kW のあいだに置いた値だからである。
-    log_attention(
-        f"MAX_AMPS（{MAX_AMPS}A）×{WATTS_PER_AMP}V は {_home_max_kw:g}kW で、"
-        f"FAST_CHARGER_POWER_KW（{FAST_CHARGER_POWER_KW:g}kW）以上です。"
-        "自宅の充電が外出先と判定され、夜間は停止しないことがあります。"
-    )
+    _home_max_kw = MAX_AMPS * WATTS_PER_AMP / 1000
+    if _home_max_kw >= FAST_CHARGER_POWER_KW:
+        # 閾値は自動では変えない。観測で 9 kW と 51 kW のあいだに置いた値だからである。
+        log_attention(
+            f"MAX_AMPS（{MAX_AMPS}A）×{WATTS_PER_AMP}V は {_home_max_kw:g}kW で、"
+            f"FAST_CHARGER_POWER_KW（{FAST_CHARGER_POWER_KW:g}kW）以上です。"
+            "自宅の充電が外出先と判定され、夜間は停止しないことがあります。"
+        )
+
+    # 動作確認用：コマンドライン引数 --force-run または環境変数 FORCE_RUN=1 で
+    # 夜間休止モード（7:00-18:00以外は停止）を無視して常時稼働させ、
+    # サイクルごとに画面入力で仮想の家庭消費電力（W）を指定できるようにする
+    FORCE_RUN = "--force-run" in sys.argv or os.environ.get("FORCE_RUN") == "1"
+    _config_ready = True
+
 
 # 起動時に選んだ VIN が車両リストから消えている。状態が変わったときだけログに出す。
 controlled_vin_missing: bool = False
@@ -276,26 +302,29 @@ CHARGE_LIMIT_MIN_FALLBACK: int = 50
 # ウォールコネクターのローカルAPIは課金されない（1回28ms）。
 TARGET_WAIT_CHECK_SEC: int = 60
 
-# 動作確認用：コマンドライン引数 --force-run または環境変数 FORCE_RUN=1 で
-# 夜間休止モード（7:00-18:00以外は停止）を無視して常時稼働させ、
-# サイクルごとに画面入力で仮想の家庭消費電力（W）を指定できるようにする
-FORCE_RUN: bool = "--force-run" in sys.argv or os.environ.get("FORCE_RUN") == "1"
 
 AUTH_URL: str = "https://auth.tesla.com/oauth2/v3/token"
 PROXY_HOST: str = "https://localhost:4443"
 
-# ローカルTesla HTTPプロキシ用の自己署名証明書のパス。
-# 環境ごとに置き場所を変えたい場合は環境変数 TESLA_CERT_PATH で上書き可能。
-PROXY_CERT_PATH: str = os.environ.get("TESLA_CERT_PATH", os.path.join(BASE_DIR, "cert.pem"))
+# ローカルTesla HTTPプロキシ用の自己署名証明書のパス。セッションを作るときに確定する。
+PROXY_CERT_PATH: str = ""
 
-# ローカルプロキシ宛と外部クラウドAPI宛でTLS検証方法を明確に分離する。
-# proxy_session: 自己署名証明書(cert.pem)をピン留めして検証
-# cloud_session: 標準CAバンドルで通常のチェーン検証
-proxy_session = requests.Session()
-proxy_session.verify = PROXY_CERT_PATH
+# テストが main() の前に差し替える。None のときだけ ensure_http_sessions() が作る。
+proxy_session = None
+cloud_session = None
 
-cloud_session = requests.Session()
-cloud_session.verify = True
+
+def ensure_http_sessions() -> None:
+    """プロキシ用とクラウド用のセッションを、まだ無ければ作る。"""
+    global proxy_session, cloud_session, PROXY_CERT_PATH
+    if proxy_session is None:
+        PROXY_CERT_PATH = os.environ.get("TESLA_CERT_PATH", os.path.join(BASE_DIR, "cert.pem"))
+        proxy_session = requests.Session()
+        proxy_session.verify = PROXY_CERT_PATH
+    if cloud_session is None:
+        cloud_session = requests.Session()
+        cloud_session.verify = True
+
 
 received_code: Optional[str] = None
 expected_oauth_state: Optional[str] = None
@@ -1062,17 +1091,17 @@ def release_override_for_target(level: Optional[int], target: int, stopped: bool
     )
 
 
-def main() -> None:
+def ensure_access_token() -> None:
+    """保存済みトークンを読む。期限が切れていれば更新し、無ければ初回認証に入る。
+
+    通信失敗では tesla_tokens.json を消さず、180秒から最大3600秒の間隔で再試行する。
+    HTTP 400/401 ではファイルを残したまま終了コード1で止まる。
+    トークンが無く、標準入力が端末でなく TESLA_INTERACTIVE_AUTH=1 でもないときは、
+    ポート8000で待たずに終了コード1で止まる。
+    """
     global received_code, expected_oauth_state, access_token, refresh_token, token_expires_at
-
-    logger.info("=========================================================================")
-    logger.info("太陽光自動充電制御システム（トークン手元調達・初回手動認証方式）起動")
-    logger.info("=========================================================================")
-
     if load_tokens():
         logger.info("有効なトークンファイルを発見。保存済みトークンで再ログインします。")
-        # 通信失敗ではファイルを消さず、ループ内と同じ間隔で再試行する。
-        # 400/401 は再試行で回復しないため、ファイルを残したまま終了する。
         while refresh_token and time.time() > token_expires_at:
             if refresh_tesla_token():
                 break
@@ -1083,7 +1112,6 @@ def main() -> None:
             logger.info(f"トークン再取得まで{wait_sec}秒待機します。")
             time.sleep(wait_sec)
 
-    # 初回生成（手元の端末で実行したときだけここを通る）
     if not os.path.exists(TOKEN_FILE) or refresh_token is None:
         if not interactive_auth_allowed():
             logger.critical(
@@ -1098,14 +1126,12 @@ def main() -> None:
         logger.warning("初回認証手続きを開始します。ブラウザが自動起動しない場合は以下を開いてください：")
         logger.warning(f"\n{login_url}\n")
 
-        # Windows環境ならブラウザを自動で起動する
         try:
             import webbrowser
             webbrowser.open(login_url)
         except Exception:
             pass
 
-        # 同じPC内のブラウザからの自動着地を待ち伏せる
         httpd = HTTPServer(('127.0.0.1', 8000), OAuthCallbackHandler)
         while received_code is None:
             httpd.handle_request()
@@ -1127,6 +1153,18 @@ def main() -> None:
             int(token_data.get("expires_in", 28800))
         )
         logger.info("手元でのトークン生成に完全成功！『tesla_tokens.json』が生成されました。")
+
+
+def main() -> None:
+    configure_logging()
+    load_runtime_config()
+    ensure_http_sessions()
+
+    logger.info("=========================================================================")
+    logger.info("太陽光自動充電制御システム（トークン手元調達・初回手動認証方式）起動")
+    logger.info("=========================================================================")
+
+    ensure_access_token()
 
     headers: Dict[str, str] = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json", "Accept": "application/json"}
 
