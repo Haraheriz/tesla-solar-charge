@@ -11,6 +11,7 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from config_loader import Settings, warn_if_accessible_by_others
+import tesla_auth
 from override_state import read_away_probe_state, read_charge_target, read_override_state, read_snapshot, write_override
 from vehicle_status import load_vehicle_status, save_vehicle_status
 from wall_connector import (
@@ -345,9 +346,9 @@ def get_remo_power() -> Optional[int]:
                 if not properties:
                     logger.warning("Nature Remo E がスマートメーターの一時的な空応答を検知しました。")
                     return None
-                for prop in properties:
-                    if prop.get("epc") == 231:
-                        return int(prop.get("val"))
+                value, _updated = tesla_auth.epc_value(properties, 231)
+                if value is not None:
+                    return int(value)
     except Exception as e:
         logger.error(f"Nature Remo E 通信エラー: {e}")
     return None
@@ -489,39 +490,55 @@ def format_duration(seconds: float) -> str:
     return f"{hours}時間{minutes}分" if hours else f"{minutes}分"
 
 
+def _apply_token_data(data: Dict[str, Any]) -> None:
+    global access_token, refresh_token, token_expires_at
+    access_token = data.get("access_token")
+    refresh_token = data.get("refresh_token")
+    if refresh_token == "None":
+        refresh_token = None
+    token_expires_at = float(data.get("token_expires_at", 0.0))
+
+
 def save_tokens(acc: str, ref: Optional[str], exp_in: int) -> None:
     global token_expires_at
-    token_expires_at = time.time() + int(exp_in) - 1800
-    token_data: Dict[str, Any] = {
-        "access_token": acc, "refresh_token": ref, "token_expires_at": token_expires_at
-    }
-    tmp_file: str = TOKEN_FILE + ".tmp"
     try:
-        fd = os.open(tmp_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(token_data, f, ensure_ascii=False, indent=4)
-        os.replace(tmp_file, TOKEN_FILE)
+        token_expires_at = tesla_auth.save_token_file(TOKEN_FILE, acc, ref, exp_in)
     except Exception as e:
         logger.error(f"トークンファイルの安全な保存に失敗しました: {e}")
 
 def load_tokens() -> bool:
-    global access_token, refresh_token, token_expires_at
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r", encoding="utf-8-sig") as f:
-                data: Dict[str, Any] = json.load(f)
-                access_token = data.get("access_token")
-                refresh_token = data.get("refresh_token")
-                if refresh_token == "None":
-                    refresh_token = None
-                token_expires_at = float(data.get("token_expires_at", 0.0))
-                return True
-        except Exception:
-            return False
-    return False
+    data = tesla_auth.load_token_file(TOKEN_FILE)
+    if data is None:
+        return False
+    _apply_token_data(data)
+    return True
 
 def refresh_tesla_token() -> bool:
     global access_token, refresh_token, token_refresh_failures, token_refresh_rejected
+    lock = tesla_auth.try_lock(TOKEN_FILE, blocking=True)
+    try:
+        return _refresh_tesla_token_locked()
+    finally:
+        tesla_auth.unlock(lock)
+
+
+def _refresh_tesla_token_locked() -> bool:
+    global access_token, refresh_token, token_refresh_failures, token_refresh_rejected
+    current = tesla_auth.load_token_file(TOKEN_FILE)
+    if current is not None:
+        try:
+            expires_at = float(current.get("token_expires_at", 0.0))
+        except (TypeError, ValueError):
+            expires_at = 0.0
+        file_access = current.get("access_token")
+        # メモリ上の期限を 0 にしたあとも、ファイルには以前の期限が残っている。
+        # それを新しいトークンとみなすと、401 のあと更新しない。別プロセスが書いた
+        # 別のアクセストークンのときだけ、ファイルの内容を使う。
+        if expires_at > time.time() and file_access and file_access != access_token:
+            _apply_token_data(current)
+            token_refresh_failures = 0
+            token_refresh_rejected = False
+            return True
     if not refresh_token:
         logger.error("リフレッシュトークンが存在しないため、自動リフレッシュをスキップします。")
         token_refresh_failures += 1
