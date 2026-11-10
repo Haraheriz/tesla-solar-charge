@@ -225,6 +225,15 @@ if TERMINAL_WAKE_SUPPRESS_SEC <= TERMINAL_BACKOFF_SEC:
     )
     TERMINAL_WAKE_SUPPRESS_SEC = TERMINAL_BACKOFF_SEC * 6
 
+_home_max_kw = MAX_AMPS * WATTS_PER_AMP / 1000
+if _home_max_kw >= FAST_CHARGER_POWER_KW:
+    # 閾値は自動では変えない。観測で 9 kW と 51 kW のあいだに置いた値だからである。
+    log_attention(
+        f"MAX_AMPS（{MAX_AMPS}A）×{WATTS_PER_AMP}V は {_home_max_kw:g}kW で、"
+        f"FAST_CHARGER_POWER_KW（{FAST_CHARGER_POWER_KW:g}kW）以上です。"
+        "自宅の充電が外出先と判定され、夜間は停止しないことがあります。"
+    )
+
 # 起動時に選んだ VIN が車両リストから消えている。状態が変わったときだけログに出す。
 controlled_vin_missing: bool = False
 
@@ -883,11 +892,17 @@ def sync_charge_limit(
     if charge_target is None and applied is None:
         return
 
-    wc_state = read_wall_connector()
-    if wc_state == WC_UNKNOWN:
-        return
+    # DC 急速充電は、ウォールコネクターが別の車で connected でも自宅ではない。
+    # 電流コマンドと同じ classify_charging_site を使う。
+    site, _site_reason = classify_charging_site(charge_state)
     charging_state = str(charge_state.get("charging_state") or "")
-    at_home = wc_state == WC_CONNECTED and charging_state != STATUS_DISCONNECTED
+    if site == SITE_AWAY:
+        at_home = False
+    else:
+        wc_state = read_wall_connector()
+        if wc_state == WC_UNKNOWN:
+            return
+        at_home = wc_state == WC_CONNECTED and charging_state != STATUS_DISCONNECTED
 
     if charge_target is None or not at_home:
         # 元に戻す側
