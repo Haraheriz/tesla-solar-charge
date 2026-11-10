@@ -161,7 +161,7 @@
 1. 目標充電率が設定されている
 2. 車両データを読んだ直後で、`charge_limit_soc != 設定すべき上限`
 3. `charging_state != Disconnected`
-4. 自宅の充電器に接続中
+4. 自宅の充電器に接続中。`classify_charging_site` が外出先と断定したとき（DC 急速充電、または給電が `FAST_CHARGER_POWER_KW` を超える）は、ウォールコネクターが `connected` でもこの条件を満たさない。別の車が自宅の充電器を使っていても、制御対象が DC 充電中なら上限を下げない
 
 このとき、次の順で処理する。
 
@@ -221,7 +221,7 @@
 | `charge_target_soc` | 1〜100 の整数 / `null` | 目標充電率 |
 | `charge_target_updated_at` | UNIX時刻 | 最後に変更された時刻 |
 
-`override_state.py` に `read_charge_target()` / `write_charge_target()` を追加する。既存の `_write_flag` と同じく、全体を読み直してから1キーだけ書き換える。
+`override_state.py` の `read_charge_target()` / `write_charge_target()` がこのキーを読む。書き込みは全体を読み直してから1キーだけ書き換え、読み始めてから `os.replace` まで `override_state.json.lock` を取る。制御ループと操作画面は `read_snapshot()` で、フル充電モード・外出先の充電記録・目標充電率を1回の読みから取る。
 
 **検査は入口で1回だけ行う**（Parse, don't validate：入口で型と範囲を確定させ、以後は再検査しない）。`control_server.py` の `POST /api/charge_target` は、`bool` を除く1〜100の `int` と `null` だけを受け付け、それ以外には HTTP 400 を返す。読む側はファイルを手で書き換えた場合などの不正値を「未設定」として扱い、ATTENTIONログを出す。
 
@@ -238,7 +238,7 @@
 | `target_reached_at` | UNIX時刻 / `null` | 目標到達で停止した時刻（画面表示用） |
 | `observed_at` | UNIX時刻 | 車両データを読んだ時刻 |
 
-`override_state.json` と分けるのは、書き手を1プロセスに限るためである。`override_state.json` には2プロセスが書き込み、後から書いた方の内容が残る（`override_state.py` の `_write_flag` を参照）。保存した上限が失われると車両側の上限を戻せなくなるため、この値を後勝ちの競合に巻き込まない。
+`override_state.json` と分けるのは、書き手を1プロセスに限るためである。`override_state.json` は充電制御と操作サーバーが書く。同時の書き込みは `flock` で読み書きが重ならないようにしてある。ロックを入れる前は、後から書いた方のファイル全体が残り、もう一方のキーが消ええた。保存した上限が失われると車両側の上限を戻せなくなるため、この値は今も `override_state.json` には置かない。
 
 書き込みは `_write_all` と同じく、一時ファイルに書いてから `os.replace` で差し替える（原子的な置き換え）。パスは環境変数 `TESLA_VEHICLE_STATUS_PATH` で差し替えられるようにする（テストで使う）。
 
@@ -246,7 +246,7 @@
 
 ## 6. 制御ループへの組み込み位置
 
-行番号は 2026-09-28 時点（`main` の `31652d5`）の `tesla_solar_charger.py` である。
+行番号は 2026-09-28 時点（`main` の `31652d5`）の `tesla_solar_charger.py` である。2026-11-10 の `85eb941` では行番号は一致しない。ループ先頭は `read_snapshot()` がフル充電モード、外出先の充電記録、目標充電率を1回で読む。夜間の1周は `run_night_cycle()`、日中の1周は `run_day_cycle()` である。下表の行番号は、その時点の組み込み位置の記録として残す。
 
 | 位置 | 追加する処理 |
 | --- | --- |

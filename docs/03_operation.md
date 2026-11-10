@@ -141,7 +141,7 @@ tail -f /home/<username>/tesla-solar-charge/tesla_solar_charger.log
 
 #### 設定値の検証（起動時に1回）
 
-数値の設定は読み込んだ直後に1か所で検証している（`config_loader.py`）。下限を満たさない値・数値として読めない値は既定値へ戻したうえで `ATTENTION` に残す。稼働は続ける。systemd が再起動を繰り返せば充電制御そのものが停止するが、既定値なら停止しないためである。
+数値の設定は `main()` が呼ぶ `load_runtime_config()` の中で1か所検証している（`config_loader.py`）。`import` しただけでは読まない。下限を満たさない値・数値として読めない値は既定値へ戻したうえで `ATTENTION` に残す。稼働は続ける。systemd が再起動を繰り返せば充電制御そのものが停止するが、既定値なら停止しないためである。
 
 ```text
 [ATTENTION] 設定 REMO_SAMPLES の値 0 は下限 1 を下回ります。既定値 1 で起動します。
@@ -164,6 +164,7 @@ tail -f /home/<username>/tesla-solar-charge/tesla_solar_charger.log
 | `MAX_AMPS >= MIN_AMPS` | 電流の計算範囲が反転する |
 | `START_AMPS > MIN_AMPS` | 開始と停止の閾値が重なり、開始→即停止の発振が起きる |
 | `TERMINAL_WAKE_SUPPRESS_SEC > TERMINAL_BACKOFF_SEC` | 待機明けにちょうど期限切れになり、車両を起こさない抑止が一度も効かない |
+| `MAX_AMPS` × 200 V が `FAST_CHARGER_POWER_KW` 未満 | 以上だと、自宅の AC 充電が外出先と判定されうる。閾値は自動では変えない。起動時に ATTENTION を出す |
 
 ### 3. API利用料の確認
 
@@ -199,7 +200,9 @@ python tesla_solar_charger.py --force-run
 
 ## 2.5 読み取り専用の観測ツール（`tools/observe_only.py`）
 
-制御ログは平滑化後の値を1サイクルにつき1点しか残さない。窓長や閾値を変えたときの影響を後から検証できないため、電力の生データを別途記録する手段として用意してある。車両へコマンドは一切送らない。
+制御ループの `REMO_SAMPLES` の既定は 1 なので、系統電力は 1 サイクルにつき 1 点しか残らない。窓長や閾値を変えたときの影響を後から検証できないため、電力の生データを別途記録する手段として用意してある。車両へコマンドは一切送らない。
+
+トークンファイルは充電制御と同じ `tesla_tokens.json` である。読み書きは `tesla_auth.py` が行い、更新のあいだは `tesla_tokens.json.lock` を取る。ロックを取れないときは自分では更新せず、ファイルを読み直す。充電制御と同時にリフレッシュトークンを使わないためである。`tesla_auth.py` が同じディレクトリに無いと起動しない。
 
 * 60秒間隔で系統電力・メーター更新時刻・車両状態を `observe_power.csv` へ追記する
 * 600秒間隔で車両状態を問い合わせる（`online` のときだけ `vehicle_data` を呼び出す）
@@ -416,7 +419,7 @@ python tesla_solar_charger.py
 ```
 
 
-自動的にブラウザが立ち上がり、テスラの公式ログイン画面が表示される。ログイン完了後、画面が白くなりWindowsのコンソール側に `[INFO] トークンを新規保存しました。` と表示されれば成功。フォルダ内に最新の `tesla_tokens.json` が生成される。
+自動的にブラウザが立ち上がり、テスラの公式ログイン画面が表示される。ログイン完了後、画面が白くなりWindowsのコンソール側に `手元でのトークン生成に完全成功` と表示されれば成功。フォルダ内に最新の `tesla_tokens.json` が生成される。この待ち受けは、標準入力が端末のとき、または `TESLA_INTERACTIVE_AUTH=1` のときだけ始まる。
 2. **Linux側への転送：**
 生成された `tesla_tokens.json` を、Linux側の対象ディレクトリへ上書き転送（SCP等）する。
 * 転送先：`/home/<username>/tesla-solar-charge/tesla_tokens.json`
@@ -466,7 +469,7 @@ sudo systemctl restart tesla-proxy.service
 
 ### 事象0：充電が制御されていない気がする（サービスは `running` なのに何も起きない）
 
-サービスが稼働していてもトークンが失効していると、車両へ一切コマンドを送れないままログを出さずにループし続ける。この状態は `systemctl status` では緑色の `active (running)` に見えるため、必ずログのレベルで確認する。
+サービスが `active (running)` でも、トークン更新が失敗していると車両へコマンドを送れない。更新の失敗はログに残る。起動時に HTTP 400 または 401 で拒否されたときは、プロセスは終了コード 1 で止まり、`Restart=always` が再起動を繰り返す。通信失敗の再試行中はプロセスが動いたままなので、必ずログのレベルで確認する。
 
 ```bash
 grep -E "CRITICAL|ATTENTION" /home/<username>/tesla-solar-charge/tesla_solar_charger.log | tail -20
@@ -791,12 +794,14 @@ Gen 3（Wi-Fi対応）に限る。Gen 2 や、Wi-Fiを宅内LANに接続して�
 
 ##### 何が起きるか
 
-制御対象は常に車両リストの先頭の1台だけである。 `GET /api/1/vehicles` の応答から
-`vehicles[0]` を取り出しており、2台目以降は存在しないものとして扱われる。
+起動時の車両リストの先頭 1 台の VIN を、プロセスが動いているあいだコマンド先にする。
+`GET /api/1/vehicles` の応答から、その VIN の要素を探す。2 台目以降は制御しない。
+設定キー `TESLA_VIN` はまだ無い。
 
-さらに、車両リストの順序に保証はない。順序が入れ替われば、システムはログを出さずに制御対象を
-別の車へ切り替える。1台のうちは起こらないが、複数所有では「今日はA号車、明日はB号車」に
-なりうる。どちらを制御しているかを利用者へ知らせる手段も現在は無い。
+車両リストの順序に保証はない。順序が入れ替わっても、コマンド先の VIN は起動時のままである。
+その VIN がリストに無いサイクルはコマンドを送らず、有無が変わったときだけ ATTENTION を出す。
+プロセスを再起動すると、その時点のリスト先頭を改めて選ぶ。複数所有では、再起動のたびに
+別の車が先頭になりうる。車両が2台以上あるときは、起動時の ATTENTION が選んだ VIN を出す。
 
 充電場所の判定も複数車両では成立しない。ウォールコネクターのローカルAPIは
 `vehicle_connected` を返すが、これが意味するのは「何らかの車が自宅の充電器に繋がっている」
@@ -820,7 +825,12 @@ Gen 3（Wi-Fi対応）に限る。Gen 2 や、Wi-Fiを宅内LANに接続して�
 
 なお DC急速充電の場合は判別できる。自宅の充電設備はACであり、DC急速充電を検知したなら
 自宅ではありえないためである。この判定は車両ごとの `charge_state` に基づくため、
-別の車が自宅の充電器を使っていても影響を受けない。
+別の車が自宅の充電器を使っていても影響を受けない。目標充電率のための `set_charge_limit` も
+同じ判定を使う。DC 充電中は、自宅のウォールコネクターが別の車で `connected` でも、
+制御対象の車の上限を下げない。
+
+外出先の AC 充電と、自宅の充電器を別の車が使っている組み合わせは、今も判別できない。
+そのときは電流コマンドも上限の変更も、自宅にいるものとして送られうる。
 
 ##### 来客のEVそのものには影響しない
 
@@ -892,6 +902,7 @@ VIN自体は、ウォールコネクターと車両のあいだのCP線を流れ
 | 全システムをまとめて起動する | `sudo systemctl start tesla-proxy.service tesla-charger.service tesla-override.service` |
 | 全システムを安全に完全停止する | `sudo systemctl stop tesla-charger.service tesla-proxy.service tesla-override.service` |
 | 設定変更後に一括リスタートする | `sudo systemctl restart tesla-proxy.service tesla-charger.service tesla-override.service` |
+| Python ファイルをこの版へ更新する | `docs/02_deploy.md` 第8章。`tesla_auth.py` と `control_templates/` の3ファイルを含む。プロキシのバイナリを変えていなければ `tesla-proxy.service` は再起動しない |
 | プロキシ側の「生のエラー」を追跡する | `sudo journalctl -u tesla-proxy.service -f --no-pager` |
 | Python側の「システムエラー」を追跡する | `sudo journalctl -u tesla-charger.service -f --no-pager` |
 | スマホ操作用サーバーのログを追跡する | `sudo journalctl -u tesla-override.service -f --no-pager` |

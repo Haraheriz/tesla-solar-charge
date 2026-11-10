@@ -59,7 +59,9 @@
 | 対策 | 理由 | 根拠 |
 | --- | --- | --- |
 | 実証用スクリプトに直接書かれていた Tesla の Client ID・Client Secret と Nature Remo のアクセストークンを、環境変数から読むように変える | 認証情報をソースコードに置かない（第3章） | [コミット d37b575](https://github.com/Haraheriz/tesla-solar-charge/commit/d37b575) |
-| トークンファイル `tesla_tokens.json` を権限 0600 で作成する | プロセスの umask に依存せず、所有者だけが読めるようにする | [PR #1](https://github.com/Haraheriz/tesla-solar-charge/pull/1) |
+| トークンファイル `tesla_tokens.json` を権限 0600 で作成する | プロセスの umask に依存せず、所有者だけが読めるようにする。書き込みは `tesla_auth.py` の `save_token_file()` が行う | [PR #1](https://github.com/Haraheriz/tesla-solar-charge/pull/1) |
+| トークン更新のあいだ `tesla_tokens.json.lock` を 0600 で取り、充電制御と観測ツールが同時にリフレッシュしない | リフレッシュトークンは使用のたびに置き換わる。同時に使うと片方のトークンが無効になる。ロックを取れない観測ツールはファイルを読み直す | [PR #73](https://github.com/Haraheriz/tesla-solar-charge/pull/73) |
+| 操作状態の更新のあいだ `override_state.json.lock` を 0600 で取り、読み始めてから `os.replace` まで放さない | 2プロセスが同じ内容を書いて、フル充電モードの解除か目標充電率が消えることを防ぐ。Tesla API を待っているあいだはロックを持たない | [PR #69](https://github.com/Haraheriz/tesla-solar-charge/pull/69) |
 | 実証用スクリプトが作る秘密鍵ファイルを所有者だけが読める権限で作成し、既存の鍵ファイルにグループ・他者の権限があれば処理を止める | 秘密鍵が同じ端末の他ユーザーから読める状態を防ぐ | [PR #46](https://github.com/Haraheriz/tesla-solar-charge/pull/46) |
 | `tesla_config.json` と `tesla_tokens.json` が所有者以外から読める権限なら、起動時に `chmod` の手順を含む警告をログに出す | デプロイ手順で 0600 にする作業が漏れても、気付けるようにする。充電制御が止まる影響の方が大きいため、起動は続ける | [PR #47](https://github.com/Haraheriz/tesla-solar-charge/pull/47) |
 | AI コーディングアシスタントが認証情報ファイル（`tesla_tokens.json`、`tesla_config.json`、`*.pem`）を読み込まないよう、Read を拒否するフックを設定する | 作業中に認証情報がアシスタントへ送られることを防ぐ。フックの設定は端末ごとの設定として管理する | [コミット 494b865](https://github.com/Haraheriz/tesla-solar-charge/commit/494b865)、[コミット 2f77355](https://github.com/Haraheriz/tesla-solar-charge/commit/2f77355)、[PR #40](https://github.com/Haraheriz/tesla-solar-charge/pull/40) |
