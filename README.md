@@ -3,19 +3,25 @@
 本プロジェクトは太陽光発電の余剰電力に合わせてテスラ車両の充電電流を動的に全自動制御するシステムである。
 
 ## ドキュメント体系
-システムを安全に維持・管理するため、ドキュメントは以下の6つに構造化されている。
+`docs/` にあるドキュメントは、以下の9つである。
 
-1. [仕様書・アーキテクチャ](./docs/01_architecture.md)
+1. [Nature Remo API 初期セットアップ](./docs/00_nature_remo_onboarding.md)
+   - Nature Remo E からスマートメーターの瞬時電力（W）を読むための、API の有効化とアクセストークン発行の手順
+2. [テスラ Fleet API 初期セットアップ](./docs/00_onboarding.md)
+   - 開発者登録、車両コマンド用の鍵ペアの生成、実車への公開鍵の承認までの手順
+3. [仕様書・アーキテクチャ](./docs/01_architecture.md)
    - システムの全体像、使用API、AI向け特殊制約の定義
-2. [再構築・デプロイ手順書](./docs/02_deploy.md)
+4. [再構築・デプロイ手順書](./docs/02_deploy.md)
    - クロスコンパイル、仮想環境構築、パーミッション一括修復コマンド集
-3. [運用・トラブルシューティングマニュアル](./docs/03_operation.md)
+5. [運用・トラブルシューティングマニュアル](./docs/03_operation.md)
    - 日常のログ確認方法、トークン失効時の「初回手動認証方式」更新手順、緊急対応
-4. [認証情報漏洩時の対応手順](./docs/04_security_incident_response.md)
+6. [認証情報漏洩時の対応手順](./docs/04_security_incident_response.md)
    - 履歴からの機密情報除去、Tesla/Nature Remo認証情報のローテーション手順
-5. [セキュリティ対策の記録](./docs/06_security_hardening.md)
+7. [目標充電率の設計](./docs/05_charge_target_design.md)
+   - 目標充電率で充電を止める仕様。車両側の充電上限は50%未満に設定できない
+8. [セキュリティ対策の記録](./docs/06_security_hardening.md)
    - これまでの対策の一覧と根拠の PR。脆弱性の報告方法は [SECURITY.md](./SECURITY.md)
-6. [デプロイ履歴](./docs/DEPLOY_LOG.md)
+9. [デプロイ履歴](./docs/DEPLOY_LOG.md)
    - ラズパイへ本番デプロイした際の簡易記録
 
 ## 設定
@@ -56,10 +62,16 @@ GitHub Actions（[tests.yml](./.github/workflows/tests.yml)）が main への pu
 
 ```text
 tesla-solar-charge/
-├── docs/                             # [共用] 構造化ドキュメント一式（仕様書・手順書等）
-│   ├── 01_architecture.md
-│   ├── 02_deploy.md
-│   └── 03_operation.md
+├── docs/                             # [共用] ドキュメント 9ファイル。各ファイルの内容は上記「ドキュメント体系」
+│   ├── 00_nature_remo_onboarding.md  # Nature Remo API の有効化とアクセストークン発行
+│   ├── 00_onboarding.md              # Tesla Fleet API と車両コマンド鍵の初期設定
+│   ├── 01_architecture.md            # 仕様、使用 API、起動から昼夜の制御まで
+│   ├── 02_deploy.md                  # 再構築、転送、権限、既存環境への更新
+│   ├── 03_operation.md               # ログ確認、トークン失効、緊急時の確認
+│   ├── 04_security_incident_response.md # 認証情報漏洩時の履歴除去と再発行
+│   ├── 05_charge_target_design.md    # 目標充電率で充電を止める仕様
+│   ├── 06_security_hardening.md      # 実施したセキュリティ対策と根拠の PR
+│   └── DEPLOY_LOG.md                 # ラズパイへ本番反映した記録
 │
 ├── tesla_solar_charger.py            # [共用] 充電制御メインスクリプト（両環境で直接実行可能）
 ├── tesla_auth.py                     # [共用] トークンファイルの読み書きと更新ロック。充電制御と観測ツールが使う
