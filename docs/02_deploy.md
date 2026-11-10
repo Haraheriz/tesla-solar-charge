@@ -17,6 +17,7 @@
 ├── tesla-http-proxy           # [転送] Go言語ネイティブバイナリ
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
+├── control_templates/         # [転送] 操作画面の HTML・マニフェスト・Service Worker
 ├── override_state.py          # [転送] フル充電モード・外出先の充電記録・目標充電率の状態を共有するモジュール
 ├── vehicle_status.py          # [転送] 最後に読んだ車両の状態と、車両側の充電上限の元の値を保存するモジュール
 ├── config_loader.py           # [転送] 設定値を起動時に検証して確定させるモジュール
