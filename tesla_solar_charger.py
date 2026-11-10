@@ -1347,46 +1347,16 @@ def main() -> None:
         logger.info(f"次の稼働チェックまで{wait_label}間スリープします...")
         return wait_sec
 
-    while True:
-        # ウォールコネクターの vitals は1サイクルに1回だけ読み、同じサイクルの判定で使い回す
-        # （wall_connector._cycle_vitals を参照）。continue する経路が多いため、
-        # 各経路で捨てるのではなく、サイクルの先頭の1か所で捨てる。
-        begin_wall_connector_cycle()
-        now = time.localtime()
-        manual_override, override_updated_at = read_override_state()
-        # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
-        away_probe, away_probe_updated_at = read_away_probe_state()
-        # 目標充電率（docs/05_charge_target_design.md）。スマホから変更でき、毎サイクル読み直す。
-        charge_target, target_invalid = read_charge_target()
-        if target_invalid and not last_target_invalid:
-            log_attention(
-                "override_state.json の charge_target_soc が 1〜100 の整数ではないため、"
-                "目標充電率を未設定として扱います。"
-            )
-        last_target_invalid = target_invalid
-        if charge_target != last_charge_target or not target_seen:
-            if target_seen:
-                logger.info(
-                    f"目標充電率が {target_label(last_charge_target)} → {target_label(charge_target)} に変更されました。"
-                )
-            elif charge_target is not None:
-                logger.info(f"目標充電率 {charge_target}% で稼働します。")
-            last_charge_target = charge_target
-            target_seen = True
+    def run_day_cycle() -> int:
+        """日中の1周。戻り値は次に time.sleep する秒。待機は呼び出し側が行う。
 
-        # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
-        # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
-        # 直前の値を引き継ぐ。
-        #
-        # continue する経路を列挙してリセットを書き足す方式は採らない。この関数には
-        # 早期 continue が10箇所以上あり、経路が増えたときに漏れる。実際、抑止中・
-        # ケーブル未接続・終端ステータス・不明ステータスの4経路が漏れており、
-        # 1時間前の1回と新しい1回が合算されて「2サイクル連続」と誤認しえた。
-        wake_surplus_streak, wake_surplus_count = wake_surplus_count, 0
-
-        if not manual_override and not FORCE_RUN and not (DAY_START_HOUR <= now.tm_hour < DAY_END_HOUR):
-            time.sleep(run_night_cycle())
-            continue
+        日中の判定と待機秒は、この関数へ移す前と同じである。
+        充電開始の直後の 5 秒は、この周の中の待ちであり、戻り値ではない。
+        """
+        nonlocal night_stop_failures, night_stop_exhausted, night_last_observation
+        nonlocal below_min_count, wake_surplus_count, skip_wake_until
+        nonlocal prev_charging_status, vin, next_disconnected_probe_at
+        global token_expires_at
 
         night_stop_failures = 0
         night_stop_exhausted = False
@@ -1396,8 +1366,7 @@ def main() -> None:
             if not refresh_tesla_token():
                 wait_sec = token_retry_wait_sec()
                 logger.info(f"トークン再取得まで{wait_sec}秒待機します。")
-                time.sleep(wait_sec)
-                continue
+                return wait_sec
             headers["Authorization"] = f"Bearer {access_token}"
 
         logger.info("--- 定期チェック開始 ---")
@@ -1432,20 +1401,17 @@ def main() -> None:
             if house_power is None:
                 house_power = get_remo_power_smoothed()
                 if house_power is None:
-                    time.sleep(180)
-                    continue
+                    return 180
 
         try:
             v_res = proxy_session.get(f"{PROXY_HOST}/api/1/vehicles", headers=headers, timeout=10)
             if v_res.status_code != 200:
                 logger.warning(f"車両リスト取得エラー (HTTP {v_res.status_code})。10分待機します。")
-                time.sleep(600)
-                continue
+                return 600
 
             vehicles = v_res.json().get("response") or []
             if not vehicles:
-                time.sleep(180)
-                continue
+                return 180
 
             vin = (vehicles[0] or {}).get("vin", "") or vin
             vehicle_state: str = str((vehicles[0] or {}).get("state", ""))
@@ -1458,8 +1424,7 @@ def main() -> None:
                     logger.info(
                         f"直近の充電状態（{prev_charging_status or '終端状態'}）から充電不要と判断し、車両を起こさずに待機します。"
                     )
-                    time.sleep(TERMINAL_BACKOFF_SEC)
-                    continue
+                    return TERMINAL_BACKOFF_SEC
 
                 if prev_charging_status == STATUS_DISCONNECTED and read_wall_connector() == WC_NOT_CONNECTED:
                     # ケーブルが自宅に繋がっていない。起こしても Disconnected を読み直すだけで、
@@ -1476,8 +1441,7 @@ def main() -> None:
                     logger.info(
                         "自宅の充電器にケーブルが接続されていないため、車両を起こしません。"
                     )
-                    time.sleep(TERMINAL_BACKOFF_SEC)
-                    continue
+                    return TERMINAL_BACKOFF_SEC
 
                 last_level: Optional[int] = as_percent(vehicle_status.get("battery_level"))
                 if charge_target is not None and last_level is not None and last_level >= charge_target:
@@ -1494,13 +1458,11 @@ def main() -> None:
                         f"最後に読んだ充電率 {last_level}%（{observed_label} 取得）が目標充電率 "
                         f"{charge_target}% 以上のため、車両を起こしません。"
                     )
-                    time.sleep(TERMINAL_BACKOFF_SEC)
-                    continue
+                    return TERMINAL_BACKOFF_SEC
 
                 if not manual_override and house_power >= -(START_AMPS * WATTS_PER_AMP):
                     logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * WATTS_PER_AMP}W）未満のため、このまま寝かせます。")
-                    time.sleep(180)
-                    continue
+                    return 180
                 elif not manual_override and wake_surplus_streak + 1 < WAKE_DEBOUNCE_CYCLES:
                     # 一過性の余剰でウェイクを費やさない。開始閾値の超過は58%が2分以内に
                     # 終息するため、1サンプルで起こすと消えた余剰のために最も高い
@@ -1511,16 +1473,14 @@ def main() -> None:
                         f"開始閾値以上の余剰を検知しました（{wake_surplus_count}/{WAKE_DEBOUNCE_CYCLES}回目）。"
                         "一過性の可能性があるため、次のサイクルでも続いていれば車両を起動します。"
                     )
-                    time.sleep(180)
-                    continue
+                    return 180
                 else:
                     if manual_override:
                         logger.info("マニュアル・オーバーライドのため、車両を起動します。")
                     else:
                         logger.info(f"開始閾値以上の余剰電力（{START_AMPS * WATTS_PER_AMP}W以上）を検知したため、車両を起動します。")
                     if not wake_up_vehicle(vin, headers):
-                        time.sleep(180)
-                        continue
+                        return 180
 
                     if not manual_override:
                         # 起動には最短でも70秒かかる（wake_up_vehicle 内の60秒待機を含む）。
@@ -1531,8 +1491,7 @@ def main() -> None:
                         refreshed_power: Optional[int] = get_remo_power_smoothed()
                         if refreshed_power is None:
                             logger.warning("起動後の余剰再測定に失敗しました。次のサイクルで判断します。")
-                            time.sleep(180)
-                            continue
+                            return 180
                         if refreshed_power != house_power:
                             logger.info(
                                 f"起動後に余剰を測り直しました: {house_power} W → {refreshed_power} W"
@@ -1576,8 +1535,7 @@ def main() -> None:
                         "自宅の充電器にケーブルが接続されていないため、車両データを取得しません。"
                         f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
                     )
-                    time.sleep(TERMINAL_BACKOFF_SEC)
-                    continue
+                    return TERMINAL_BACKOFF_SEC
 
             state_url: str = f"{PROXY_HOST}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state"
             s_res = proxy_session.get(state_url, headers=headers, timeout=10)
@@ -1587,12 +1545,10 @@ def main() -> None:
                 # 180秒の制御周期を飛ばし、課金対象の vehicle_data を待機なしで繰り返す。
                 token_expires_at = 0.0
                 logger.warning("アクセストークンの失効を検知しました。3分後に再取得します。")
-                time.sleep(180)
-                continue
+                return 180
             elif s_res.status_code == 429:
                 logger.error("テスラAPIレートリミット(429)。1時間処理を退避します。")
-                time.sleep(3600)
-                continue
+                return 3600
             elif s_res.status_code != 200:
                 # 車両データを読めない間は電流を動かせない。待機の長さは
                 # 車両データを取得できない時間に発生する買電で決める。給電中なら、絞り込めない1分が
@@ -1618,8 +1574,7 @@ def main() -> None:
                 logger.warning(
                     f"車両データ取得エラー (HTTP {s_res.status_code})。{wait_sec // 60}分待機します。"
                 )
-                time.sleep(wait_sec)
-                continue
+                return wait_sec
 
             response_json = s_res.json().get("response")
             if response_json is None:
@@ -1628,8 +1583,7 @@ def main() -> None:
                 # 課金対象の vehicle_data を呼び出し続ける。しかも何も記録しないため、
                 # 起きていても後から追う手掛かりが残らない。
                 logger.warning("車両データの応答に response が含まれていません。3分待機します。")
-                time.sleep(180)
-                continue
+                return 180
 
             # charge_state はキーが存在しつつ値が null のことがあるため、get のデフォルトでは防げない。
             charge_state = response_json.get("charge_state") or {}
@@ -1657,8 +1611,7 @@ def main() -> None:
                     "太陽光追従モードに復帰します。"
                 )
                 below_min_count = 0
-                time.sleep(180)
-                continue
+                return 180
 
             if charging_status in TERMINAL_STATUSES:
                 # 満充電・ケーブル未接続・給電なし。ここで charge_start を送っても状態は変わらない。
@@ -1685,14 +1638,12 @@ def main() -> None:
                 logger.info(
                     f"{reason_label}のため、充電コマンドの送信をスキップします。{TERMINAL_BACKOFF_SEC // 60}分待機します。"
                 )
-                time.sleep(TERMINAL_BACKOFF_SEC)
-                continue
+                return TERMINAL_BACKOFF_SEC
 
             if charging_status == STATUS_STARTING:
                 # 充電開始処理の最中。コマンドを重ねると二重送信になるため次サイクルまで待つ。
                 logger.info("充電の開始処理中です。次のサイクルまで待機します。")
-                time.sleep(180)
-                continue
+                return 180
 
             if charging_status not in (STATUS_CHARGING, STATUS_STOPPED):
                 # 未知のステータスに対して開始命令を投げるのは危険なので、安全側の動作として待機する。
@@ -1702,8 +1653,7 @@ def main() -> None:
                     f"未知の充電ステータス『{charging_status or '(空)'}』を受信しました。"
                     f"安全のためコマンドを送信せず{TERMINAL_BACKOFF_SEC // 60}分待機します。"
                 )
-                time.sleep(TERMINAL_BACKOFF_SEC)
-                continue
+                return TERMINAL_BACKOFF_SEC
 
             skip_wake_until = 0.0
 
@@ -1722,8 +1672,7 @@ def main() -> None:
                     "電流調整・停止・開始のいずれも行いません。"
                     f" [{describe_fast_charger(charge_state)}]"
                 )
-                time.sleep(180)
-                continue
+                return 180
 
             # 目標充電率の判定。外出先の判定より後に置き、外出先の充電には到達させない（R3）。
             # 止めるのは目標「以上」のときだけで、目標未満では止めない（R2）。
@@ -1734,8 +1683,7 @@ def main() -> None:
                         # 停止を確認できないうちはフル充電モードも解除しない。解除を先にすると、
                         # 止まっていないのにモードだけ消える。
                         logger.error("目標充電率での充電停止を確認できませんでした。次のサイクルで再試行します。")
-                        time.sleep(180)
-                        continue
+                        return 180
                     prev_charging_status = STATUS_STOPPED
                     vehicle_status["target_reached_at"] = time.time()
                     save_vehicle_status(vehicle_status)
@@ -1753,7 +1701,7 @@ def main() -> None:
                         f"{TERMINAL_BACKOFF_SEC // 60}分待機します。"
                     )
                 wait_watching_home_charger(TERMINAL_BACKOFF_SEC)
-                continue
+                return 0
 
             if manual_override:
                 if charging_status != STATUS_CHARGING:
@@ -1827,7 +1775,50 @@ def main() -> None:
         except Exception as e:
             logger.error(f"ループ内例外発生: {e}")
 
-        time.sleep(180)
+        return 180
+
+    while True:
+        # ウォールコネクターの vitals は1サイクルに1回だけ読み、同じサイクルの判定で使い回す
+        # （wall_connector._cycle_vitals を参照）。continue する経路が多いため、
+        # 各経路で捨てるのではなく、サイクルの先頭の1か所で捨てる。
+        begin_wall_connector_cycle()
+        now = time.localtime()
+        manual_override, override_updated_at = read_override_state()
+        # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
+        away_probe, away_probe_updated_at = read_away_probe_state()
+        # 目標充電率（docs/05_charge_target_design.md）。スマホから変更でき、毎サイクル読み直す。
+        charge_target, target_invalid = read_charge_target()
+        if target_invalid and not last_target_invalid:
+            log_attention(
+                "override_state.json の charge_target_soc が 1〜100 の整数ではないため、"
+                "目標充電率を未設定として扱います。"
+            )
+        last_target_invalid = target_invalid
+        if charge_target != last_charge_target or not target_seen:
+            if target_seen:
+                logger.info(
+                    f"目標充電率が {target_label(last_charge_target)} → {target_label(charge_target)} に変更されました。"
+                )
+            elif charge_target is not None:
+                logger.info(f"目標充電率 {charge_target}% で稼働します。")
+            last_charge_target = charge_target
+            target_seen = True
+
+        # ウェイク判断のデバウンスは「連続」であることが要件である。増やさなかった
+        # サイクルがあれば連鎖は切れるため、毎サイクル 0 に戻し、増やす経路だけが
+        # 直前の値を引き継ぐ。
+        #
+        # continue する経路を列挙してリセットを書き足す方式は採らない。この関数には
+        # 早期 continue が10箇所以上あり、経路が増えたときに漏れる。実際、抑止中・
+        # ケーブル未接続・終端ステータス・不明ステータスの4経路が漏れており、
+        # 1時間前の1回と新しい1回が合算されて「2サイクル連続」と誤認しえた。
+        wake_surplus_streak, wake_surplus_count = wake_surplus_count, 0
+
+        if not manual_override and not FORCE_RUN and not (DAY_START_HOUR <= now.tm_hour < DAY_END_HOUR):
+            time.sleep(run_night_cycle())
+            continue
+
+        time.sleep(run_day_cycle())
 
 if __name__ == "__main__":
     main()
