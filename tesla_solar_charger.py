@@ -1544,7 +1544,11 @@ def main() -> None:
             s_res = proxy_session.get(state_url, headers=headers, timeout=10)
 
             if s_res.status_code == 401:
+                # continue のまま次の周回へ戻ると、更新が成功しても 401 が続くあいだ
+                # 180秒の制御周期を飛ばし、課金対象の vehicle_data を待機なしで繰り返す。
                 token_expires_at = 0.0
+                logger.warning("アクセストークンの失効を検知しました。3分後に再取得します。")
+                time.sleep(180)
                 continue
             elif s_res.status_code == 429:
                 logger.error("テスラAPIレートリミット(429)。1時間処理を退避します。")
