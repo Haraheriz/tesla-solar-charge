@@ -93,6 +93,7 @@ class FakeSession:
     def __init__(self, world):
         self.world = world
         self.commands = []
+        self.target_vins = []
         self.verify = None
         self.vehicle_list_calls = 0
         # 課金対象の vehicle_data を何回呼び出したか。呼び出し回数そのものが費用であり、
@@ -126,9 +127,13 @@ class FakeSession:
             if self.world.get("vehicle_list_http", 200) != 200:
                 return FakeResponse(self.world["vehicle_list_http"], {})
             fleet = [{"vin": "TESTVIN0000000000", "state": self.world["vehicle_state"]}]
-            # 複数所有の再現。制御対象は先頭のみで、2台目以降は無視される。
+            # 複数所有の再現。制御対象は起動時に選んだ VIN で、2台目以降は無視される。
             for i in range(self.world.get("extra_vehicles", 0)):
                 fleet.append({"vin": f"TESTVIN{i + 1:011d}", "state": "asleep"})
+            if self.world.get("hide_primary"):
+                fleet = [vehicle for vehicle in fleet if vehicle["vin"] != "TESTVIN0000000000"]
+            if self.world.get("reverse_fleet"):
+                fleet = list(reversed(fleet))
             return FakeResponse(200, {"response": fleet})
         if "vehicle_data" in url:
             self.vehicle_data_calls += 1
@@ -166,6 +171,8 @@ class FakeSession:
     def post(self, url, headers=None, json=None, timeout=None):
         command = url.rsplit("/", 1)[-1]
         self.commands.append(command)
+        if "/vehicles/" in url:
+            self.target_vins.append(url.split("/vehicles/")[1].split("/")[0])
 
         if command == "wake_up":
             self.world["vehicle_state"] = "online"
@@ -276,7 +283,7 @@ class Result:
     """1回のシミュレーション結果。テストはこれに対してアサーションする。"""
 
     def __init__(self, commands, logs, override_writes, world, module, refresh_calls=None,
-                 wc_calls=None, vehicle_data_calls=0):
+                 wc_calls=None, vehicle_data_calls=0, target_vins=None):
         self.commands = commands
         self.logs = logs
         self.override_writes = override_writes
@@ -288,6 +295,7 @@ class Result:
         self.wc_calls = wc_calls if wc_calls is not None else []
         # 課金対象の vehicle_data を呼び出した回数
         self.vehicle_data_calls = vehicle_data_calls
+        self.target_vins = target_vins if target_vins is not None else []
 
     def count(self, command):
         return self.commands.count(command)
@@ -517,7 +525,7 @@ def run_loop(tmp_path):
 
         return Result(
             session.commands, capture.records, override_state["writes"], world, module,
-            refresh_calls, wc_session.calls, session.vehicle_data_calls
+            refresh_calls, wc_session.calls, session.vehicle_data_calls, session.target_vins
         )
 
     return _run

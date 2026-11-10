@@ -928,6 +928,46 @@ def test_車両が複数あれば起動時に警告する(run_loop):
     assert res.has_log("TESTVIN0000000000")
 
 
+def test_車両リストの順序が変わってもコマンド先のVINは変わらない(run_loop):
+    def swap(elapsed, world):
+        if elapsed >= 200:
+            world["reverse_fleet"] = True
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Stopped", "amps": 5,
+            "extra_vehicles": 1,
+        },
+        start="2026-08-22 10:00:00",
+        budget_sec=900,
+        house_power=-5000,
+        on_poll=swap,
+    )
+    assert res.count("charge_start") >= 1
+    assert res.target_vins
+    assert set(res.target_vins) == {"TESTVIN0000000000"}
+
+
+def test_選んだVINがリストから消えたらコマンドを送らない(run_loop):
+    def hide(elapsed, world):
+        if elapsed >= 200:
+            world["hide_primary"] = True
+
+    res = run_loop(
+        world={
+            "vehicle_state": "online", "charging_state": "Charging", "amps": 10,
+            "extra_vehicles": 1,
+        },
+        start="2026-08-22 10:00:00",
+        budget_sec=900,
+        house_power=-5000,
+        on_poll=hide,
+    )
+    notes = [message for level, message in res.logs if level == "ATTENTION" and "コマンドは送りません" in message]
+    assert notes == [notes[0]]
+    assert "TESTVIN0000000001" not in res.target_vins
+
+
 def test_稼働中に読み取れなくなったら警告を残す(run_loop):
     """起動時の確認を通過した後で読めなくなる経路がある。ログを出さずに従来動作へ戻さない。
 
