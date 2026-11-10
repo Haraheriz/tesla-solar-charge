@@ -442,6 +442,21 @@ def run_loop(tmp_path):
             world.get("charge_target_soc"), bool(world.get("charge_target_invalid", False))
         )
 
+        def _read_snapshot():
+            manual, updated = module.read_override_state()
+            away, away_at = module.read_away_probe_state()
+            target, invalid = module.read_charge_target()
+            return {
+                "manual_override": manual,
+                "updated_at": updated,
+                "away_probe": away,
+                "away_probe_updated_at": away_at,
+                "charge_target_soc": target,
+                "charge_target_invalid": invalid,
+            }
+
+        module.read_snapshot = _read_snapshot
+
         # vehicle_status.json の差し替え。差し替えないと開発機のリポジトリ直下へ書く。
         # 保存された内容は world["vehicle_status"] で確かめられる。
         initial_status = dict(world.get("vehicle_status_initial") or {})
