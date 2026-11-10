@@ -166,6 +166,36 @@ def test_T13b_車両自身が目標で止めたComplete状態でもフル充電�
 # 外出先（R3）
 # ---------------------------------------------------------------------------
 
+def test_DC充電中は自宅の充電器が繋がっていても上限を下げない(run_loop):
+    """別の車が自宅のウォールコネクターに繋がっていても、DC 充電は外出先である。
+
+    上限の更新がウォールコネクターの connected だけを見ると、スーパーチャージャーの車に
+    set_charge_limit を送る。
+    """
+    res = run_loop(
+        world=_home(
+            charging_state="Charging", amps=32, battery_level=40, charge_target_soc=30,
+            wc_vehicle_connected=True, fast_charger_present=True, charger_power=55,
+        ),
+        start="2026-09-28 10:00:00",
+        budget_sec=600,
+        house_power=-3000,
+    )
+    assert res.count("set_charge_limit") == 0
+    assert res.count("charge_stop") == 0
+
+
+def test_上限電流が急速充電の閾値以上なら起動時に知らせる(run_loop):
+    res = run_loop(
+        world=_home(),
+        start="2026-09-28 10:00:00",
+        budget_sec=30,
+        house_power=-3000,
+        config_overrides={"MAX_AMPS": 80},
+    )
+    assert res.has_log("FAST_CHARGER_POWER_KW", "ATTENTION")
+
+
 def test_T8_外出先の充電は目標以上でも止めない(run_loop):
     res = run_loop(
         world=_home(charging_state="Charging", amps=32, battery_level=70, charge_target_soc=25,
