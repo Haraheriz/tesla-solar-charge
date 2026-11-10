@@ -11,7 +11,7 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, Any, Tuple
 
 from config_loader import Settings, warn_if_accessible_by_others
-from override_state import read_away_probe_state, read_charge_target, read_override_state, write_override
+from override_state import read_away_probe_state, read_charge_target, read_override_state, read_snapshot, write_override
 from vehicle_status import load_vehicle_status, save_vehicle_status
 from wall_connector import (
     begin_cycle as begin_wall_connector_cycle,
@@ -1783,11 +1783,15 @@ def main() -> None:
         # 各経路で捨てるのではなく、サイクルの先頭の1か所で捨てる。
         begin_wall_connector_cycle()
         now = time.localtime()
-        manual_override, override_updated_at = read_override_state()
-        # スマホから切替えられる。設定ファイルと違い毎サイクル読み直すため、再起動が要らない。
-        away_probe, away_probe_updated_at = read_away_probe_state()
-        # 目標充電率（docs/05_charge_target_design.md）。スマホから変更でき、毎サイクル読み直す。
-        charge_target, target_invalid = read_charge_target()
+        # 3つは1回の読みから取る。別々に読むと、書き込みと重なったとき世代が混ざる。
+        # テストは read_snapshot と、従来の3関数の両方を差し替えられる。
+        snap = read_snapshot()
+        manual_override = snap["manual_override"]
+        override_updated_at = snap["updated_at"]
+        away_probe = snap["away_probe"]
+        away_probe_updated_at = snap["away_probe_updated_at"]
+        charge_target = snap["charge_target_soc"]
+        target_invalid = snap["charge_target_invalid"]
         if target_invalid and not last_target_invalid:
             log_attention(
                 "override_state.json の charge_target_soc が 1〜100 の整数ではないため、"

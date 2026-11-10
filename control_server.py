@@ -16,9 +16,7 @@ from typing import Any, Dict, List, Optional
 from config_loader import Settings, warn_if_accessible_by_others
 from override_state import (
     parse_charge_target,
-    read_away_probe,
-    read_charge_target,
-    read_override,
+    read_snapshot,
     write_away_probe,
     write_charge_target,
     write_override,
@@ -480,10 +478,11 @@ VEHICLE_STATUS_KEYS = (
 def status_payload() -> Dict[str, Any]:
     """/api/status と各POSTの応答。画面は1回の応答で全体を描き直す。"""
     vehicle = load_vehicle_status()
+    snap = read_snapshot()
     return {
-        "manual_override": read_override(),
-        "away_probe": read_away_probe(),
-        "charge_target_soc": read_charge_target()[0],
+        "manual_override": snap["manual_override"],
+        "away_probe": snap["away_probe"],
+        "charge_target_soc": snap["charge_target_soc"],
         "vehicle": {key: vehicle.get(key) for key in VEHICLE_STATUS_KEYS},
     }
 

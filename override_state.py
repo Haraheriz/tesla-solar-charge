@@ -1,7 +1,12 @@
 import os
 import json
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:  # Windows の開発機には無い。ロックは POSIX だけで取る。
+    fcntl = None  # type: ignore
 
 # tesla_solar_charger.py（充電制御ループ）と control_server.py（スマホ操作用サーバー）の
 # 両プロセスがこのファイルを介して状態を共有する。現在3つ持っている。
@@ -41,29 +46,41 @@ def _write_all(data: Dict[str, Any]) -> None:
 
 
 def _read_flag(key: str, updated_key: str) -> Tuple[bool, float]:
-    data = _read_all()
-    enabled = bool(data.get(key, False))
+    return _flag_from(_read_all(), key, updated_key)
+
+
+def _update(mutator: Callable[[Dict[str, Any]], None]) -> None:
+    """読み込んでから置換するまでを排他する。
+
+    os.replace は原子的だが、2プロセスが同じ内容を読んでから書くと、後の書き込みが
+    先の変更を消す。消えるのは外出先の充電記録だけではなく、フル充電モードの解除も
+    ありうる。ロックはファイルの読み書きだけに取り、Tesla API を待っているあいだは持たない。
+    POSIX 以外ではロックしない（権限検査と同じ）。プロセスが終了すると flock は解放される。
+    """
+    if fcntl is None or os.name != "posix":
+        data = _read_all()
+        mutator(data)
+        _write_all(data)
+        return
+    lock_fd = os.open(OVERRIDE_FILE + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        updated_at = float(data.get(updated_key, 0.0))
-    except (TypeError, ValueError):
-        updated_at = 0.0
-    return enabled, updated_at
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        data = _read_all()
+        mutator(data)
+        _write_all(data)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def _write_flag(key: str, updated_key: str, enabled: bool) -> None:
-    """1つのフラグだけを書き換える。他のキーは読み直して保存する。
+    """1つのフラグだけを書き換える。他のキーは読み直して保存する。"""
 
-    全体を上書きすると、同じファイルに同居しているもう一方のフラグが消える。
-    書き手は control_server.py（利用者のタップ）と tesla_solar_charger.py
-    （手動停止を検知したときのフル充電モード自動解除）の2プロセスある。
-    os.replace が原子的なのでファイルが壊れることはないが、同時刻に書けば後勝ちで
-    片方の変更が失われる。人間のタップと10分周期の自動解除が同一の瞬間に当たる必要があり、
-    失われるのは記録設定であって制御判断ではないため、ロックは設けていない。
-    """
-    data = _read_all()
-    data[key] = enabled
-    data[updated_key] = time.time()
-    _write_all(data)
+    def mutator(data: Dict[str, Any]) -> None:
+        data[key] = enabled
+        data[updated_key] = time.time()
+
+    _update(mutator)
 
 
 def read_override() -> bool:
@@ -136,9 +153,47 @@ def read_charge_target() -> Tuple[Optional[int], bool]:
         return None, True
 
 
+def read_snapshot() -> Dict[str, Any]:
+    """3つの操作状態を、1回の読みから返す。
+
+    キーは manual_override、updated_at、away_probe、away_probe_updated_at、
+    charge_target_soc、charge_target_invalid。ファイルが無い・壊れているときは
+    フル充電モードと外出先の充電記録は無効、目標充電率は未設定である。
+    """
+    data = _read_all()
+    manual_override, updated_at = _flag_from(data, "manual_override", "updated_at")
+    away_probe, away_probe_updated_at = _flag_from(data, "away_probe", "away_probe_updated_at")
+    raw = data.get("charge_target_soc")
+    try:
+        charge_target_soc = parse_charge_target(raw)
+        charge_target_invalid = False
+    except ValueError:
+        charge_target_soc = None
+        charge_target_invalid = True
+    return {
+        "manual_override": manual_override,
+        "updated_at": updated_at,
+        "away_probe": away_probe,
+        "away_probe_updated_at": away_probe_updated_at,
+        "charge_target_soc": charge_target_soc,
+        "charge_target_invalid": charge_target_invalid,
+    }
+
+
+def _flag_from(data: Dict[str, Any], key: str, updated_key: str) -> Tuple[bool, float]:
+    enabled = bool(data.get(key, False))
+    try:
+        updated_at = float(data.get(updated_key, 0.0))
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    return enabled, updated_at
+
+
 def write_charge_target(value: Optional[int]) -> None:
     """目標充電率を書く。value は parse_charge_target を通した後の値であること。"""
-    data = _read_all()
-    data["charge_target_soc"] = value
-    data["charge_target_updated_at"] = time.time()
-    _write_all(data)
+
+    def mutator(data: Dict[str, Any]) -> None:
+        data["charge_target_soc"] = value
+        data["charge_target_updated_at"] = time.time()
+
+    _update(mutator)
