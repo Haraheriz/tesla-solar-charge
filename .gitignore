@@ -2,6 +2,7 @@
 # 1. 認証情報・トークンが入った設定ファイル（最重要・環境依存）
 tesla_config.json
 tesla_tokens.json
+tesla_tokens.json.lock
 override_state.json
 override_state.json.lock
 vehicle_status.json

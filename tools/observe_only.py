@@ -23,9 +23,9 @@
 車両が online のときだけ呼び出す（asleep/offline の車両は充電していないため、
 起こしてまで確認する必要がない）。
 
-Nature Remo APIにはレート制限がある（5分あたり30リクエスト程度）。制御ループ自身が
-1サイクルにつき3回呼び出すため、ここの `SAMPLE_SEC` を短くしすぎると両方が429で失敗する。
-既定の60秒で、両者あわせて5分あたり10回程度に収まる。
+Nature Remo APIにはレート制限がある（5分あたり30リクエスト程度）。制御ループの
+`REMO_SAMPLES` の既定は 1 回である。ここの `SAMPLE_SEC` を短くしすぎると両方が429で失敗する。
+既定の60秒で、両者あわせて5分あたり約6回に収まる。
 """
 import json
 import os
@@ -41,6 +41,9 @@ import urllib.request
 # 本体と同じく環境変数で上書きできる。**本体とトークンファイルを分けてはいけない。**
 # リフレッシュのたびにトークンが更新されるため、別々のファイルを持つと片方が失効する。
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
+import tesla_auth
+
 CONFIG_FILE = os.environ.get("TESLA_CONFIG_PATH", os.path.join(BASE_DIR, "tesla_config.json"))
 TOKEN_FILE = os.environ.get("TESLA_TOKEN_PATH", os.path.join(BASE_DIR, "tesla_tokens.json"))
 PROXY_CERT_PATH = os.environ.get("TESLA_CERT_PATH", os.path.join(BASE_DIR, "cert.pem"))
@@ -90,22 +93,15 @@ def append_sample(power, meter_updated_at, vehicle_state, charging_state):
 
 
 def load_tokens():
-    with open(TOKEN_FILE, "r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    data = tesla_auth.load_token_file(TOKEN_FILE)
+    if data is None:
+        raise OSError("トークンファイルを読めません: %s" % TOKEN_FILE)
+    return data
 
 
 def save_tokens(access, refresh, expires_in):
-    """本体スクリプトと同じ形式・同じ余裕（1800秒）で原子的に書く。"""
-    data = {
-        "access_token": access,
-        "refresh_token": refresh,
-        "token_expires_at": time.time() + int(expires_in) - 1800,
-    }
-    tmp = TOKEN_FILE + ".observe.tmp"
-    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-    os.replace(tmp, TOKEN_FILE)
+    """本体と同じ形式・同じ余裕（expires_in の 1800 秒前）で原子的に書く。"""
+    tesla_auth.save_token_file(TOKEN_FILE, access, refresh, expires_in)
 
 
 def refresh_token():
@@ -169,22 +165,40 @@ def remo_power():
             appliances = json.load(res)
     except Exception:
         return None, None
-    for a in appliances:
-        sm = a.get("smart_meter")
-        if not sm:
+    for appliance in appliances:
+        meter = appliance.get("smart_meter") if isinstance(appliance, dict) else None
+        if not meter:
             continue
-        for p in sm.get("echonetlite_properties", []):
-            if p.get("epc") == 231:
-                return int(p.get("val")), p.get("updated_at")
+        value, updated = tesla_auth.epc_value(meter.get("echonetlite_properties"), 231)
+        if value is not None:
+            return int(value), updated
     return None, None
 
 
 def poll_vehicle():
     """車両状態を1回問い合わせる。(vehicle_state, charging_state, 表示用の文字列) を返す。"""
     tok = load_tokens()
-    if time.time() > tok.get("token_expires_at", 0):
-        refresh_token()
-        tok = load_tokens()
+    try:
+        expires_at = float(tok.get("token_expires_at", 0))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if time.time() > expires_at:
+        lock = tesla_auth.try_lock(TOKEN_FILE, blocking=False)
+        if lock is None and tesla_auth.fcntl is not None:
+            tok = load_tokens()
+            log("トークン更新のロックを取れなかったため、ファイルを読み直しました。")
+        else:
+            try:
+                tok = load_tokens()
+                try:
+                    expires_at = float(tok.get("token_expires_at", 0))
+                except (TypeError, ValueError):
+                    expires_at = 0.0
+                if time.time() > expires_at:
+                    refresh_token()
+                    tok = load_tokens()
+            finally:
+                tesla_auth.unlock(lock)
     access = tok.get("access_token", "")
 
     status, body = get("/api/1/vehicles", access)
