@@ -93,6 +93,9 @@ settings = Settings(config, log_attention)
 MIN_AMPS: int = settings.integer("MIN_AMPS", 4, minimum=1)
 MAX_AMPS: int = settings.integer("MAX_AMPS", 48, minimum=1)
 
+# 200 V × 1 A = 200 W。買電・売電（W）を電流（A）へ換算する。int() は 0 へ向かって切り捨てる。
+WATTS_PER_AMP: int = 200
+
 # ヒステリシス用の開始閾値。充電開始・車両起動はSTART_AMPS以上の余剰を要求し、
 # 停止判定はMIN_AMPS未満で行う。開始直後は車両自身の消費で余剰が減るため、
 # 閾値が1本だと開始→即停止の発振が起きる。
@@ -410,10 +413,35 @@ def send_charge_command(vin: str, headers: Dict[str, str], command: str) -> bool
     return False
 
 
+def compute_target_amps(raw_amps: int, house_power: int, charging: bool) -> int:
+    """充電中は現在値を、停止中は 0 を基準に、買電・売電の換算を足す。
+
+    int() は 0 へ向かって切り捨てる。買電 399 W は -1 A（-399/200 を切り捨て）である。
+    """
+    calc_base_amps = raw_amps if charging else 0
+    adjustment_amps = int(-house_power / WATTS_PER_AMP)
+    return calc_base_amps + adjustment_amps
+
+
+def clamp_amps(amps: int, min_amps: int, max_amps: int) -> int:
+    """電流を min_amps 以上 max_amps 以下にする。範囲内なら値も型も変えない。"""
+    if amps < min_amps:
+        return min_amps
+    if amps > max_amps:
+        return max_amps
+    return amps
+
+
 def set_charging_amps(vin: str, headers: Dict[str, str], amps: int) -> bool:
     """充電電流を設定する。5A未満はTesla APIの既知の癖で1回では反映されないことがあるため2回送信する。"""
     # 5A未満は「2回送らないと反映されない」という車両側の癖への対処であり、失敗時のリトライとは別物。
     # そのため必ず規定回数を送り切ったうえで、最後の結果が成功していなければリトライへ回す。
+    requested = amps
+    amps = clamp_amps(amps, MIN_AMPS, MAX_AMPS)
+    if amps != requested:
+        log_attention(
+            f"電流設定 {requested}A は {MIN_AMPS}A〜{MAX_AMPS}A の外です。{amps}A として送ります。"
+        )
     required_sends: int = 2 if amps < 5 else 1
     for attempt in range(1, COMMAND_RETRIES + 1):
         ok: bool = False
@@ -1458,8 +1486,8 @@ def main() -> None:
                     time.sleep(TERMINAL_BACKOFF_SEC)
                     continue
 
-                if not manual_override and house_power >= -(START_AMPS * 200):
-                    logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * 200}W）未満のため、このまま寝かせます。")
+                if not manual_override and house_power >= -(START_AMPS * WATTS_PER_AMP):
+                    logger.info(f"車両は就寝中、かつ余剰が開始閾値（{START_AMPS * WATTS_PER_AMP}W）未満のため、このまま寝かせます。")
                     time.sleep(180)
                     continue
                 elif not manual_override and wake_surplus_streak + 1 < WAKE_DEBOUNCE_CYCLES:
@@ -1478,7 +1506,7 @@ def main() -> None:
                     if manual_override:
                         logger.info("マニュアル・オーバーライドのため、車両を起動します。")
                     else:
-                        logger.info(f"開始閾値以上の余剰電力（{START_AMPS * 200}W以上）を検知したため、車両を起動します。")
+                        logger.info(f"開始閾値以上の余剰電力（{START_AMPS * WATTS_PER_AMP}W以上）を検知したため、車両を起動します。")
                     if not wake_up_vehicle(vin, headers):
                         time.sleep(180)
                         continue
@@ -1727,9 +1755,9 @@ def main() -> None:
                     f" [{describe_measured_current(charge_state)}]"
                 )
             else:
-                calc_base_amps = raw_amps if charging_status == STATUS_CHARGING else 0
-                adjustment_amps = int(-house_power / 200)
-                target_amps = calc_base_amps + adjustment_amps
+                target_amps = compute_target_amps(
+                    raw_amps, house_power, charging_status == STATUS_CHARGING
+                )
                 logger.info(
                     f"演算状況 → 目標: {target_amps}A (車両現在値: {raw_amps}A / ステータス: {charging_status})"
                     f" [{describe_measured_current(charge_state)}]"
@@ -1739,13 +1767,13 @@ def main() -> None:
                 if target_amps < MIN_AMPS:
                     below_min_count += 1
                     if below_min_count < STOP_DEBOUNCE_CYCLES:
-                        logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * 200}W）を下回りました（{below_min_count}/{STOP_DEBOUNCE_CYCLES}回目）。瞬時的な変動の可能性があるため充電を継続します。")
+                        logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * WATTS_PER_AMP}W）を下回りました（{below_min_count}/{STOP_DEBOUNCE_CYCLES}回目）。瞬時的な変動の可能性があるため充電を継続します。")
                         if raw_amps > MIN_AMPS:
                             logger.info(f"買電を抑えるため電流を最小値へ調整: {raw_amps}A → {MIN_AMPS}A")
                             if set_charging_amps(vin, headers, MIN_AMPS):
                                 logger.info(f"遠隔調整成功: {MIN_AMPS}A に固定されました。")
                     else:
-                        logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * 200}W）を{STOP_DEBOUNCE_CYCLES}サイクル連続で下回りました。充電を『一時停止』します。")
+                        logger.info(f"余剰電力が{MIN_AMPS}A分（{MIN_AMPS * WATTS_PER_AMP}W）を{STOP_DEBOUNCE_CYCLES}サイクル連続で下回りました。充電を『一時停止』します。")
                         if send_charge_command(vin, headers, "charge_stop"):
                             logger.info("充電の停止を確認しました。")
                             below_min_count = 0
@@ -1757,7 +1785,7 @@ def main() -> None:
                 else:
                     below_min_count = 0
                     if target_amps > MAX_AMPS:
-                        target_amps = MAX_AMPS
+                        target_amps = clamp_amps(target_amps, MIN_AMPS, MAX_AMPS)
                     if target_amps != raw_amps:
                         logger.info(f"電流を変更調整: {raw_amps}A → {target_amps}A")
                         if set_charging_amps(vin, headers, target_amps):
@@ -1767,10 +1795,10 @@ def main() -> None:
             else:
                 below_min_count = 0
                 if target_amps < START_AMPS:
-                    logger.info(f"充電停止中。余剰電力が開始閾値（{START_AMPS}A分・{START_AMPS * 200}W）以上になるまで待機します。")
+                    logger.info(f"充電停止中。余剰電力が開始閾値（{START_AMPS}A分・{START_AMPS * WATTS_PER_AMP}W）以上になるまで待機します。")
                 else:
                     if target_amps > MAX_AMPS:
-                        target_amps = MAX_AMPS
+                        target_amps = clamp_amps(target_amps, MIN_AMPS, MAX_AMPS)
                     if manual_override:
                         logger.info(f"マニュアル・オーバーライドのため、充電を『再開』します（{target_amps}A）。")
                     else:
