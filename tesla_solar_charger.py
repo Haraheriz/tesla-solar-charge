@@ -291,6 +291,8 @@ token_expires_at: float = 0.0
 
 # トークンリフレッシュの連続失敗回数。指数バックオフとCRITICAL通知の判断に使う。
 token_refresh_failures: int = 0
+# HTTP 400/401 でリフレッシュトークンが拒否された。通信失敗とは分け、再試行では回復しない。
+token_refresh_rejected: bool = False
 TOKEN_RETRY_BASE_SEC: int = 180
 TOKEN_RETRY_MAX_SEC: int = 3600
 TOKEN_FAILURE_ALERT_THRESHOLD: int = 5
@@ -479,10 +481,11 @@ def load_tokens() -> bool:
     return False
 
 def refresh_tesla_token() -> bool:
-    global access_token, refresh_token, token_refresh_failures
+    global access_token, refresh_token, token_refresh_failures, token_refresh_rejected
     if not refresh_token:
         logger.error("リフレッシュトークンが存在しないため、自動リフレッシュをスキップします。")
         token_refresh_failures += 1
+        token_refresh_rejected = False
         return False
     logger.info("アクセストークンを自動リフレッシュ中...")
     payload: Dict[str, str] = {
@@ -504,11 +507,14 @@ def refresh_tesla_token() -> bool:
         )
         logger.info("トークンの自動保存・更新に成功しました。")
         token_refresh_failures = 0
+        token_refresh_rejected = False
         return True
     except Exception as e:
         token_refresh_failures += 1
         status_code = getattr(getattr(e, "response", None), "status_code", None)
-        if status_code in (400, 401):
+        # 400/401 は再送しても回復しない。通信失敗と混ぜると、起動側が同じ間隔で再試行し続ける。
+        token_refresh_rejected = status_code in (400, 401)
+        if token_refresh_rejected:
             # invalid_grant 等はリトライしても回復しない。過去に401で29日間・6357回リトライし続け、
             # その間システムが完全に無機能だった実績があるため、必ずCRITICALで顕在化させる。
             logger.critical(
@@ -522,6 +528,21 @@ def refresh_tesla_token() -> bool:
                 f"トークンのリフレッシュが{token_refresh_failures}回連続で失敗しています。"
                 "充電制御は停止状態です。再認証手順を確認してください。"
             )
+        return False
+
+
+def interactive_auth_allowed() -> bool:
+    """初回認証の待ち受けを始めてよいか。
+
+    ラズパイの systemd は標準入力が端末ではない。そこではポート8000で
+    コールバックを待つと、プロセスが終了せず充電制御が止まったままになる。
+    手元のPCで認証するときは端末から実行するか、TESLA_INTERACTIVE_AUTH=1 を付ける。
+    """
+    if os.environ.get("TESLA_INTERACTIVE_AUTH") == "1":
+        return True
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
         return False
 
 
@@ -928,13 +949,26 @@ def main() -> None:
 
     if load_tokens():
         logger.info("有効なトークンファイルを発見。保存済みトークンで再ログインします。")
-        if time.time() > token_expires_at:
-            if not refresh_tesla_token():
+        # 通信失敗ではファイルを消さず、ループ内と同じ間隔で再試行する。
+        # 400/401 は再試行で回復しないため、ファイルを残したまま終了する。
+        while refresh_token and time.time() > token_expires_at:
+            if refresh_tesla_token():
+                break
+            if token_refresh_rejected:
                 logger.error("トークンリフレッシュに失敗。再認証が必要です。")
-                if os.path.exists(TOKEN_FILE): os.remove(TOKEN_FILE)
+                sys.exit(1)
+            wait_sec = token_retry_wait_sec()
+            logger.info(f"トークン再取得まで{wait_sec}秒待機します。")
+            time.sleep(wait_sec)
 
-    # 初回生成（手元のWindows PC実行時のみここを通る）
+    # 初回生成（手元の端末で実行したときだけここを通る）
     if not os.path.exists(TOKEN_FILE) or refresh_token is None:
+        if not interactive_auth_allowed():
+            logger.critical(
+                "トークンファイルが無いか、リフレッシュトークンが無いため、起動を中止します。"
+                "手元のPCで初回認証を行い、tesla_tokens.json を配置してください（docs/03_operation.md 第4章）。"
+            )
+            sys.exit(1)
         redirect_uri = f"http://{DOMAIN}/callback"
         expected_oauth_state = secrets.token_urlsafe(32)
         login_url: str = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state={expected_oauth_state}"
