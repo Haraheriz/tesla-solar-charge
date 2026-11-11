@@ -21,6 +21,26 @@
 
 ---
 
+## 2026-11-11（プロキシの版の記録。反映作業なし）
+
+**タグ：** なし（ラズパイのファイルは変更していない）
+
+**内容：** ラズパイで動いている `tesla-http-proxy` の版を、読み取りだけで確認して記録した。ファイルの転送とサービスの再起動はしていない。
+
+| 項目 | 値 |
+| --- | --- |
+| 取得元 | `https://github.com/teslamotors/vehicle-command` |
+| 版 | `v0.4.1`（コミット `49977a18fd68567501d59e16a6c9e4a8b9348544`、2026-02-04） |
+| Go | `go1.26.3`、`GOOS=linux` / `GOARCH=arm64` / `CGO_ENABLED=0` |
+| バイナリ | 17,757,394 バイト、SHA-256 `3ff5c5cfe4a41326f14cace68d8dfabf478f8e8fa093d440d67a0a010f830789`、更新時刻 2026-06-20 23:39:30 |
+| `tesla-proxy.service` の起動 | 2026-06-20 23:43:40（以後再起動していない） |
+
+確認の方法：ラズパイのバイナリに埋め込まれたビルド情報（`strings` で読める `mod` と `build vcs.revision` の行）を読み、Windows側のチェックアウト `vehicle-command/` の `git rev-parse HEAD`、同じチェックアウトの `cmd/tesla-http-proxy/tesla-http-proxy-arm64`（2026-06-20 23:32:04）の SHA-256 と照合した。どちらも一致した。ビルド情報の `v0.4.1+dirty` は、チェックアウトに未追跡のビルド成果物があるためで、追跡対象ファイルの変更は無い。
+
+同時に、`/etc/systemd/system/` の4ユニット（`tesla-proxy` / `tesla-charger` / `tesla-override` / `tesla-observer`）が `docs/` に書かれていた定義と同じ設定値であることを確認した（drop-in は無い）。
+
+**理由：** 2026-11-11 まで、プロキシの取得元・版・Go の版がリポジトリのどこにも書かれていなかった（`.gitignore` でバイナリを除外し、`docs/02_deploy.md` には「ソースのディレクトリで `go build`」とだけあった）。公式の main はタグの後も更新されているため、SDカードの故障などで作り直すと別の版になる。版を `deploy/proxy/VERSION` に、ビルド手順を `deploy/proxy/build.ps1` に、ユニットを `deploy/systemd/` に置いた。
+
 ## 2026-11-02（スマホ操作の要求の記録）
 
 **タグ：** `v0.9.0`（PR #55・#56。同じ夜に反映した PR #53・#57 と同じタグで、`208f758` に付けた。ラズパイ上の `control_server.py` はこのコミットと一致する。`tesla_solar_charger.py`・`wall_connector.py` の照合は、同じ夜の PR #53・#57 の項に記録する）

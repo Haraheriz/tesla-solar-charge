@@ -1,0 +1,16 @@
+[Unit]
+Description=Tesla Solar Charger Read-Only Observer (manual start only)
+Requires=tesla-proxy.service
+After=network.target tesla-proxy.service
+
+[Service]
+Type=simple
+User=<username>
+WorkingDirectory=/home/<username>/tesla-solar-charge
+ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python tools/observe_only.py
+Restart=on-failure
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

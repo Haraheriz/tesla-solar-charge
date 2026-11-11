@@ -276,74 +276,21 @@ Debian 12以降は PEP 668 により、システムの Python への `pip` イ�
 
 ---
 
-## 7. 【完全版】systemd サービス定義リファレンス（マスターデータ）
+## 7. systemd サービス定義
 
-OS再起動時や障害時に、AIが何一つ迷わずに一度でシステムを完全復旧させるための、100%動作検証済みのサービス定義ファイルの生テキストである。
-
-※ 記述内の `<username>` 部分は環境に合わせて実際の実行ユーザー名に置換すること。
+サービス定義ファイルの実物は [`deploy/systemd/`](../deploy/systemd/) にあり、この章には載せない（同じ内容を複数か所に書くと、片方だけが更新されて食い違うため）。2026-11-11 に、ラズパイの `/etc/systemd/system/` にある4ファイルが、`<username>` を実行ユーザー名に置き換えたうえでこのファイルと同じ設定値であることを確認した（drop-in は無い）。配置と差分確認のコマンドは `docs/02_deploy.md` 第6章にある。
 
 ### ① プロキシ用：`/etc/systemd/system/tesla-proxy.service`
 
-```ini
-[Unit]
-Description=Tesla HTTP Proxy Server for TVCP
-After=network.target
-
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/tesla-http-proxy -cert /home/<username>/tesla-solar-charge/cert.pem -tls-key /home/<username>/tesla-solar-charge/key.pem -key-file /home/<username>/tesla-solar-charge/tesla_app_key.pem -port 4443
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-
-```
+定義：[`deploy/systemd/tesla-proxy.service`](../deploy/systemd/tesla-proxy.service)
 
 ### ② 充電制御用：`/etc/systemd/system/tesla-charger.service`
 
-```ini
-[Unit]
-Description=Tesla Solar Automated Charging Controller
-Requires=tesla-proxy.service
-After=network.target tesla-proxy.service
-
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python tesla_solar_charger.py
-Restart=always
-RestartSec=30
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-
-```
+定義：[`deploy/systemd/tesla-charger.service`](../deploy/systemd/tesla-charger.service)
 
 ### ③ スマホ操作用コントロールサーバー用：`/etc/systemd/system/tesla-override.service`
 
-```ini
-[Unit]
-Description=Tesla Solar Charger Manual Override Control Server
-After=network.target
-
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python control_server.py
-Restart=always
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-
-```
+定義：[`deploy/systemd/tesla-override.service`](../deploy/systemd/tesla-override.service)
 
 `tesla-charger.service` とは独立して起動・停止できる（`Requires=`の依存関係なし）。コントロールサーバーが落ちていても充電制御自体は通常運転を継続する。
 
@@ -351,25 +298,7 @@ WantedBy=multi-user.target
 
 **常用しない**。必要なときだけ手動で起動する。`enable` してはいけない（下記の理由）。
 
-```ini
-[Unit]
-Description=Tesla Solar Charger Read-Only Observer (manual start only)
-Requires=tesla-proxy.service
-After=network.target tesla-proxy.service
-
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python tools/observe_only.py
-Restart=on-failure
-RestartSec=60
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-
-```
+定義：[`deploy/systemd/tesla-observer.service`](../deploy/systemd/tesla-observer.service)
 
 `tools/observe_only.py` は車両へコマンドを送らないが、車両状態を10分ごとに独立して問い合わせるため Tesla API の課金が発生する。トークンファイルは充電制御と共有し、`tesla_auth.py` のロックを取れないときは自分では更新せずファイルを読み直す。2026-08-09〜18 の8.92日で `vehicle_data` を約660回呼び、約¥190（¥21/日）を消費した。同期間の制御ループ自体の実績は約¥15/日であり、観測ツールを動かすと費用が倍以上になる。
 
