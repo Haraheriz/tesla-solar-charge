@@ -1,0 +1,15 @@
+[Unit]
+Description=Tesla Solar Charger Manual Override Control Server
+After=network.target
+
+[Service]
+Type=simple
+User=<username>
+WorkingDirectory=/home/<username>/tesla-solar-charge
+ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python control_server.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

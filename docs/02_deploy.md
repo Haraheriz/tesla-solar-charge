@@ -14,7 +14,7 @@
 ├── tesla_app_key.pem          # [転送] テスラ車両コマンド用 秘密鍵（EC形式）
 ├── tesla_config.json          # [転送] システム設定ファイル
 ├── tesla_tokens.json          # [転送] テスラAPIリフレッシュトークン
-├── tesla-http-proxy           # [転送] Go言語ネイティブバイナリ
+├── tesla-http-proxy           # [転送] Go言語ネイティブバイナリ（版は deploy/proxy/VERSION、手順は第2章）
 ├── tesla_solar_charger.py     # [転送] 充電制御メインスクリプト
 ├── tesla_auth.py              # [転送] トークンファイルの読み書きと更新ロック。充電制御と観測ツールが import する
 ├── control_server.py          # [転送] スマホ操作用コントロールサーバー
@@ -25,6 +25,7 @@
 ├── wall_connector.py          # [転送] 自宅ウォールコネクターのローカルAPI読み取りモジュール
 ├── icons/                     # [転送] PWA用アプリアイコン（icon-*.png, icon-maskable-*.png, apple-touch-icon-180.png）
 ├── tools/observe_only.py      # [転送・任意] 読み取り専用の観測ツール。使うときだけ置く
+├── deploy/systemd/            # [転送] systemd ユニットファイル4つ（第6章で /etc/systemd/system/ へ配置）
 └── venv/                      # [Linux側で生成] Python3 仮想環境（相対パスでの運用不可）
 ```
 
@@ -36,19 +37,52 @@
 
 ## 2. 【Step 1】開発環境でのクロスコンパイル（Windows側作業）
 
-テスラ公式プロキシは、ラズパイOS（Linux ARM）上で直接ビルドするよりも、手元のWindows環境（PowerShell）からクロスコンパイルして実行バイナリを生成する方が効率的である。
+テスラ公式プロキシ（[teslamotors/vehicle-command](https://github.com/teslamotors/vehicle-command) の `cmd/tesla-http-proxy`）は、ラズパイOS（Linux ARM）上で直接ビルドするよりも、手元のWindows環境（PowerShell）からクロスコンパイルして実行バイナリを生成する方が効率的である。ラズパイには Go を入れていない。
 
-PowerShellを開き、プロキシのGoソースコードが存在するディレクトリへ移動して以下のコマンドを実行する。
+バイナリはこのリポジトリに入れない（`.gitignore` 3項）。代わりに、取得元・タグ・コミット・Go の版を [`deploy/proxy/VERSION`](../deploy/proxy/VERSION) に固定し、その版でビルドする手順を [`deploy/proxy/build.ps1`](../deploy/proxy/build.ps1) にしてある。理由は次の3点である。
+
+* 公式はソースからのビルドと Docker イメージで配布している（[README](https://github.com/teslamotors/vehicle-command#installation-and-configuration)）
+* ライセンスは [Apache-2.0](https://github.com/teslamotors/vehicle-command/blob/main/LICENSE) であり、バイナリを同梱すると第4条の再配布の条件（ライセンス文の添付など）が付く
+* GitHub はバイナリの配布に Git ではなく Releases を使うよう案内している（[GitHub Docs「About large files on GitHub」](https://docs.github.com/ja/repositories/working-with-files/managing-large-files/about-large-files-on-github#distributing-large-binaries)）
+
+### 現在の版（2026-11-11 確認）
+
+| 項目 | 値 |
+| --- | --- |
+| 取得元 | `https://github.com/teslamotors/vehicle-command` |
+| タグ | `v0.4.1`（2026-02-04） |
+| コミット | `49977a18fd68567501d59e16a6c9e4a8b9348544` |
+| Go | `go1.26.3`（`GOOS=linux` / `GOARCH=arm64` / `CGO_ENABLED=0`） |
+| ラズパイ上のバイナリ | 17,757,394 バイト、SHA-256 `3ff5c5cfe4a41326f14cace68d8dfabf478f8e8fa093d440d67a0a010f830789`、2026-06-20 23:39 配置 |
+
+この値は、ラズパイのバイナリに埋め込まれたビルド情報（`strings` で読める `mod` / `build vcs.revision` の行）と、Windows側のチェックアウト `vehicle-command/` の `git rev-parse HEAD` が一致することで確認した。ビルド情報には `v0.4.1+dirty`（`vcs.modified=true`）と出るが、チェックアウトの追跡対象ファイルに変更は無く、未追跡のビルド成果物だけがある。Go は未追跡ファイルがあるときも `modified=true` を付ける。
+
+### ビルド手順
+
+リポジトリのルートで PowerShell を開き、次を実行する。
 
 ```powershell
-# 64bit版 Linux ARM向けにターゲットを指定してビルド
-$env:GOOS="linux"
-$env:GOARCH="arm64"
-go build -o tesla-http-proxy
-
+powershell -ExecutionPolicy Bypass -File .\deploy\proxy\build.ps1
 ```
 
-* ※生成された拡張子のない `tesla-http-proxy` を、SCPやSFTP等を用いてLinux側の `/home/<username>/tesla-solar-charge/` ディレクトリへ転送する。
+スクリプトは次の順に処理し、確認が1つでも合わなければ中止する。
+
+1. 手元の Go の版が `VERSION` の `GO_VERSION` と同じかを確認する（版を上げる作業のときだけ `-AllowGoMismatch` を付ける）
+2. リポジトリ直下の `vehicle-command/`（`.gitignore` で除外済み）が無ければ clone する。origin が `REPO` と同じか、タグ `TAG` が `COMMIT` を指すか、追跡対象ファイルに変更が無いかを確認し、`COMMIT` へ切り替える
+3. `cmd/tesla-http-proxy` で `GOOS` / `GOARCH` / `CGO_ENABLED=0` を指定して `go build` し、`vehicle-command/cmd/tesla-http-proxy/tesla-http-proxy-arm64` を出力する。環境変数は終了時に元へ戻す
+4. SHA-256 を表示し、`VERSION` の `SHA256`（ラズパイで動いているバイナリの値）と一致するかを表示する
+
+Go の出力は、ビルドしたディレクトリのパスと未追跡ファイルの有無でも変わる。別のPCや別のディレクトリでビルドした場合、SHA-256 は一致しなくてよい。そのときは配置後に新しい値を `docs/DEPLOY_LOG.md` に記録し、`VERSION` の `SHA256` を更新する。
+
+* ※生成された `tesla-http-proxy-arm64` を、**`tesla-http-proxy` という名前で**、SCPやSFTP等を用いてLinux側の `/home/<username>/tesla-solar-charge/` ディレクトリへ転送する。
+* 転送後、ラズパイで `sha256sum /home/<username>/tesla-solar-charge/tesla-http-proxy` を実行し、表示された値と一致することを確認する。
+
+### 版を上げるとき
+
+1. 公式の [Releases](https://github.com/teslamotors/vehicle-command/releases) で新しいタグと変更内容を確認する
+2. `VERSION` の `TAG` / `COMMIT`（そのタグが指すコミット）/ 必要なら `GO_VERSION` を書き換え、PR にする
+3. `build.ps1` でビルドし、ラズパイの旧バイナリを残したまま（例：`backup-YYYYMMDD/` へコピー）転送して `tesla-proxy.service` を再起動する
+4. `docs/DEPLOY_LOG.md` に版と SHA-256 を記録し、`VERSION` の `SHA256` を更新する
 
 ---
 
@@ -82,10 +116,11 @@ sudo chown -R <username>:<username> /home/<username>/tesla-solar-charge/
 chmod 700 /home/<username>/tesla-solar-charge/
 
 # 3. 直下の通常ファイルを「所有者のみ読み書き（600）」に制限
-#    このコマンドはディレクトリにも当たる。control_templates / icons / tools の走査権限（x）が
-#    消えると、操作サーバーはテンプレートを開けず、アイコンも配信できない。直後の find で戻す。
+#    このコマンドはディレクトリにも当たる。control_templates / icons / tools / deploy の走査権限（x）が
+#    消えると、操作サーバーはテンプレートを開けず、アイコンも配信できず、第6章でユニットファイルを読めない。
+#    直後の find で戻す。
 chmod 600 /home/<username>/tesla-solar-charge/*
-for d in control_templates icons tools; do
+for d in control_templates icons tools deploy; do
   dir="/home/<username>/tesla-solar-charge/$d"
   if [ -d "$dir" ]; then
     find "$dir" -type d -exec chmod 700 {} +
@@ -201,65 +236,44 @@ curl -s --max-time 5 http://<ウォールコネクターのIP>/api/1/vitals
 
 OS起動時に「プロキシ → 充電制御スクリプト」の順で安全にバックグラウンド連動起動させるため、システムマネージャへ登録する。
 
-### 1. プロキシ用設定ファイルの配置
+### 1. ユニットファイルの配置
+
+ユニットファイルの実物は [`deploy/systemd/`](../deploy/systemd/) にある。4つとも `<username>` を実行ユーザー名に置き換えて `/etc/systemd/system/` に置く。各設定値の理由は `docs/01_architecture.md` 第5章・第7章にある。
+
+| ファイル | 役割 | `enable` |
+| --- | --- | --- |
+| [`tesla-proxy.service`](../deploy/systemd/tesla-proxy.service) | テスラ公式プロキシ（4443番） | する |
+| [`tesla-charger.service`](../deploy/systemd/tesla-charger.service) | 充電制御（プロキシに依存） | する |
+| [`tesla-override.service`](../deploy/systemd/tesla-override.service) | スマホ操作用コントロールサーバー | する |
+| [`tesla-observer.service`](../deploy/systemd/tesla-observer.service) | 読み取り専用の観測ツール（任意） | **しない** |
+
+Windows側からリポジトリの `deploy/systemd/` をラズパイの `~/tesla-solar-charge/deploy/systemd/` へ転送したうえで、ラズパイで次を実行する。
 
 ```bash
-sudo nano /etc/systemd/system/tesla-proxy.service
-
+cd /home/<username>/tesla-solar-charge
+for u in tesla-proxy tesla-charger tesla-override tesla-observer; do
+  sed "s/<username>/$USER/g" "deploy/systemd/$u.service" | sudo tee "/etc/systemd/system/$u.service" >/dev/null
+done
 ```
 
-以下をコピペして保存し、`<username>` は実際の実行ユーザー名に置換すること。
-
-```ini
-[Unit]
-Description=Tesla HTTP Proxy Server for TVCP
-After=network.target
-
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/tesla-http-proxy -cert /home/<username>/tesla-solar-charge/cert.pem -tls-key /home/<username>/tesla-solar-charge/key.pem -key-file /home/<username>/tesla-solar-charge/tesla_app_key.pem -port 4443
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-
-```
-
-### 2. 充電制御用設定ファイルの配置
+配置済みのユニットがリポジトリと同じかは、次のコマンドで確認できる。差分が無ければ何も表示されない。
 
 ```bash
-sudo nano /etc/systemd/system/tesla-charger.service
-
+cd /home/<username>/tesla-solar-charge
+for u in tesla-proxy tesla-charger tesla-override tesla-observer; do
+  sed "s/<username>/$USER/g" "deploy/systemd/$u.service" | diff -u - "/etc/systemd/system/$u.service"
+done
 ```
 
-以下をコピペして保存し、`<username>` は実際の実行ユーザー名に置換すること。
+ユニットを変えるときは、`deploy/systemd/` を PR で変更してから上のコマンドで配置する。ラズパイ上で直接 `nano` で編集すると、リポジトリと食い違う。
 
-```ini
-[Unit]
-Description=Tesla Solar Automated Charging Controller
-Requires=tesla-proxy.service
-After=network.target tesla-proxy.service
+### 2. プロキシ用ユニットの注意
 
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python tesla_solar_charger.py
-Restart=always
-RestartSec=30
-Environment=PYTHONUNBUFFERED=1
+`tesla-proxy.service` の引数は `-cert` と `-tls-key` の組み合わせで、名前が対称ではない。公式 README の [HTTP proxy の例](https://github.com/teslamotors/vehicle-command#using-the-http-proxy)と `cmd/tesla-http-proxy/main.go` のフラグ定義に合わせてある。揃えて書き換えると起動しない（`docs/01_architecture.md` 第5章）。
 
-[Install]
-WantedBy=multi-user.target
+### 3. スマホ操作用コントロールサーバーの前提
 
-```
-
-### 3. スマホ操作用コントロールサーバー設定ファイルの配置
-
-`tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定したうえで、以下を配置する。操作サーバーは `0.0.0.0:8090` で待ち受け、宅内LANから直接アクセスできる。Tailscale経由でも利用する場合は、ラズパイとスマートフォンを同じtailnetに参加させ、ラズパイでTailscale ServeのHTTPS転送先を `http://localhost:8090` に設定する。Funnelとルーターの8090番ポート転送は有効にしない。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られる。
+`tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定しておく。操作サーバーは `0.0.0.0:8090` で待ち受け、宅内LANから直接アクセスできる。Tailscale経由でも利用する場合は、ラズパイとスマートフォンを同じtailnetに参加させ、ラズパイでTailscale ServeのHTTPS転送先を `http://localhost:8090` に設定する。Funnelとルーターの8090番ポート転送は有効にしない。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られる。
 
 `tesla-override.service` の起動または再起動前に、ラズパイ上で次の形式確認を実行する。`CONTROL_TOKEN` がJSON文字列でない、32文字未満、`YOUR_RANDOM_CONTROL_TOKEN_HERE`、または表示可能なASCII文字（0x21〜0x7E）以外を含む場合、スクリプトはエラーで終了し、`control_server.py` も起動を中止する。この確認はトークンの値を出力しない。
 
@@ -277,41 +291,11 @@ print("CONTROL_TOKEN の形式を確認しました")
 PY
 ```
 
-```bash
-sudo nano /etc/systemd/system/tesla-override.service
-
-```
-
-以下をコピペして保存し、`<username>` は実際の実行ユーザー名に置換すること。
-
-```ini
-[Unit]
-Description=Tesla Solar Charger Manual Override Control Server
-After=network.target
-
-[Service]
-Type=simple
-User=<username>
-WorkingDirectory=/home/<username>/tesla-solar-charge
-ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python control_server.py
-Restart=always
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-
-```
-
-### 4. 観測ツール用設定ファイルの配置（任意）
+### 4. 観測ツール用ユニット（任意）
 
 `tools/observe_only.py` を使う場合のみ配置する。**`enable` しないこと**（Tesla APIの課金が継続するため。詳細は `docs/03_operation.md` の「読み取り専用の観測ツール」）。
 
-```bash
-sudo nano /etc/systemd/system/tesla-observer.service
-```
-
-定義は `docs/01_architecture.md` 第7章④を参照。配置後は `sudo systemctl daemon-reload` のみ実行し、次項の一括 `enable` の対象には含めない。`tools/observe_only.py` は同じディレクトリの `tesla_auth.py` を import する。`tesla_auth.py` が無いと観測ツールは起動しない。トークンファイルは充電制御と分けない。
+配置は本章1の手順で行う。配置後は `sudo systemctl daemon-reload` のみ実行し、本章5の一括 `enable` の対象には含めない。`tools/observe_only.py` は同じディレクトリの `tesla_auth.py` を import する。`tesla_auth.py` が無いと観測ツールは起動しない。トークンファイルは充電制御と分けない。
 
 ユニットファイルの `ExecStart` は変えていない。`tesla_auth.py` と `control_templates/` は、作業ディレクトリ（`/home/<username>/tesla-solar-charge`）からの import とファイル読み込みで使われる。ユニットのパスを書き換える必要はない。
 
