@@ -21,6 +21,31 @@
 
 ---
 
+## 2026-11-10（リファクタ後の構成：tesla_auth・control_templates の追加）
+
+**タグ：** `v0.10.0`（main `18f1c86` に付け、2026-11-11 に Release を作成した。`v0.9.0` から PR #77 までの範囲。ラズパイ上の転送対象11ファイルはこのコミットと一致する）
+
+**内容：** `docs/02_deploy.md` 第8章の11ファイルを反映した。新規は `tesla_auth.py`（トークンの保存と更新ロックを充電制御と観測ツールで共有する）と `control_templates/`（`page.html`・`manifest.webmanifest`・`sw.js`。操作画面の HTML を `control_server.py` から分けた）である。変更は `tesla_solar_charger.py`・`override_state.py`・`config_loader.py`・`control_server.py`・`tools/observe_only.py`。`wall_connector.py`・`vehicle_status.py` は `v0.9.0` と内容が同じで、第8章の一覧に従って上書きした。
+
+**理由：** `v0.9.0` 以降のリファクタ（車両取得の共通化、トークン処理の共有、操作画面の電流と時刻を制御と同じ値にする変更、テンプレートの分離）を本番へ反映するためである。
+
+**作業内容：**
+- 転送元は、開発機で `git fetch origin main` の後に `git show origin/main:<パス>`（main `18f1c86`）で取り出したファイルである。開発機の作業ツリーに未コミットの変更（`README.md`）があるため、`git pull` は行っていない。11ファイルとも CR は含まれていなかった
+- 転送前（22:29 頃）に、ラズパイ上の6つの `.py` の sha256 が `v0.9.0` と一致することを確認した。`tesla_auth.py` と `control_templates/` はラズパイに無かった。上書きする6ファイルと `tools/observe_only.py` を `backup-20261110/` に保存した
+- `C:\Windows\System32\OpenSSH\scp.exe` で11ファイルを転送し（22:29）、sha256 が転送元と一致することを確認した。先頭8桁は次のとおり。`tesla_solar_charger.py` `13453506…`、`tesla_auth.py` `ff2c8061…`、`override_state.py` `9631248b…`、`config_loader.py` `f42bece7…`、`wall_connector.py` `e6b330d0…`、`vehicle_status.py` `aefc5baa…`、`control_server.py` `030fe22e…`、`control_templates/page.html` `e6167f30…`、`manifest.webmanifest` `fa0229e3…`、`sw.js` `2cf1941e…`、`tools/observe_only.py` `1a4ec355…`
+- 第8章どおり権限を設定し（`.py` と `tools/observe_only.py` は 600、`control_templates` はディレクトリ 700・ファイル 600）、`py_compile` を通した
+- `tesla-charger.service` と `tesla-override.service` を再起動した（22:30:07）。`tesla-proxy.service` は再起動していない（起動 2026-06-20 23:43:40 のまま）。`tesla-observer.service` は `inactive` のまま起動していない
+- 転送と再起動は、利用者の許可（2026-11-10 22:28 JST）を得てから行った
+
+**結果：**（ラズパイ上から `http://127.0.0.1:8090` へ要求を送って確認した。トークンは表示していない）
+- 2サービスとも `active`、`NRestarts=0`。22:30 以降の journal に Traceback・ERROR・WARNING は無い
+- 充電制御は保存済みトークンで再ログインし、対象車両とウォールコネクターを確認したうえで、夜間休止（車両 `offline`）に入った。目標充電率は 42%
+- トークン付きの `GET /` は 200（18332 バイト）、トークン付きの `GET /manifest.webmanifest` は 200（`start_url` にトークンを含み、アイコン4件）、`GET /sw.js` は 200 を返した。`control_templates` の3ファイルを読み込めている
+- `X-Control-Token` ヘッダー付きの `/api/status` は 200、誤ったトークン（`x` を40文字）は 403 を返した。トークン無しの `/manifest.webmanifest` は 403 を返した（トークンを要求する設計どおり）
+- `control_server.log` と 22:30 以降の journal に、トークンの値は含まれていなかった
+
+---
+
 ## 2026-11-02（スマホ操作の要求の記録）
 
 **タグ：** `v0.9.0`（PR #55・#56。同じ夜に反映した PR #53・#57 と同じタグで、`208f758` に付けた。ラズパイ上の `control_server.py` はこのコミットと一致する。`tesla_solar_charger.py`・`wall_connector.py` の照合は、同じ夜の PR #53・#57 の項に記録する）
