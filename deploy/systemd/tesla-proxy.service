@@ -1,0 +1,14 @@
+[Unit]
+Description=Tesla HTTP Proxy Server for TVCP
+After=network.target
+
+[Service]
+Type=simple
+User=<username>
+WorkingDirectory=/home/<username>/tesla-solar-charge
+ExecStart=/home/<username>/tesla-solar-charge/tesla-http-proxy -cert /home/<username>/tesla-solar-charge/cert.pem -tls-key /home/<username>/tesla-solar-charge/key.pem -key-file /home/<username>/tesla-solar-charge/tesla_app_key.pem -port 4443
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

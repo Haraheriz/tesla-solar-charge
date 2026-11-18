@@ -97,8 +97,12 @@ tesla-solar-charge/
 ├── cert.pem                          # 【動線: Win → RPi】ローカルHTTPS通信用 公開鍵証明書
 ├── key.pem                           # 【動線: Win → RPi】ローカルHTTPS通信用 秘密鍵（RSA）
 │
-├── tesla-http-proxy                  # [ラズパイ専用] Go言語ネイティブバイナリ（拡張子なし）
-│                                     # (Windows側で GOOS=linux としてクロスコンパイルし転送)
+├── tesla-http-proxy                  # [ラズパイ専用] Go言語ネイティブバイナリ（拡張子なし、リポジトリには入れない）
+│                                     # (Windows側で deploy/proxy/build.ps1 によりクロスコンパイルし転送)
+│
+├── deploy/proxy/VERSION              # [共用] プロキシの取得元・タグ・コミット・Go の版・配置中の SHA-256
+├── deploy/proxy/build.ps1            # [Windows] VERSION の版でプロキシをビルドするスクリプト
+├── deploy/systemd/                   # [共用] systemd ユニットファイル4つ（docs/02_deploy.md 第6章で配置）
 │
 ├── venv/                             # [ラズパイ専用] Python3 仮想環境（隔離ディレクトリ）
 │                                     # (ラズパイ側でローカル生成するため、Windows側からは転送厳禁)
