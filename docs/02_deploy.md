@@ -68,7 +68,7 @@ powershell -ExecutionPolicy Bypass -File .\deploy\proxy\build.ps1
 スクリプトは次の順に処理し、確認が1つでも合わなければ中止する。
 
 1. 手元の Go の版が `VERSION` の `GO_VERSION` と同じかを確認する（版を上げる作業のときだけ `-AllowGoMismatch` を付ける）
-2. リポジトリ直下の `vehicle-command/`（`.gitignore` で除外済み）が無ければ clone する。origin が `REPO` と同じか、タグ `TAG` が `COMMIT` を指すか、追跡対象ファイルに変更が無いかを確認し、`COMMIT` へ切り替える
+2. リポジトリ直下の `vehicle-command/`（`.gitignore` で除外済み）が無ければ clone する。`git fetch --no-tags origin tag <TAG>` で `VERSION` のタグ1つだけを取得する（`origin/main` などのブランチの控えと、ほかのタグは更新しない。公式が同じ名前のタグを別のコミットへ付け替えていた場合は、Git が上書きを拒否して中止する）。origin が `REPO` と同じか、タグ `TAG` が `COMMIT` を指すか、追跡対象ファイルに変更が無いかを確認し、`COMMIT` へ切り替える
 3. `cmd/tesla-http-proxy` で `GOOS` / `GOARCH` / `CGO_ENABLED=0` を指定して `go build` し、`vehicle-command/cmd/tesla-http-proxy/tesla-http-proxy-arm64` を出力する。環境変数は終了時に元へ戻す
 4. SHA-256 を表示し、`VERSION` の `SHA256`（ラズパイで動いているバイナリの値）と一致するかを表示する
 

@@ -63,7 +63,10 @@ $originNormalized = ($origin.TrimEnd('/') -replace '\.git$', '')
 if ($originNormalized -ne $cfg.REPO.TrimEnd('/')) {
     throw "vehicle-command/ の origin が VERSION の REPO と違う（$origin）"
 }
-Invoke-Native 'git' @('-C', $src, 'fetch', '--tags', 'origin') | Out-Null
+# 取得するのは VERSION のタグ1つだけにする。--tags はブランチも併せて取得し、
+# origin/main などの控え（リモート追跡ブランチ）を公式の最新へ進めるため使わない。
+# --no-tags は、取得したコミットに付いている別のタグを自動で取り込まないための指定。
+Invoke-Native 'git' @('-C', $src, 'fetch', '--no-tags', 'origin', 'tag', $cfg.TAG) | Out-Null
 
 $tagCommit = (Invoke-Native 'git' @('-C', $src, 'rev-list', '-n', '1', $cfg.TAG)) | Select-Object -First 1
 if ($tagCommit -ne $cfg.COMMIT) {
