@@ -29,7 +29,16 @@ jobs:
   claude-review:
     # Draft PR はスキップ（ready_for_review で改めて発火する）。
     # fork からの PR もスキップする（secrets を持つ実行を同一リポジトリのブランチに限る）。
-    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    # Dependabot が作成した PR もスキップする。Dependabot のブランチは同一リポジトリにあるため
+    # 上の条件を通り、ジョブには Actions の secrets が渡される（PR #60・#61 の実行ログに
+    # 「Secret source: Actions」と出る）。アクションは bot が起動した実行を
+    # 「Workflow initiated by non-human actor」で止めるので、レビューは行われず、チェックは
+    # 失敗になっていた。PR の本文には上流パッケージのリリースノートが入るため、allowed_bots で
+    # 通すことはしない。PR の作成者で判定するので、人が Dependabot のブランチへ push しても動かない。
+    if: >-
+      ${{ !github.event.pull_request.draft
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.user.login != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

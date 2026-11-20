@@ -73,6 +73,8 @@
 | ワークフローの `uses:` をタグではなくコミット SHA で固定する | タグは作者が別のコミットへ付け替えられる | [PR #47](https://github.com/Haraheriz/tesla-solar-charge/pull/47) |
 | `requirements-dev.txt` の版を `==` で固定し、アクションと Python パッケージの更新 PR を Dependabot が毎月出すようにする | 固定した版を放置せず、更新を PR として確認してから取り込む | [PR #47](https://github.com/Haraheriz/tesla-solar-charge/pull/47) |
 | 自動レビュー（`claude-review.yml`）は `pull_request_target` で main のワークフローファイルを使い、同じリポジトリのブランチからの PR に限って動かす。PR の head は認証情報を残さずに別ディレクトリへ取り出し、読み取りだけを許す | secrets を持つジョブで、PR 側が変更したワークフローや PR のコードを実行しない | [PR #47](https://github.com/Haraheriz/tesla-solar-charge/pull/47)、[PR #50](https://github.com/Haraheriz/tesla-solar-charge/pull/50) |
+| 自動レビューは、Dependabot が作成した PR では実行しない（`if:` 条件で PR の作成者を見る）。`allowed_bots` は設定しない | Dependabot のブランチは同じリポジトリにあるため、ジョブに secrets が渡っていた。PR の本文には上流パッケージのリリースノートが入る | [PR #81](https://github.com/Haraheriz/tesla-solar-charge/pull/81) |
+| リポジトリの設定で、シークレット走査、プッシュ保護、Dependabot アラート、アクションの SHA 固定の強制を有効にする（2026-11-20） | 認証情報を含むコミットを push の時点で止める。`uses:` を SHA で固定する規則を GitHub が強制する | リポジトリの設定（コミットなし） |
 | 自動レビューにはテストを実行させない（テストは secrets を持たない `tests.yml` が実行する） | 公開リポジトリで、`pytest` は PR 内の任意のコードを実行する | [PR #26](https://github.com/Haraheriz/tesla-solar-charge/pull/26) |
 | 自動レビューの観点に、認証情報・トークン・秘密鍵の漏洩を含める | このリポジトリは Tesla の認証情報と証明書を扱う | [PR #4](https://github.com/Haraheriz/tesla-solar-charge/pull/4) |
 
