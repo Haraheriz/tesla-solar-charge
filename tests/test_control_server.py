@@ -578,6 +578,24 @@ def test_接続元ごとの上限による拒否のまとめは間隔を過ぎ�
     ]
 
 
+def test_接続元ごとの上限が全体の上限と同じ件数でも拒否の理由を取り違えない(control_module, monkeypatch):
+    """拒否の理由を上限の件数で見分けると、2つの上限を同じ値にしたとき、接続元ごとの上限による
+    拒否が全体の上限として記録される（PR #83 の自動レビュー）。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    monkeypatch.setattr(control_module, "MAX_CLIENTS_PER_SOURCE", control_module.MAX_CLIENTS)
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    try:
+        for _ in range(control_module.MAX_CLIENTS):
+            assert httpd._try_acquire("192.0.2.1") is None
+        _refuse(httpd, "192.0.2.1")
+    finally:
+        httpd.server_close()
+
+    assert log.lines["warning"] == [
+        "同じ接続元からの同時接続が上限（16件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。"
+    ]
+
+
 class _FakeRequest:
     def __init__(self):
         self.shutdowns = 0

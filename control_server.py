@@ -11,7 +11,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config_loader import DAY_END_HOUR, DAY_START_HOUR, Settings, warn_if_accessible_by_others
 from override_state import (
@@ -584,17 +584,20 @@ class ControlServer(ThreadingHTTPServer):
         request.settimeout(CLIENT_TIMEOUT_SEC)
         return request, client_address
 
-    def _try_acquire(self, address: str) -> Optional[int]:
-        """address の接続に枠を1つ割り当てる。割り当てたら None、できなければ達していた上限の件数を返す。
+    def _try_acquire(self, address: str) -> Optional[Tuple["_RefusalLog", str]]:
+        """address の接続に枠を1つ割り当てる。割り当てたら None を返す。
 
-        接続元ごとの上限を先に見る。上限に達した接続元の接続は、全体の枠を取らずに閉じる。"""
+        割り当てられないときは、拒否を記録する先と、達していた上限を述べる理由の文を返す。
+        上限の件数ではなく記録先を返すのは、2つの上限が同じ件数になっても理由を取り違えない
+        ためである。接続元ごとの上限を先に見る。上限に達した接続元の接続は、全体の枠を
+        取らずに閉じる。"""
         limit = source_limit(address)
         with self._source_lock:
             held = self._per_source.get(address, 0)
             if held >= limit:
-                return limit
+                return self._source_refusals, f"同じ接続元からの同時接続が上限（{limit}件）に達している"
             if not self._slots.acquire(blocking=False):
-                return MAX_CLIENTS
+                return self._total_refusals, f"同時接続が上限（{MAX_CLIENTS}件）に達している"
             self._per_source[address] = held + 1
             return None
 
@@ -610,12 +613,10 @@ class ControlServer(ThreadingHTTPServer):
 
     def process_request(self, request: Any, client_address: tuple) -> None:
         address = client_address[0]
-        refused_by = self._try_acquire(address)
-        if refused_by is not None:
-            if refused_by == MAX_CLIENTS:
-                self._total_refusals.record(f"同時接続が上限（{MAX_CLIENTS}件）に達している", address)
-            else:
-                self._source_refusals.record(f"同じ接続元からの同時接続が上限（{refused_by}件）に達している", address)
+        refusal = self._try_acquire(address)
+        if refusal is not None:
+            refusal_log, reason = refusal
+            refusal_log.record(reason, address)
             self.shutdown_request(request)
             return
         self._total_refusals.flush()
