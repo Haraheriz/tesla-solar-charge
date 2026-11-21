@@ -11,7 +11,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config_loader import DAY_END_HOUR, DAY_START_HOUR, Settings, warn_if_accessible_by_others
 from override_state import (
@@ -99,6 +99,23 @@ MAX_CLIENTS: int = 16
 # 16接続でそれを行うと、正規の要求は枠が空くまで応答なしで閉じられる。
 # スマートフォンは要求を数ミリ秒で送り終えるため、15秒を超える要求は正規の利用では起きない。
 REQUEST_DEADLINE_SEC: float = 15.0
+
+# 1つの接続元（IPアドレス）が同時に持てる枠の上限。
+#
+# MAX_CLIENTS は全接続元で共有する。締切（REQUEST_DEADLINE_SEC）は1接続が枠を持つ時間を
+# 制限するが、閉じられた接続を張り直す接続元は制限しない。1台が24接続を張り直し続けると、
+# 正しいトークンを付けた要求151回のうち139回が応答なしで閉じられた（2026-11-20 の試験）。
+# 接続元ごとの上限を設け、1台が占有できる枠を MAX_CLIENTS より小さくする。
+#
+# 6は、ブラウザーが HTTP/1.1 で1つのホストへ同時に開く接続数の上限である。操作画面を開いた
+# 1台のスマートフォンは、これを超える接続を同時に開かない。
+MAX_CLIENTS_PER_SOURCE: int = 6
+
+# ループバック（127.0.0.0/8）からの接続の上限。Tailscale Serve は tailnet の全端末の要求を
+# 127.0.0.1 から中継するため、端末1台分の上限では足りない。残りの枠
+# （MAX_CLIENTS - MAX_CLIENTS_PER_SOURCE）を上限とし、ループバックからの接続が上限に
+# 達しても、LAN の1台が MAX_CLIENTS_PER_SOURCE 件を使えるようにする。
+MAX_CLIENTS_LOOPBACK: int = MAX_CLIENTS - MAX_CLIENTS_PER_SOURCE
 
 # 同時接続の上限による拒否は、直前の記録からこの秒数の間は数えるだけにし、まとめて記録する。
 # まとめの行に載せる相手の IP は最大 REFUSAL_LOG_MAX_ADDRESSES 件とし、メモリと行の長さを抑える。
@@ -477,18 +494,89 @@ class _RequestState:
         self.finished = False
 
 
+def source_limit(address: str) -> int:
+    """接続元 address が同時に持てる枠の上限を返す。
+
+    待受は AF_INET だけなので、address は IPv4 のドット区切りである。"""
+    return MAX_CLIENTS_LOOPBACK if address.startswith("127.") else MAX_CLIENTS_PER_SOURCE
+
+
+class _RefusalLog:
+    """上限による拒否の記録を間引く。直前の記録から REFUSAL_LOG_INTERVAL_SEC 秒以内の拒否は数えるだけにする。
+
+    枠が埋まっている間、スマホの要求は応答なしで閉じられる。記録が無いと、「操作が効かない」
+    原因がこの拒否かどうかを後から判別できない。一方で、拒否1件ごとに1行を書くと、枠を
+    埋め続ける接続があるとき1秒に数十行になり、control_server.log（5MB×4本）から調べたい
+    時間帯の記録を押し出す。数えた拒否は、次に記録するときに1行にまとめる。
+
+    状態は _lock の中でだけ読み書きする。記録はロックを放してから書く。"""
+
+    def __init__(self, ended: str, flush_within_interval: bool) -> None:
+        self._lock = threading.Lock()
+        self._logged_at: Optional[float] = None
+        self._count = 0
+        self._addresses: List[str] = []
+        self._ended = ended
+        self._flush_within_interval = flush_within_interval
+
+    def record(self, reason: str, address: str) -> None:
+        """拒否を記録する。間隔内の拒否は数えるだけにする。"""
+        with self._lock:
+            now = time.monotonic()
+            if self._logged_at is not None and now - self._logged_at < REFUSAL_LOG_INTERVAL_SEC:
+                self._count += 1
+                if address not in self._addresses and len(self._addresses) < REFUSAL_LOG_MAX_ADDRESSES:
+                    self._addresses.append(address)
+                return
+            summary = self._take_summary()
+            self._logged_at = now
+        logger.warning(f"{reason}ため、{address} からの接続を応答せずに閉じました。{summary}")
+
+    def _take_summary(self) -> str:
+        """数えた拒否の件数と相手を1文にし、数え直す。_lock の中で呼ぶ。"""
+        if not self._count:
+            return ""
+        addresses = "、".join(self._addresses)
+        if self._count > len(self._addresses) and len(self._addresses) >= REFUSAL_LOG_MAX_ADDRESSES:
+            addresses += " ほか"
+        summary = f"前回の記録の後に、同じ理由で {self._count} 件を閉じていました（相手：{addresses}）。"
+        self._count = 0
+        self._addresses = []
+        return summary
+
+    def flush(self) -> None:
+        """接続を受け付けたとき、数えたまま記録していない拒否を1行で記録する。
+
+        flush_within_interval が偽のときは、直前の記録から間隔を過ぎるまで記録しない。
+        接続元ごとの上限では、上限に達した接続元の接続が閉じるたびに、同じ接続元の次の接続が
+        受け付けられる。受け付けのたびに記録すると、間引きが効かない。"""
+        with self._lock:
+            if not self._count:
+                return
+            if (
+                not self._flush_within_interval
+                and self._logged_at is not None
+                and time.monotonic() - self._logged_at < REFUSAL_LOG_INTERVAL_SEC
+            ):
+                return
+            summary = self._take_summary()
+            self._logged_at = None
+        logger.warning(f"{self._ended}{summary}")
+
+
 class ControlServer(ThreadingHTTPServer):
-    """同時接続を16件に制限し、各接続の読み取りを5秒で、処理全体を15秒で打ち切る。"""
+    """同時接続を全体で16件、接続元ごとに6件（ループバックは10件）に制限し、
+    各接続の読み取りを5秒で、処理全体を15秒で打ち切る。"""
 
     request_queue_size = MAX_CLIENTS
 
     def __init__(self, server_address: tuple, handler_class: type) -> None:
         self._slots = threading.BoundedSemaphore(MAX_CLIENTS)
-        # 上限による拒否の記録を間引くための状態。_refusal_lock の中でだけ読み書きする。
-        self._refusal_lock = threading.Lock()
-        self._refusal_logged_at: Optional[float] = None
-        self._refused_count = 0
-        self._refused_addresses: List[str] = []
+        # 接続元ごとに、いま持っている枠の数。_source_lock の中でだけ読み書きする。
+        self._source_lock = threading.Lock()
+        self._per_source: Dict[str, int] = {}
+        self._total_refusals = _RefusalLog("同時接続の上限による拒否が終わりました。", flush_within_interval=True)
+        self._source_refusals = _RefusalLog("接続元ごとの上限による拒否がありました。", flush_within_interval=False)
         super().__init__(server_address, handler_class)
 
     def get_request(self) -> tuple:
@@ -496,58 +584,47 @@ class ControlServer(ThreadingHTTPServer):
         request.settimeout(CLIENT_TIMEOUT_SEC)
         return request, client_address
 
-    def _record_refusal(self, address: str) -> None:
-        """上限による拒否を記録する。直前の記録から REFUSAL_LOG_INTERVAL_SEC 秒以内の拒否は数えるだけにする。
+    def _try_acquire(self, address: str) -> Optional[Tuple["_RefusalLog", str]]:
+        """address の接続に枠を1つ割り当てる。割り当てたら None を返す。
 
-        枠が埋まっている間、スマホの要求は応答なしで閉じられる。記録が無いと、「操作が効かない」
-        原因がこの拒否かどうかを後から判別できない。一方で、拒否1件ごとに1行を書くと、枠を
-        埋め続ける接続があるとき1秒に数十行になり、control_server.log（5MB×4本）から調べたい
-        時間帯の記録を押し出す。数えた拒否は、次に記録するとき（間隔を過ぎた拒否か、枠が空いて
-        受け付けた接続）に1行にまとめる。"""
-        with self._refusal_lock:
-            now = time.monotonic()
-            if self._refusal_logged_at is not None and now - self._refusal_logged_at < REFUSAL_LOG_INTERVAL_SEC:
-                self._refused_count += 1
-                if address not in self._refused_addresses and len(self._refused_addresses) < REFUSAL_LOG_MAX_ADDRESSES:
-                    self._refused_addresses.append(address)
-                return
-            summary = self._take_refusal_summary()
-            self._refusal_logged_at = now
-        logger.warning(
-            f"同時接続が上限（{MAX_CLIENTS}件）に達しているため、{address} からの接続を応答せずに閉じました。{summary}"
-        )
+        割り当てられないときは、拒否を記録する先と、達していた上限を述べる理由の文を返す。
+        上限の件数ではなく記録先を返すのは、2つの上限が同じ件数になっても理由を取り違えない
+        ためである。接続元ごとの上限を先に見る。上限に達した接続元の接続は、全体の枠を
+        取らずに閉じる。"""
+        limit = source_limit(address)
+        with self._source_lock:
+            held = self._per_source.get(address, 0)
+            if held >= limit:
+                return self._source_refusals, f"同じ接続元からの同時接続が上限（{limit}件）に達している"
+            if not self._slots.acquire(blocking=False):
+                return self._total_refusals, f"同時接続が上限（{MAX_CLIENTS}件）に達している"
+            self._per_source[address] = held + 1
+            return None
 
-    def _take_refusal_summary(self) -> str:
-        """数えた拒否の件数と相手を1文にし、数え直す。_refusal_lock の中で呼ぶ。"""
-        if not self._refused_count:
-            return ""
-        addresses = "、".join(self._refused_addresses)
-        if self._refused_count > len(self._refused_addresses) and len(self._refused_addresses) >= REFUSAL_LOG_MAX_ADDRESSES:
-            addresses += " ほか"
-        summary = f"前回の記録の後に、同じ理由で {self._refused_count} 件を閉じていました（相手：{addresses}）。"
-        self._refused_count = 0
-        self._refused_addresses = []
-        return summary
-
-    def _flush_refusals(self) -> None:
-        """枠が空いて接続を受け付けたとき、数えたまま記録していない拒否を1行で記録する。"""
-        with self._refusal_lock:
-            summary = self._take_refusal_summary()
-            if summary:
-                self._refusal_logged_at = None
-        if summary:
-            logger.warning(f"同時接続の上限による拒否が終わりました。{summary}")
+    def _release(self, address: str) -> None:
+        """_try_acquire で割り当てた枠を1つ返す。"""
+        with self._source_lock:
+            held = self._per_source.get(address, 0) - 1
+            if held > 0:
+                self._per_source[address] = held
+            else:
+                self._per_source.pop(address, None)
+        self._slots.release()
 
     def process_request(self, request: Any, client_address: tuple) -> None:
-        if not self._slots.acquire(blocking=False):
-            self._record_refusal(client_address[0])
+        address = client_address[0]
+        refusal = self._try_acquire(address)
+        if refusal is not None:
+            refusal_log, reason = refusal
+            refusal_log.record(reason, address)
             self.shutdown_request(request)
             return
-        self._flush_refusals()
+        self._total_refusals.flush()
+        self._source_refusals.flush()
         try:
             super().process_request(request, client_address)
         except Exception:
-            self._slots.release()
+            self._release(address)
             raise
 
     @staticmethod
@@ -597,7 +674,7 @@ class ControlServer(ThreadingHTTPServer):
             with state.lock:
                 state.finished = True
             deadline.cancel()
-            self._slots.release()
+            self._release(client_address[0])
 
 
 def main() -> None:

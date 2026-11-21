@@ -469,6 +469,133 @@ def test_上限による拒否は間隔を過ぎたら数えた件数ととも�
     ]
 
 
+def _wait_until(condition, timeout=2.0):
+    """condition() が真になるまで最大 timeout 秒待ち、最後の評価結果を返す。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+def test_接続元ごとの上限は端末とループバックで別で合計は全体の上限以下である(control_module):
+    """Tailscale Serve は tailnet の全端末の要求を 127.0.0.1 から中継するため、ループバックは別の上限にする。"""
+    assert control_module.source_limit("192.0.2.1") == control_module.MAX_CLIENTS_PER_SOURCE == 6
+    assert control_module.source_limit("127.0.0.1") == control_module.MAX_CLIENTS_LOOPBACK == 10
+    assert control_module.MAX_CLIENTS_PER_SOURCE + control_module.MAX_CLIENTS_LOOPBACK <= control_module.MAX_CLIENTS
+
+
+def test_接続元ごとの上限を超えた接続だけを閉じ他の接続元は受け付ける(control_module, monkeypatch):
+    """全体の上限だけでは、1台が接続を張り直し続けて16件の枠を占有できた。その間、
+    正しいトークンを付けた要求も応答なしで閉じられた（GHSA-wgp6-69q8-c4qc）。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    held = []
+    try:
+        for _ in range(control_module.MAX_CLIENTS_PER_SOURCE):
+            ours, theirs = socket.socketpair()
+            held.append(theirs)
+            httpd.process_request(ours, ("192.0.2.1", 50000))
+        _refuse(httpd, "192.0.2.1")                     # 7本目は応答なしで閉じられる
+
+        ours, theirs = socket.socketpair()
+        held.append(theirs)
+        httpd.process_request(ours, ("192.0.2.2", 50000))
+        theirs.settimeout(5)
+        theirs.sendall(b"GET /api/status HTTP/1.0\r\n\r\n")
+        assert b" 403 " in theirs.recv(1024).split(b"\r\n", 1)[0]   # 別の接続元は処理される
+    finally:
+        for sock in held:
+            sock.close()
+        httpd.server_close()
+
+    # 接続が閉じると、接続元ごとの数と全体の枠の両方が戻る
+    assert _wait_until(lambda: not httpd._per_source)
+    assert _wait_until(lambda: httpd._slots._value == control_module.MAX_CLIENTS)
+    assert log.lines["warning"] == [
+        "同じ接続元からの同時接続が上限（6件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。"
+    ]
+
+
+def test_上限に達した接続元は接続が閉じた後に再び受け付けられる(server, control_module, monkeypatch):
+    base, _ = server
+    port = int(base.rsplit(":", 1)[1])
+    monkeypatch.setattr(control_module, "MAX_CLIENTS_LOOPBACK", 2)
+    slow = [socket.create_connection(("127.0.0.1", port), timeout=5) for _ in range(2)]
+    try:
+        for sock in slow:
+            sock.sendall(b"GET / HTTP/1.1\r\n")
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as third:
+            third.sendall(f"GET /api/status HTTP/1.0\r\nX-Control-Token: {TOKEN}\r\n\r\n".encode("ascii"))
+            try:
+                answer = third.recv(1024)
+            except ConnectionError:                     # 未読の要求を残して閉じられると RST になる
+                answer = b""
+            assert answer == b""                        # 正しいトークンでも応答なしで閉じられる
+    finally:
+        for sock in slow:
+            sock.close()
+
+    def accepted():
+        try:
+            return _get(f"{base}/api/status?token={TOKEN}")[0] == 200
+        except (urllib.error.URLError, ConnectionError):
+            return False
+
+    assert _wait_until(accepted)
+
+
+def test_接続元ごとの上限による拒否のまとめは間隔を過ぎてから記録する(control_module, monkeypatch):
+    """上限に達した接続元の接続が閉じるたびに、同じ接続元の次の接続が受け付けられる。
+    受け付けのたびにまとめを記録すると、張り直しを続ける接続元があるとき記録が間引かれない。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    clock = [1000.0]
+    monkeypatch.setattr(control_module, "time", type("Clock", (), {"monotonic": staticmethod(lambda: clock[0])}))
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+
+    def accept_from(address):
+        ours, theirs = socket.socketpair()
+        theirs.close()                                  # 要求を送らずに閉じた接続として処理させる
+        httpd.process_request(ours, (address, 50000))
+
+    try:
+        for _ in range(control_module.MAX_CLIENTS_PER_SOURCE):
+            assert httpd._try_acquire("192.0.2.1") is None
+        for _ in range(3):
+            _refuse(httpd, "192.0.2.1")
+        accept_from("192.0.2.2")                        # 間隔内の受け付けでは記録しない
+        assert log.lines["warning"] == [
+            "同じ接続元からの同時接続が上限（6件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。"
+        ]
+        clock[0] += 61.0
+        accept_from("192.0.2.2")
+    finally:
+        httpd.server_close()
+
+    assert log.lines["warning"][1:] == [
+        "接続元ごとの上限による拒否がありました。前回の記録の後に、同じ理由で 2 件を閉じていました（相手：192.0.2.1）。"
+    ]
+
+
+def test_接続元ごとの上限が全体の上限と同じ件数でも拒否の理由を取り違えない(control_module, monkeypatch):
+    """拒否の理由を上限の件数で見分けると、2つの上限を同じ値にしたとき、接続元ごとの上限による
+    拒否が全体の上限として記録される（PR #83 の自動レビュー）。"""
+    log = _Recorder(monkeypatch, control_module.logger)
+    monkeypatch.setattr(control_module, "MAX_CLIENTS_PER_SOURCE", control_module.MAX_CLIENTS)
+    httpd = control_module.ControlServer(("127.0.0.1", 0), control_module.ControlHandler)
+    try:
+        for _ in range(control_module.MAX_CLIENTS):
+            assert httpd._try_acquire("192.0.2.1") is None
+        _refuse(httpd, "192.0.2.1")
+    finally:
+        httpd.server_close()
+
+    assert log.lines["warning"] == [
+        "同じ接続元からの同時接続が上限（16件）に達しているため、192.0.2.1 からの接続を応答せずに閉じました。"
+    ]
+
+
 class _FakeRequest:
     def __init__(self):
         self.shutdowns = 0

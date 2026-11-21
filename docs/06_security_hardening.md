@@ -53,6 +53,7 @@
 | すべての応答に `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff` を付ける | トークンを含むページのキャッシュ、Referer での送出、MIME の推測を防ぐ | [PR #46](https://github.com/Haraheriz/tesla-solar-charge/pull/46) |
 | すべての応答に `X-Frame-Options: DENY` と `Content-Security-Policy: frame-ancestors 'none'` を付ける | 他サイトの iframe への埋め込み（クリックジャッキング）を防ぐ | [PR #47](https://github.com/Haraheriz/tesla-solar-charge/pull/47) |
 | 拒否（4xx）・失敗（5xx）・タイムアウト・同時接続数の上限による拒否をログに記録し、ログに書く文字列ではトークンを伏せ、制御文字をエスケープする | 不正なアクセスや接続の占有が起きたとき、記録から確認できるようにする。ログ自体からトークンが漏れないようにする | [PR #55](https://github.com/Haraheriz/tesla-solar-charge/pull/55)（主目的は障害調査） |
+| 同時接続に、接続元（IPアドレス）ごとの上限を設ける。1つの接続元は6件、ループバックは10件まで | 全体の上限（16件）だけでは、1台が接続を張り直し続けて枠をすべて占有できた。その間、正しいトークンの要求も応答なしで閉じられた（24接続・39秒の試験で151回中139回）。Tailscale Serve を通る接続はすべて `127.0.0.1` から来るため、tailnet の1台がループバックの10件を埋めると、ほかの tailnet の端末は拒否される。3つ以上の IP アドレスを使える LAN の機器は、全体の16件を埋められる。この2つは残る | [PR #83](https://github.com/Haraheriz/tesla-solar-charge/pull/83) |
 
 ### 2.4 認証情報ファイル
 
