@@ -188,7 +188,7 @@ chmod 600 tesla_config.json
 | `NIGHT_STOP_MAX_ATTEMPTS` | | `6` | 夜間の停止確認をあきらめるまでの回数 |
 | `NIGHT_GET_ATTEMPTS` | | `2` | 夜間のGETをその場で再試行する回数 |
 | `CONTROL_PORT` | | `8090` | スマホ操作用サーバーの待受ポート |
-| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。文字列でない値、32文字未満、テンプレート値、表示可能なASCII文字（0x21〜0x7E）以外を含む値では起動しない。`openssl rand -hex 32` で生成する |
+| `CONTROL_TOKEN` | ○ | `""` | スマホ操作用サーバーの共有シークレット。文字列でない値、32文字未満、テンプレート値、表示可能なASCII文字（0x21〜0x7E）以外を含む値、使う文字が8種類未満の値では起動しない。`openssl rand -hex 32` で生成する |
 
 ### `REMO_SAMPLES` を増やす前に
 

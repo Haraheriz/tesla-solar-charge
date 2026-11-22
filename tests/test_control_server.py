@@ -166,14 +166,55 @@ def test_知らないパスは404を返す(server):
     assert exc.value.headers["X-Content-Type-Options"] == "nosniff"
     assert exc.value.headers["Cache-Control"] == "no-store"
     assert exc.value.headers["X-Frame-Options"] == "DENY"
+    assert exc.value.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+    assert exc.value.headers["Referrer-Policy"] == "no-referrer"
 
 
-def test_同じ文字の繰り返しのCONTROL_TOKENでは起動しない(tmp_path, monkeypatch):
+def test_未対応のメソッドの501にもセキュリティのヘッダーが付く(server):
+    base, _ = server
+    request = urllib.request.Request(f"{base}/?token={TOKEN}", method="DELETE")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+    assert exc.value.code == 501
+    assert exc.value.headers["X-Content-Type-Options"] == "nosniff"
+    assert exc.value.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("token, ok", [
+    ("a" * 64, False),
+    ("abcdefg" * 6, False),   # 7種類
+    ("abcdefgh" * 5, True),   # 8種類
+])
+def test_CONTROL_TOKENは8種類以上の文字を求める(tmp_path, monkeypatch, token, ok):
     control_config = tmp_path / "control_config.json"
-    control_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": "a" * 64}), encoding="utf-8")
-    with pytest.raises(SystemExit):
-        _load_control_server(tmp_path, monkeypatch, {"TESLA_CONTROL_CONFIG_PATH": str(control_config)})
+    control_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": token}), encoding="utf-8")
+    env = {"TESLA_CONTROL_CONFIG_PATH": str(control_config)}
+    if ok:
+        assert _load_control_server(tmp_path, monkeypatch, env).CONTROL_TOKEN == token
+    else:
+        with pytest.raises(SystemExit):
+            _load_control_server(tmp_path, monkeypatch, env)
 
+
+def test_Windowsの切断ConnectionAbortedErrorはトレースバックを出さない(tmp_path, monkeypatch):
+    control_config = tmp_path / "control_config.json"
+    control_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN}), encoding="utf-8")
+    module = _load_control_server(tmp_path, monkeypatch, {
+        "TESLA_CONTROL_CONFIG_PATH": str(control_config),
+        "TESLA_CONTROL_LOG_PATH": str(tmp_path / "control_server.log"),
+    })
+    # トレースバックを出す既定の handle_error() が呼ばれないことを確かめる
+    import socketserver
+    default_calls = []
+    monkeypatch.setattr(socketserver.BaseServer, "handle_error",
+                        lambda self, request, address: default_calls.append(address))
+    httpd = object.__new__(module.ControlServer)  # 待ち受けずに handle_error() だけを呼ぶ
+    for error in (ConnectionAbortedError("aborted"), ValueError("other")):
+        try:
+            raise error
+        except Exception:
+            httpd.handle_error(None, ("192.0.2.1", 1))
+    assert default_calls == [("192.0.2.1", 1)], "ConnectionAbortedError だけが既定の処理を通らない"
 
 def test_不正なバイト列をPOSTしても400を返す(server):
     base, _ = server
