@@ -45,17 +45,17 @@
 * ライセンスは [Apache-2.0](https://github.com/teslamotors/vehicle-command/blob/main/LICENSE) であり、バイナリを同梱すると第4条の再配布の条件（ライセンス文の添付など）が付く
 * GitHub はバイナリの配布に Git ではなく Releases を使うよう案内している（[GitHub Docs「About large files on GitHub」](https://docs.github.com/ja/repositories/working-with-files/managing-large-files/about-large-files-on-github#distributing-large-binaries)）
 
-### 現在の版（2026-11-11 確認）
+### 現在の版（2026-11-22 確認）
 
 | 項目 | 値 |
 | --- | --- |
 | 取得元 | `https://github.com/teslamotors/vehicle-command` |
 | タグ | `v0.4.1`（2026-02-04） |
 | コミット | `49977a18fd68567501d59e16a6c9e4a8b9348544` |
-| Go | `go1.26.3`（`GOOS=linux` / `GOARCH=arm64` / `CGO_ENABLED=0`） |
-| ラズパイ上のバイナリ | 17,757,394 バイト、SHA-256 `3ff5c5cfe4a41326f14cace68d8dfabf478f8e8fa093d440d67a0a010f830789`、2026-06-20 23:39 配置 |
+| Go | `go1.26.11`（`GOOS=linux` / `GOARCH=arm64` / `CGO_ENABLED=0`） |
+| ラズパイ上のバイナリ | 17,900,361 バイト、SHA-256 `87fc8deff9b99cda7c333f5f28c34268dcc150e7e42ff0543d1a3f732dcaaafb`、2026-11-22 16:16 配置 |
 
-この値は、ラズパイのバイナリに埋め込まれたビルド情報（`strings` で読める `mod` / `build vcs.revision` の行）と、Windows側のチェックアウト `vehicle-command/` の `git rev-parse HEAD` が一致することで確認した。ビルド情報には `v0.4.1+dirty`（`vcs.modified=true`）と出るが、チェックアウトの追跡対象ファイルに変更は無く、未追跡のビルド成果物だけがある。Go は未追跡ファイルがあるときも `modified=true` を付ける。
+この値は、転送前に開発機で `go version -m` を実行してビルド情報（Go の版、`vcs.revision`、`GOOS` / `GOARCH` / `CGO_ENABLED`）を読み、転送後にラズパイで `sha256sum` を実行して開発機の値と一致することで確認した。ビルド情報には `vcs.modified=true` と出るが、チェックアウトの追跡対象ファイルに変更は無く、未追跡のビルド成果物だけがある。Go は未追跡ファイルがあるときも `modified=true` を付ける。2026-06-20 に配置した Go 1.26.3 版（17,757,394 バイト、SHA-256 `3ff5c5cf…`）は、ラズパイの `backup-20261122/` にある。
 
 ### ビルド手順
 
