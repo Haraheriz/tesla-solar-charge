@@ -251,6 +251,8 @@ Windows側からリポジトリの `deploy/systemd/` をラズパイの `~/tesla
 
 ```bash
 cd /home/<username>/tesla-solar-charge
+# tesla-override の drop-in は state/ への書き込みを許す。state/ が無いと起動が 226/NAMESPACE で失敗するため、先に作る
+mkdir -p state && chmod 700 state
 for u in tesla-proxy tesla-charger tesla-override tesla-observer; do
   sed "s/<username>/$USER/g" "deploy/systemd/$u.service" | sudo tee "/etc/systemd/system/$u.service" >/dev/null
   sudo mkdir -p "/etc/systemd/system/$u.service.d"
