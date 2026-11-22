@@ -84,8 +84,8 @@
 | 対策 | 理由 | 根拠 |
 | --- | --- | --- |
 | 4つのサービスに systemd の drop-in（`deploy/systemd/<unit>.service.d/10-hardening.conf`）を重ね、`NoNewPrivileges=yes` と空の `CapabilityBoundingSet=` で、サービスのプロセスが sudo などで権限を上げられないようにする | 実行ユーザーはパスワードなしで sudo を使える。外部から要求を受ける操作サーバーにコード実行の不具合があると、ラズパイの root を取られる（2026-11-20 の脆弱性検査 V-01）。ログインしたユーザーの sudo は変わらない | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
-| `ProtectSystem=strict` と `ProtectHome=read-only` で OS 全体とホームを読み取り専用にし、`ReadWritePaths=` でプロジェクトのディレクトリだけ書き込みを許す。プロキシには書き込みを許さない | 不具合があっても、ほかのユーザーの設定、`~/.ssh`、OS のファイルを書き換えられないようにする | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
-| `InaccessiblePaths=` で、各サービスが使わない認証情報ファイルを見えなくする（操作サーバーからは車両トークン・鍵2つ・`cert.pem`・`~/.ssh`、充電制御と観測ツールからは鍵2つ、プロキシからは車両トークンと `tesla_config.json`） | 1つのサービスに不具合があっても、取られる認証情報をそのサービスが使うものに限る | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
+| `ProtectSystem=strict` と `ProtectHome=read-only` で OS 全体とホームを読み取り専用にし、`ReadWritePaths=` で書き込める場所を限る。充電制御と観測ツールはプロジェクトのディレクトリ、操作サーバーは `state/`（共有の状態ファイルと自分のログ）だけで、プロキシには書き込みを許さない。操作サーバーはコードを書き換えられないため、充電制御のコードに手を加えてトークンを取る経路も無い | 不具合があっても、ほかのユーザーの設定、`~/.ssh`、OS のファイルを書き換えられないようにする | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
+| `InaccessiblePaths=` で、各サービスが使わない認証情報ファイルを見えなくする（操作サーバーからは `tesla_config.json`・車両トークン・鍵2つ・`cert.pem`・`~/.ssh`。操作サーバーは `CONTROL_TOKEN`・`CONTROL_PORT`・`MAX_AMPS` だけを書いた `control_config.json` を読む。充電制御と観測ツールからは鍵2つ、プロキシからは車両トークンと `tesla_config.json`） | 1つのサービスに不具合があっても、取られる認証情報をそのサービスが使うものに限る | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
 | カーネル設定・モジュール・時計・ほかのプロセスへの操作を禁じ（`ProtectKernel*`、`ProtectClock`、`ProtectProc=invisible` など）、通信の種類を IPv4・IPv6・UNIX・netlink に絞る | このシステムが使わない操作を、サービスのプロセスから実行できないようにする | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
 
 2026-11-22 時点で本番に配置して動作を確認したのは、`tesla-override`、`tesla-proxy`、`tesla-charger` の3つである。`tesla-observer` の drop-in は `tesla-charger` と同じ内容だが、本番では観測ツールを起動していないため、配置も動作確認もしていない。観測ツールを使うときは、drop-in を配置して起動し、`systemctl is-active` とログの書き込みを確認する。

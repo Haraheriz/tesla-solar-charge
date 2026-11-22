@@ -284,7 +284,21 @@ done
 
 ### 3. スマホ操作用コントロールサーバーの前提
 
-`tesla_config.json` に `CONTROL_PORT`（既定8090）と `CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）を設定しておく。操作サーバーは `0.0.0.0:8090` で待ち受け、宅内LANから直接アクセスできる。Tailscale経由でも利用する場合は、ラズパイとスマートフォンを同じtailnetに参加させ、ラズパイでTailscale ServeのHTTPS転送先を `http://localhost:8090` に設定する。Funnelとルーターの8090番ポート転送は有効にしない。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られる。
+操作サーバーの設定は、`tesla_config.json` とは別の `control_config.json` に置く。操作サーバーが使う値は `CONTROL_PORT`（既定8090）、`CONTROL_TOKEN`（`openssl rand -hex 32` 等で生成したランダムな共有シークレット）、`MAX_AMPS`（画面に出す電流の上限。`tesla_config.json` と同じ値にする）の3つだけである。分けておくと、drop-in が操作サーバーから `tesla_config.json`（Client Secret、Nature Remo のトークン）を見えなくしても起動できる（`docs/06_security_hardening.md` 2.6）。
+
+```bash
+cd /home/<username>/tesla-solar-charge
+cp control_config.json.template control_config.json
+chmod 600 control_config.json
+nano control_config.json   # CONTROL_TOKEN と、tesla_config.json と同じ MAX_AMPS を書く
+mkdir -p state && chmod 700 state
+```
+
+充電制御は `CONTROL_TOKEN` と `CONTROL_PORT` を使わない。`control_config.json` を作ったら、`tesla_config.json` からこの2つを消す。2か所に残すと、トークンを入れ替えるときに片方だけが古くなる。`control_server.py` は、環境変数 `TESLA_CONTROL_CONFIG_PATH`、`TESLA_CONFIG_PATH`、`control_config.json`、`tesla_config.json` の順に探す。`tesla_config.json` を読んだときと、`control_config.json` に3つ以外の項目があるときは、起動時に警告をログに出す（項目の名前だけを出し、値は出さない）。
+
+`state/` には、操作サーバーと充電制御が共有する `override_state.json`（とそのロックファイル）、`vehicle_status.json`、操作サーバーのログ `control_server.log` を置く。置き場所は `tesla-override.service` と `tesla-charger.service` の `Environment=` で指定している。drop-in は、操作サーバーが書き込める場所を `state/` だけにする。そのため、操作サーバーはコードと設定ファイルを書き換えられない。従来の置き方（プロジェクトの直下）から移すときは、2つのサービスを止めてから、次のファイルを `state/` へ `mv` する：`override_state.json`、`override_state.json.lock`、`vehicle_status.json`、`control_server.log*`。
+
+操作サーバーは `0.0.0.0:8090` で待ち受け、宅内LANから直接アクセスできる。Tailscale経由でも利用する場合は、ラズパイとスマートフォンを同じtailnetに参加させ、ラズパイでTailscale ServeのHTTPS転送先を `http://localhost:8090` に設定する。Funnelとルーターの8090番ポート転送は有効にしない。宅内LANから直接アクセスする場合、操作トークンは平文HTTPのURLで送られる。
 
 `tesla-override.service` の起動または再起動前に、ラズパイ上で次の形式確認を実行する。`CONTROL_TOKEN` がJSON文字列でない、32文字未満、`YOUR_RANDOM_CONTROL_TOKEN_HERE`、または表示可能なASCII文字（0x21〜0x7E）以外を含む場合、スクリプトはエラーで終了し、`control_server.py` も起動を中止する。この確認はトークンの値を出力しない。
 
@@ -294,7 +308,7 @@ python3 - <<'PY'
 import json
 from pathlib import Path
 
-token = json.loads(Path("tesla_config.json").read_text(encoding="utf-8")).get("CONTROL_TOKEN")
+token = json.loads(Path("control_config.json").read_text(encoding="utf-8-sig")).get("CONTROL_TOKEN")
 if not (isinstance(token, str) and len(token) >= 32 and token != "YOUR_RANDOM_CONTROL_TOKEN_HERE"
         and all(0x21 <= ord(c) <= 0x7E for c in token)):
     raise SystemExit("CONTROL_TOKEN の形式が無効です")

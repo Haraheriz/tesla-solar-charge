@@ -831,6 +831,82 @@ def test_不正なトークンでは起動しない(tmp_path, token):
             os.environ.pop("TESLA_CONFIG_PATH", None)
 
 
+def _load_control_server(tmp_path, monkeypatch, env):
+    """環境変数 env を立てて control_server.py を新しい名前で import し、モジュールを返す。"""
+    for key in ("TESLA_CONTROL_CONFIG_PATH", "TESLA_CONFIG_PATH", "TESLA_CONTROL_LOG_PATH"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(tmp_path)
+    name = f"control_server_config_test_{next(_module_counter)}"
+    spec = importlib.util.spec_from_file_location(name, os.path.join(PROJECT_ROOT, "control_server.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_操作サーバー用の設定ファイルを読み全体の設定とは扱わない(tmp_path, monkeypatch, caplog):
+    control_config = tmp_path / "control_config.json"
+    control_config.write_text(
+        json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN, "MAX_AMPS": 32}), encoding="utf-8",
+    )
+    module = _load_control_server(tmp_path, monkeypatch, {"TESLA_CONTROL_CONFIG_PATH": str(control_config)})
+    assert module.CONFIG_FILE == str(control_config)
+    assert module.CONFIG_IS_FULL is False
+    assert module.MAX_AMPS == 32
+    assert "全体の設定ファイル" not in caplog.text
+    assert "使わない項目" not in caplog.text
+
+
+def test_操作サーバー用の設定ファイルに余分な項目があれば名前だけを警告する(tmp_path, monkeypatch, caplog):
+    secret = "client-secret-value-must-not-be-logged"
+    control_config = tmp_path / "control_config.json"
+    control_config.write_text(
+        json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN, "CLIENT_SECRET": secret}), encoding="utf-8",
+    )
+    _load_control_server(tmp_path, monkeypatch, {"TESLA_CONTROL_CONFIG_PATH": str(control_config)})
+    assert "使わない項目があります: CLIENT_SECRET" in caplog.text
+    assert secret not in caplog.text
+
+
+def test_全体の設定ファイルを読むときは分けるよう警告する(tmp_path, monkeypatch, caplog):
+    full_config = tmp_path / "tesla_config.json"
+    full_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN}), encoding="utf-8")
+    module = _load_control_server(tmp_path, monkeypatch, {"TESLA_CONFIG_PATH": str(full_config)})
+    assert module.CONFIG_IS_FULL is True
+    assert "全体の設定ファイル" in caplog.text
+
+
+def test_操作サーバーの設定ファイルは指定した環境変数を優先する(tmp_path, monkeypatch):
+    full_config = tmp_path / "tesla_config.json"
+    full_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": "short"}), encoding="utf-8")
+    control_config = tmp_path / "control_config.json"
+    control_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN}), encoding="utf-8")
+    module = _load_control_server(tmp_path, monkeypatch, {
+        "TESLA_CONTROL_CONFIG_PATH": str(control_config),
+        "TESLA_CONFIG_PATH": str(full_config),
+    })
+    assert module.CONFIG_FILE == str(control_config)
+    assert module.CONTROL_TOKEN == TOKEN
+
+
+def test_ログの書き込み先を環境変数で指定できる(tmp_path, monkeypatch):
+    control_config = tmp_path / "control_config.json"
+    control_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": TOKEN}), encoding="utf-8")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    log_path = state_dir / "control_server.log"
+    module = _load_control_server(tmp_path, monkeypatch, {
+        "TESLA_CONTROL_CONFIG_PATH": str(control_config),
+        "TESLA_CONTROL_LOG_PATH": str(log_path),
+    })
+    module.logger.info("ログの書き込み先の確認")
+    for handler in module.logger.handlers:
+        handler.flush()
+    assert "ログの書き込み先の確認" in log_path.read_text(encoding="utf-8")
+    assert not (tmp_path / "control_server.log").exists()
+
+
 def test_BOM付き状態ファイルを読める(tmp_path):
     import override_state
     state_file = tmp_path / "override_state_bom.json"
