@@ -10,7 +10,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
     CONFIG_FILE="$SCRIPT_DIR/tesla_config.json"
 fi
 
-TOKEN=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE', encoding='utf-8-sig'))['CONTROL_TOKEN'])")
+# パスはコードに埋め込まず引数で渡す（パスに引用符があっても壊れない）
+TOKEN=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["CONTROL_TOKEN"])' "$CONFIG_FILE")
 HOST=$(tailscale status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
 
 if [ -z "$HOST" ]; then

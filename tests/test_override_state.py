@@ -1,5 +1,8 @@
 """操作状態ファイルの同時更新。別キーの書き込みが後勝ちで消えないこと。"""
+import os
 import threading
+
+import pytest
 
 import override_state
 
@@ -49,3 +52,20 @@ def test_1回の読みが3つの値を返す(tmp_path, monkeypatch):
     assert snap["charge_target_soc"] == 30
     assert snap["away_probe"] is False
     assert snap["charge_target_invalid"] is False
+
+
+def test_文字列のfalseは有効と読まない():
+    import override_state
+    assert override_state._flag_from({"k": "false", "u": 1}, "k", "u") == (False, 1.0)
+    assert override_state._flag_from({"k": True, "u": 2}, "k", "u") == (True, 2.0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows では POSIX の権限を確かめられない")
+def test_既存のtmpが0644でも書き込み後の状態ファイルは0600になる(tmp_path, monkeypatch):
+    state_file = tmp_path / "override_state.json"
+    monkeypatch.setattr(override_state, "OVERRIDE_FILE", str(state_file))
+    tmp = tmp_path / "override_state.json.tmp"
+    tmp.write_text("{}", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    override_state._write_all({"manual_override": True})
+    assert (state_file.stat().st_mode & 0o777) == 0o600

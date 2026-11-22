@@ -38,6 +38,12 @@ def save_token_file(path: str, access: str, refresh: Optional[str], expires_in: 
     }
     tmp_file = path + ".tmp"
     fd = os.open(tmp_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    # 同名の .tmp が既にあると O_CREAT の権限は効かないため、明示的に 0600 にする
+    # パス名を引き直さず、開いたファイルそのものに設定する（Windows の Python 3.12 には fchmod が無い）
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)
+    else:
+        os.chmod(tmp_file, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=4)
     os.replace(tmp_file, path)
