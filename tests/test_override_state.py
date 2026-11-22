@@ -1,7 +1,8 @@
-import os
-import pytest
 """操作状態ファイルの同時更新。別キーの書き込みが後勝ちで消えないこと。"""
+import os
 import threading
+
+import pytest
 
 import override_state
 
