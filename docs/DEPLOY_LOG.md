@@ -32,7 +32,8 @@
 **作業内容：**
 - `deploy/proxy/VERSION` の `GO_VERSION` を `go1.26.11` にした。Go は `GOTOOLCHAIN=go1.26.11` で取得し、開発機に入っている Go 1.26.3 は替えていない
 - `GOTOOLCHAIN=go1.26.11` を付けて `build.ps1` を実行した。ビルドは成功した。最後の SHA-256 の表示は、git-bash から起動した PowerShell で `Get-FileHash` が見つからず失敗したため、`sha256sum` で求めた
-- 出力の `go version -m` は `go1.26.11`、`vcs.revision=49977a18…`、`CGO_ENABLED=0`、`GOOS=linux`、`GOARCH=arm64` だった。sha256 は `87fc8def…`
+- 出力の `go version -m` は `go1.26.11`、`vcs.revision=49977a18…`、`CGO_ENABLED=0`、`GOOS=linux`、`GOARCH=arm64` だった。大きさは 17,900,361 バイト、sha256 は `87fc8def…`
+- `docs/02_deploy.md` 第2章の「現在の版」の表を新しいバイナリの値に更新した
 - 転送前に、ラズパイ上の `tesla-http-proxy` の sha256 が `VERSION` の値（`3ff5c5cf…`）と一致することを確認し、`backup-20261122/`（700）に保存した
 - `C:\Windows\System32\OpenSSH\scp.exe` で `tesla-http-proxy.new` として転送し、sha256 が転送元と一致することを確認した後、権限を 700 にして `mv` で置き換えた
 - `tesla-proxy.service` を再起動した（16:16:52）。`tesla-charger.service` は依存関係により同時に再起動した。`tesla-override.service` は再起動していない
