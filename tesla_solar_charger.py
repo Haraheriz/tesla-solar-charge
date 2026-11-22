@@ -1124,7 +1124,8 @@ def ensure_access_token() -> None:
         login_url: str = f"https://auth.tesla.com/oauth2/v3/authorize?client_id={CLIENT_ID}&redirect_uri={redirect_uri}&response_type=code&scope=openid%20offline_access%20vehicle_device_data%20vehicle_charging_cmds&state={expected_oauth_state}"
 
         logger.warning("初回認証手続きを開始します。ブラウザが自動起動しない場合は以下を開いてください：")
-        logger.warning(f"\n{login_url}\n")
+        # URL の state は1回限りの値だが、ログファイルには残さず端末にだけ出す
+        print(f"\n{login_url}\n", file=sys.stderr, flush=True)
 
         try:
             import webbrowser

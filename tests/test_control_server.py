@@ -163,6 +163,16 @@ def test_知らないパスは404を返す(server):
     with pytest.raises(urllib.error.HTTPError) as exc:
         _post(f"{base}/api/unknown?token={TOKEN}", {"enabled": True})
     assert exc.value.code == 404
+    assert exc.value.headers["X-Content-Type-Options"] == "nosniff"
+    assert exc.value.headers["Cache-Control"] == "no-store"
+    assert exc.value.headers["X-Frame-Options"] == "DENY"
+
+
+def test_同じ文字の繰り返しのCONTROL_TOKENでは起動しない(tmp_path, monkeypatch):
+    control_config = tmp_path / "control_config.json"
+    control_config.write_text(json.dumps({"CONTROL_PORT": 0, "CONTROL_TOKEN": "a" * 64}), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        _load_control_server(tmp_path, monkeypatch, {"TESLA_CONTROL_CONFIG_PATH": str(control_config)})
 
 
 def test_不正なバイト列をPOSTしても400を返す(server):

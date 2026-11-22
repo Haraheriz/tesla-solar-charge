@@ -49,3 +49,9 @@ def test_1回の読みが3つの値を返す(tmp_path, monkeypatch):
     assert snap["charge_target_soc"] == 30
     assert snap["away_probe"] is False
     assert snap["charge_target_invalid"] is False
+
+
+def test_文字列のfalseは有効と読まない():
+    import override_state
+    assert override_state._flag_from({"k": "false", "u": 1}, "k", "u") == (False, 1.0)
+    assert override_state._flag_from({"k": True, "u": 2}, "k", "u") == (True, 2.0)

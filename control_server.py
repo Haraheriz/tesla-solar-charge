@@ -124,12 +124,18 @@ def is_token_charset_valid(token: str) -> bool:
     return bool(token) and all(0x21 <= ord(c) <= 0x7E for c in token)
 
 
+# 同じ文字の繰り返しなど推測しやすい値を拒む。`openssl rand -hex 32` の64文字が
+# 8種類未満の文字で構成される確率は無視できる。
+CONTROL_TOKEN_MIN_DISTINCT_CHARS: int = 8
+
+
 if (not isinstance(control_token_value, str) or len(control_token_value) < 32
         or control_token_value == "YOUR_RANDOM_CONTROL_TOKEN_HERE"
-        or not is_token_charset_valid(control_token_value)):
+        or not is_token_charset_valid(control_token_value)
+        or len(set(control_token_value)) < CONTROL_TOKEN_MIN_DISTINCT_CHARS):
     logger.critical(
         "CONTROL_TOKEN が文字列でない、32文字未満、テンプレート値、"
-        "または表示可能なASCII文字以外を含んでいます。起動を中止します。"
+        "表示可能なASCII文字以外を含む、または使う文字が8種類未満です。起動を中止します。"
     )
     sys.exit(1)
 CONTROL_TOKEN: str = control_token_value
@@ -373,7 +379,18 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_response(self, code: int, message: Any = None) -> None:
+        self._security_headers_sent = False
+        super().send_response(code, message)
+
+    def end_headers(self) -> None:
+        # send_error()（404、400、414、501 など）の応答にも同じヘッダーを付ける
+        if not getattr(self, "_security_headers_sent", False):
+            self._send_security_headers()
+        super().end_headers()
+
     def _send_security_headers(self) -> None:
+        self._security_headers_sent = True
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -701,10 +718,10 @@ class ControlServer(ThreadingHTTPServer):
         """相手か締切が閉じた接続での読み書きの失敗は1行で記録し、それ以外は既定どおりトレースバックを出す。
 
         締切で閉じた接続（_abort_request）への書き込みや、処理中に切断したスマホとの読み書きは
-        BrokenPipeError か ConnectionResetError になる。既定の handle_error() は例外の種類に
+        BrokenPipeError か ConnectionResetError（Windows では ConnectionAbortedError）になる。既定の handle_error() は例外の種類に
         かかわらずトレースバックを標準エラーへ出すため、journal で不具合と区別できなくなる。"""
         error = sys.exc_info()[1]
-        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+        if isinstance(error, ConnectionError):
             logger.info(f"{client_address[0]} との接続は、要求の処理中に閉じられていました（{type(error).__name__}）。")
             return
         super().handle_error(request, client_address)

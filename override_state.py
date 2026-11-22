@@ -40,6 +40,8 @@ def _write_all(data: Dict[str, Any]) -> None:
     """
     tmp_file: str = OVERRIDE_FILE + ".tmp"
     fd = os.open(tmp_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    # 同名の .tmp が既にあると O_CREAT の権限は効かないため、明示的に 0600 にする
+    os.chmod(tmp_file, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
     os.replace(tmp_file, OVERRIDE_FILE)
@@ -181,7 +183,8 @@ def read_snapshot() -> Dict[str, Any]:
 
 
 def _flag_from(data: Dict[str, Any], key: str, updated_key: str) -> Tuple[bool, float]:
-    enabled = bool(data.get(key, False))
+    # 手で "false" と書いた場合に有効と読まないよう、真偽値の True だけを有効とする
+    enabled = data.get(key, False) is True
     try:
         updated_at = float(data.get(updated_key, 0.0))
     except (TypeError, ValueError):
