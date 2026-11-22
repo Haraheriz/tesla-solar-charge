@@ -11,6 +11,9 @@ ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python tesla_solar_charge
 Restart=always
 RestartSec=30
 Environment=PYTHONUNBUFFERED=1
+# 操作サーバーと共有する状態ファイルは state/ に置く（tesla-override.service と同じ値にする）
+Environment=TESLA_OVERRIDE_PATH=/home/<username>/tesla-solar-charge/state/override_state.json
+Environment=TESLA_VEHICLE_STATUS_PATH=/home/<username>/tesla-solar-charge/state/vehicle_status.json
 
 [Install]
 WantedBy=multi-user.target

@@ -253,7 +253,7 @@ systemctl is-enabled tesla-observer.service     # disabled であること
 ### 使い方
 
 1. **初回のみ：URLをブックマーク／ホーム画面に追加**
-宅内LANから直接アクセスする場合は、ラズパイのIPアドレスと、`tesla_config.json` に設定した `CONTROL_TOKEN` を使って以下の形式のURLを開く。
+宅内LANから直接アクセスする場合は、ラズパイのIPアドレスと、`control_config.json` に設定した `CONTROL_TOKEN` を使って以下の形式のURLを開く。
 
 ```text
 http://<ラズパイのIPアドレス>:8090/?token=<CONTROL_TOKEN>
@@ -272,7 +272,7 @@ ssh <ホスト名> "./tesla-solar-charge/show_control_url.sh"
 
 ```
 
-`tesla_config.json` の `CONTROL_TOKEN` と、Tailscaleの自ホストMagicDNS名（`tailscale status --self` から取得）からHTTPSのURLを組み立て、`qrencode`（事前に `sudo apt-get install qrencode` が必要）でQRコードを端末に描画する。スマホでQRコードを読み取れば、トークンを手で入力せずそのままアクセスできる。Tailscale Serveを設定していない場合は、上記の宅内LAN用URLを直接使う。
+`control_config.json`（無ければ `tesla_config.json`）の `CONTROL_TOKEN` と、Tailscaleの自ホストMagicDNS名（`tailscale status --self` から取得）からHTTPSのURLを組み立て、`qrencode`（事前に `sudo apt-get install qrencode` が必要）でQRコードを端末に描画する。スマホでQRコードを読み取れば、トークンを手で入力せずそのままアクセスできる。Tailscale Serveを設定していない場合は、上記の宅内LAN用URLを直接使う。
 
 URLが分かれば、iPhoneのSafariなら共有メニューから「ホーム画面に追加」、AndroidのChromeなら「ホーム画面に追加」を選ぶと、アイコンタップだけでアプリのように開けるようになる（PWA対応により、専用アイコン付きでスタンドアロン表示される）。
 
@@ -288,7 +288,7 @@ URLが分かれば、iPhoneのSafariなら共有メニューから「ホーム�
 
 * 宅内LANの直接接続では操作トークンを平文HTTPのURLで送る。通信を観測できる端末にトークンを取得され得るため、利用するネットワークの端末と無線LANの設定を確認する。
 * 宅外からはTailscale ServeのHTTPS経由でアクセスする。ルーターで8090番ポートを開放しない。
-* `CONTROL_TOKEN` は `openssl rand -hex 32` 等で生成した推測不可能な値を `tesla_config.json` に設定すること。
+* `CONTROL_TOKEN` は `openssl rand -hex 32` 等で生成した推測不可能な値を `control_config.json` に設定すること。
 * トークン付きURLはブラウザーの履歴やホーム画面の設定に残る。画面共有やURLの転送で第三者へ開示しない。
 
 ### 就寝中の車を起こす判断（`WAKE_DEBOUNCE_CYCLES`）
@@ -377,13 +377,13 @@ openssl rand -hex 32
 ```
 
 2. **ラズパイ側の設定を更新：**
-`/home/<username>/tesla-solar-charge/tesla_config.json` の `CONTROL_TOKEN` を新しい値に書き換える。新しい値はJSON文字列で32文字以上、表示可能なASCII文字（0x21〜0x7E）のみとし、`YOUR_RANDOM_CONTROL_TOKEN_HERE` を使わない。`docs/02_deploy.md` 第6章③の形式確認を実行する。この時点では稼働中のプロセスは旧トークンを受け付ける。
+`/home/<username>/tesla-solar-charge/control_config.json` の `CONTROL_TOKEN` を新しい値に書き換える（`control_config.json` を作っていない従来の置き方では `tesla_config.json`）。新しい値はJSON文字列で32文字以上、表示可能なASCII文字（0x21〜0x7E）のみとし、`YOUR_RANDOM_CONTROL_TOKEN_HERE` を使わない。`docs/02_deploy.md` 第6章③の形式確認を実行する。この時点では稼働中のプロセスは旧トークンを受け付ける。
 
 3. **コントロールサーバーを再起動：**
 ```bash
 sudo systemctl restart tesla-override.service
 ```
-（`control_server.py` はプロセス起動時に `tesla_config.json` を読む。再起動後、旧トークンを使ったリクエストは `403 Forbidden` になる。）
+（`control_server.py` はプロセス起動時に `control_config.json` を読む。再起動後、旧トークンを使ったリクエストは `403 Forbidden` になる。）
 
 4. **スマホ側の再設定：**
 古いトークン入りのブックマーク・ホーム画面アイコンは無効になるため削除し、`show_control_url.sh` で新しいURL・QRコードを表示してホーム画面に追加し直す。
@@ -910,7 +910,7 @@ VIN自体は、ウォールコネクターと車両のあいだのCP線を流れ
 
 ### スマホ操作用サーバーの記録
 
-`tesla-override.service` の記録は、journal と作業ディレクトリの `control_server.log`（5MB×4本で入れ替え）の両方に出る。スマホの操作が効かないときは、次の行で要求の到達と結果を確認する。
+`tesla-override.service` の記録は、journal と`state/control_server.log`（5MB×4本で入れ替え）の両方に出る。スマホの操作が効かないときは、次の行で要求の到達と結果を確認する。
 
 | 水準 | 記録される事象 | 行の例 |
 | --- | --- | --- |

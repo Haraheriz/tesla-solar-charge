@@ -21,6 +21,53 @@
 
 ---
 
+## 2026-11-22（操作サーバーの設定ファイルを分け、状態ファイルを state/ へ移した）
+
+**タグ：** なし（このPRのマージ後に付けるかを決める）
+
+**内容：** `control_server.py`、`show_control_url.sh`、`control_config.json.template`、`tesla-override.service`、`tesla-charger.service`、`tesla-override.service.d/10-hardening.conf` をこの PR の版にした。`control_config.json` を作り、`override_state.json`、`vehicle_status.json`、`control_server.log` を `state/` へ移した。`tesla_config.json` から `CONTROL_TOKEN` と `CONTROL_PORT` を消した。
+
+**理由：** 操作サーバーが `tesla_config.json`（Client Secret、Nature Remo のトークン）を読まずに起動でき、書き込める場所を `state/` に限るため（2026-11-20 の脆弱性検査 V-01 の残り）。
+
+**作業内容：**
+- 21:17 に、開発機から転送したスクリプトで次を行った。変更前の6ファイルを `backup-20261122b/`（700）に保存した
+- `control_config.json` は、`tesla_config.json` の `CONTROL_PORT`・`CONTROL_TOKEN`・`MAX_AMPS` を値を表示せずに写して作り、権限を 600 にした
+- `tesla-override.service` と `tesla-charger.service` を止め、3ファイルを `state/`（700）へ `mv` した。`override_state.json.lock` と `control_server.log.1` 以降は無かった
+- ユニットと drop-in を置き換え、`daemon-reload` の後に2サービスを起動した。止まっていたのは約10秒である
+- 起動を確かめた後、`tesla_config.json` から `CONTROL_TOKEN` と `CONTROL_PORT` を消した（変更前の写しは `backup-20261122b/`、権限 600）
+
+**確認：**
+- 3サービスとも `active`、`tesla-override` の `systemd-analyze security` は 3.0 OK
+- 操作サーバーの環境変数は4つとも `control_config.json` と `state/` を指し、`state/control_server.log` に起動の3行が出た。「全体の設定ファイル」「使わない項目」の警告は出ていない
+- 正しいトークンを付けた `GET /api/status` は 200 を返した（トークンは `control_config.json` からラズパイ上で読み、表示していない）
+- 操作サーバーのマウント名前空間の中では、`tesla_config.json` が読めず、プロジェクトの直下には書き込めず、`state/` には書き込めた
+- プロジェクトの直下に `override_state.json`、`vehicle_status.json`、`control_server.log` は作られていない
+- 充電制御が `state/vehicle_status.json` を書くことと、操作画面から状態を変える操作は、この時点では確かめていない（夜間休止中）
+
+---
+
+## 2026-11-22（systemd の drop-in でサービスの権限を絞った）
+
+**タグ：** なし（このPRのマージ後に付けるかを決める）
+
+**内容：** `deploy/systemd/<unit>.service.d/10-hardening.conf` を、`tesla-override`、`tesla-proxy`、`tesla-charger` の3サービスに配置した。ユニットファイル本体と Python のファイルは変えていない。`tesla-observer` は起動していないため、drop-in を配置していない。
+
+**理由：** 2026-11-20 の脆弱性検査（V-01）で、3サービスがパスワードなしで sudo を使えるユーザーで動き、ユニットに権限を絞る設定が無いことを確認した。`systemd-analyze security` は3サービスとも 9.2 UNSAFE だった。
+
+**作業内容：**
+- 16:40 に `tesla-override` へ最初の版を配置した。パスに `%h` を使っていたため、`%h` が `/root` になり、`ReadWritePaths=/root/tesla-solar-charge` が存在せず、起動が `status=226/NAMESPACE` で失敗して10秒おきに再起動した。19:08 に `/home/<username>/` を実行ユーザー名に置き換えた版へ置き換えて起動した。この間（16:40〜19:08）、操作画面は使えなかった。充電制御とプロキシは影響を受けていない
+- 19:20 に、利用者が開発機から `tesla-proxy` と `tesla-charger` の drop-in を転送・配置し、2サービスを再起動した
+- 配置は `sudo install -m 644 -o root -g root` で行い、`sudo systemctl daemon-reload` の後に再起動した
+
+**確認：**
+- 3サービスとも `active`、`/proc/<MainPID>/status` の `NoNewPrivs` は `1`、`systemd-analyze security` は 3.0 OK
+- `tesla-override` は `0.0.0.0:8090` で待ち受け、トークンなしの `GET /api/status` に 403 を返し、`control_server.log` に記録した
+- `tesla-proxy` は `127.0.0.1:4443` で待ち受けている
+- `tesla-charger` は起動後、トークンの読み込みと定期チェックまで進み、ログを書いた。夜間休止中で、車両は `offline` だった。トークンの更新（`tesla_tokens.json` の書き込み）と車両コマンドは、この時点では発生していない
+- 戻すときは、`/etc/systemd/system/<unit>.service.d/10-hardening.conf` を消して `sudo systemctl daemon-reload` の後に再起動する
+
+---
+
 ## 2026-11-22（プロキシを Go 1.26.11 でビルドし直した）
 
 **タグ：** なし（このPRのマージ後に付けるかを決める）

@@ -26,7 +26,9 @@ from vehicle_status import load_vehicle_status
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-LOG_FILE: str = "control_server.log"
+# 本番では systemd のユニットが state/ 以下を指定する（docs/02_deploy.md 第6章）。
+# 操作サーバーが書き込めるのは state/ だけで、作業ディレクトリには書き込めない。
+LOG_FILE: str = os.environ.get("TESLA_CONTROL_LOG_PATH", "control_server.log")
 MAX_LOG_SIZE: int = 5 * 1024 * 1024
 BACKUP_COUNT: int = 3
 
@@ -43,17 +45,61 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE: str = os.environ.get("TESLA_CONFIG_PATH", os.path.join(BASE_DIR, "tesla_config.json"))
+
+
+def resolve_config_file() -> Tuple[str, bool]:
+    """操作サーバーが読む設定ファイルのパスと、それが tesla_config.json（全体の設定）かを返す。
+
+    操作サーバーが使う値は CONTROL_TOKEN・CONTROL_PORT・MAX_AMPS の3つだけである。
+    この3つだけを書いた control_config.json があればそれを読み、Client Secret や
+    Nature Remo のトークンを含む tesla_config.json は読まない（2026-11-20 の脆弱性検査 V-01）。
+    選ぶ順は次のとおり。
+      1. 環境変数 TESLA_CONTROL_CONFIG_PATH
+      2. 環境変数 TESLA_CONFIG_PATH（従来の指定。テストもこれを使う）
+      3. BASE_DIR の control_config.json（存在するとき）
+      4. BASE_DIR の tesla_config.json（従来の置き方）
+    """
+    explicit = os.environ.get("TESLA_CONTROL_CONFIG_PATH")
+    if explicit:
+        return explicit, False
+    legacy = os.environ.get("TESLA_CONFIG_PATH")
+    if legacy:
+        return legacy, True
+    split = os.path.join(BASE_DIR, "control_config.json")
+    if os.path.exists(split):
+        return split, False
+    return os.path.join(BASE_DIR, "tesla_config.json"), True
+
+
+CONFIG_FILE, CONFIG_IS_FULL = resolve_config_file()
 
 if not os.path.exists(CONFIG_FILE):
     logger.critical(f"設定ファイル（{CONFIG_FILE}）が見つかりません。")
     sys.exit(1)
+
+if CONFIG_IS_FULL:
+    logger.warning(
+        f"操作サーバーが全体の設定ファイル（{CONFIG_FILE}）を読んでいます。"
+        "CONTROL_TOKEN・CONTROL_PORT・MAX_AMPS だけを control_config.json に分けると、"
+        "操作サーバーから Tesla と Nature Remo の認証情報を見えなくできます（docs/02_deploy.md 第6章）。"
+    )
 
 with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
     config: Dict[str, Any] = json.load(f)
 
 # CONTROL_TOKEN を含むため、所有者以外から読める権限なら起動時に警告する（充電制御側と同じ検査）。
 warn_if_accessible_by_others(CONFIG_FILE, logger.warning)
+
+CONTROL_CONFIG_KEYS: frozenset = frozenset({"CONTROL_TOKEN", "CONTROL_PORT", "MAX_AMPS"})
+
+if not CONFIG_IS_FULL and isinstance(config, dict):
+    extra_keys = sorted(set(config) - CONTROL_CONFIG_KEYS)
+    if extra_keys:
+        # 全体の設定を丸ごと写すと、分けた意味がなくなる。値は使わないが、名前だけ記録する。
+        logger.warning(
+            f"操作サーバー用の設定ファイル（{CONFIG_FILE}）に、操作サーバーが使わない項目があります: "
+            f"{', '.join(extra_keys)}。CONTROL_TOKEN・CONTROL_PORT・MAX_AMPS 以外は消してください。"
+        )
 
 # 数値の設定は充電制御側と同じ入口を通す。片方だけ素の config.get に戻ると、
 # 「設定を読む場所は1か所」という前提がまた崩れる。

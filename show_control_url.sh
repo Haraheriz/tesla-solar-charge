@@ -4,7 +4,11 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/tesla_config.json"
+# 操作サーバー用の control_config.json があればそれを読む（無ければ従来の tesla_config.json）
+CONFIG_FILE="$SCRIPT_DIR/control_config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+    CONFIG_FILE="$SCRIPT_DIR/tesla_config.json"
+fi
 
 TOKEN=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE', encoding='utf-8-sig'))['CONTROL_TOKEN'])")
 HOST=$(tailscale status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)

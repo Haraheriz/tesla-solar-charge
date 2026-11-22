@@ -10,6 +10,12 @@ ExecStart=/home/<username>/tesla-solar-charge/venv/bin/python control_server.py
 Restart=always
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+# 操作サーバーは CONTROL_TOKEN・CONTROL_PORT・MAX_AMPS だけを書いた設定ファイルを読む。
+# 充電制御と共有する状態ファイルと自分のログは state/ に置く（drop-in で書き込みを state/ に限る）
+Environment=TESLA_CONTROL_CONFIG_PATH=/home/<username>/tesla-solar-charge/control_config.json
+Environment=TESLA_OVERRIDE_PATH=/home/<username>/tesla-solar-charge/state/override_state.json
+Environment=TESLA_VEHICLE_STATUS_PATH=/home/<username>/tesla-solar-charge/state/vehicle_status.json
+Environment=TESLA_CONTROL_LOG_PATH=/home/<username>/tesla-solar-charge/state/control_server.log
 
 [Install]
 WantedBy=multi-user.target
