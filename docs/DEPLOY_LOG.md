@@ -21,6 +21,23 @@
 
 ---
 
+## 2026-11-22（プロキシと充電制御から control_config.json を見えなくした）
+
+**タグ：** なし
+
+**内容：** `tesla-proxy` と `tesla-charger`（と未配置の `tesla-observer`）の drop-in の `InaccessiblePaths=` に `control_config.json` を加えた。`tesla-override` の drop-in はコメントだけをリポジトリに合わせた。
+
+**理由：** `control_config.json` の `CONTROL_TOKEN` は操作サーバーだけが使う（PR #86 の自動レビューの指摘）。
+
+**作業内容：** 3つの drop-in を置き換え、`daemon-reload` の後に3サービスを再起動した。
+
+**確認：**
+- 3サービスとも `active`。3つの drop-in はリポジトリと一致した
+- `tesla-proxy` と `tesla-charger` のマウント名前空間で `ls -l` を実行すると、`control_config.json` は所有者 root・権限 `----------`・大きさ 0 で見えた（`InaccessiblePaths=` が中身のないファイルを重ねている）。`tesla-proxy` と `tesla-override` からの `tesla_config.json` も同じ表示だった
+- 確認方法の訂正：前の項（設定ファイルの分離）の「`tesla_config.json` が読めず」は、`nsenter` の中で相対パスを `cat` した結果で、ファイルが見つからなかったことを読めないと判断していた。今回 `ls -l` で、操作サーバーから見た `tesla_config.json` が中身のないファイルであることを確かめ直した。`nsenter` は root で入るため、権限 000 のファイルも `cat` できる（中身は空）。サービスのプロセス（実行ユーザー）は開けない
+
+---
+
 ## 2026-11-22（操作サーバーの設定ファイルを分け、状態ファイルを state/ へ移した）
 
 **タグ：** なし（このPRのマージ後に付けるかを決める）
