@@ -21,6 +21,28 @@
 
 ---
 
+## 2026-11-22（systemd の drop-in でサービスの権限を絞った）
+
+**タグ：** なし（このPRのマージ後に付けるかを決める）
+
+**内容：** `deploy/systemd/<unit>.service.d/10-hardening.conf` を、`tesla-override`、`tesla-proxy`、`tesla-charger` の3サービスに配置した。ユニットファイル本体と Python のファイルは変えていない。`tesla-observer` は起動していないため、drop-in を配置していない。
+
+**理由：** 2026-11-20 の脆弱性検査（V-01）で、3サービスがパスワードなしで sudo を使えるユーザーで動き、ユニットに権限を絞る設定が無いことを確認した。`systemd-analyze security` は3サービスとも 9.2 UNSAFE だった。
+
+**作業内容：**
+- 16:40 に `tesla-override` へ最初の版を配置した。パスに `%h` を使っていたため、`%h` が `/root` になり、`ReadWritePaths=/root/tesla-solar-charge` が存在せず、起動が `status=226/NAMESPACE` で失敗して10秒おきに再起動した。19:08 に `/home/takeshi/` で書いた版へ置き換えて起動した。この間（16:40〜19:08）、操作画面は使えなかった。充電制御とプロキシは影響を受けていない
+- 19:20 に、利用者が開発機から `tesla-proxy` と `tesla-charger` の drop-in を転送・配置し、2サービスを再起動した
+- 配置は `sudo install -m 644 -o root -g root` で行い、`sudo systemctl daemon-reload` の後に再起動した
+
+**確認：**
+- 3サービスとも `active`、`/proc/<MainPID>/status` の `NoNewPrivs` は `1`、`systemd-analyze security` は 3.0 OK
+- `tesla-override` は `0.0.0.0:8090` で待ち受け、トークンなしの `GET /api/status` に 403 を返し、`control_server.log` に記録した
+- `tesla-proxy` は `127.0.0.1:4443` で待ち受けている
+- `tesla-charger` は起動後、トークンの読み込みと定期チェックまで進み、ログを書いた。夜間休止中で、車両は `offline` だった。トークンの更新（`tesla_tokens.json` の書き込み）と車両コマンドは、この時点では発生していない
+- 戻すときは、`/etc/systemd/system/<unit>.service.d/10-hardening.conf` を消して `sudo systemctl daemon-reload` の後に再起動する
+
+---
+
 ## 2026-11-11（プロキシの版の記録。反映作業なし）
 
 **タグ：** なし（ラズパイのファイルは変更していない）

@@ -253,17 +253,26 @@ Windows側からリポジトリの `deploy/systemd/` をラズパイの `~/tesla
 cd /home/<username>/tesla-solar-charge
 for u in tesla-proxy tesla-charger tesla-override tesla-observer; do
   sed "s/<username>/$USER/g" "deploy/systemd/$u.service" | sudo tee "/etc/systemd/system/$u.service" >/dev/null
+  sudo mkdir -p "/etc/systemd/system/$u.service.d"
+  sed "s/<username>/$USER/g" "deploy/systemd/$u.service.d/10-hardening.conf" | sudo tee "/etc/systemd/system/$u.service.d/10-hardening.conf" >/dev/null
 done
 ```
 
-配置済みのユニットがリポジトリと同じかは、次のコマンドで確認できる。差分が無ければ何も表示されない。
+`<unit>.service.d/10-hardening.conf` は、ユニットに重ねて読まれる追加の設定（drop-in）で、サービスの権限を絞る（`docs/06_security_hardening.md` 2.6）。サービスのプロセスは sudo で root になれず、書き込めるのはプロジェクトのディレクトリだけになり、使わない認証情報ファイルは見えなくなる。ログインしたユーザーが SSH で使う sudo は変わらない。パスは `%h` ではなく `/home/<username>/` で書く。システムのサービスでは `%h` が root のホームになり、起動が `status=226/NAMESPACE` で失敗するためである。プロジェクトのディレクトリの外へ書き込む機能を足すときは、`ReadWritePaths=` に書き込み先を足す。
+
+drop-in を外すときは、`/etc/systemd/system/<unit>.service.d/10-hardening.conf` を消して `sudo systemctl daemon-reload` を実行し、サービスを再起動する。
+
+配置済みのユニットと drop-in がリポジトリと同じかは、次のコマンドで確認できる。差分が無ければ何も表示されない。
 
 ```bash
 cd /home/<username>/tesla-solar-charge
 for u in tesla-proxy tesla-charger tesla-override tesla-observer; do
   sed "s/<username>/$USER/g" "deploy/systemd/$u.service" | diff -u - "/etc/systemd/system/$u.service"
+  sed "s/<username>/$USER/g" "deploy/systemd/$u.service.d/10-hardening.conf" | diff -u - "/etc/systemd/system/$u.service.d/10-hardening.conf"
 done
 ```
+
+権限が絞られているかは、`systemd-analyze security <unit>` の最後の行（drop-in の配置後は 3.0 OK、配置前は 9.2 UNSAFE）と、`grep NoNewPrivs /proc/$(systemctl show -p MainPID --value <unit>)/status`（`1` になる）で確認できる。
 
 ユニットを変えるときは、`deploy/systemd/` を PR で変更してから上のコマンドで配置する。ラズパイ上で直接 `nano` で編集すると、リポジトリと食い違う。
 

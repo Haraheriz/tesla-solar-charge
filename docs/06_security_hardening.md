@@ -79,6 +79,15 @@
 | 自動レビューにはテストを実行させない（テストは secrets を持たない `tests.yml` が実行する） | 公開リポジトリで、`pytest` は PR 内の任意のコードを実行する | [PR #26](https://github.com/Haraheriz/tesla-solar-charge/pull/26) |
 | 自動レビューの観点に、認証情報・トークン・秘密鍵の漏洩を含める | このリポジトリは Tesla の認証情報と証明書を扱う | [PR #4](https://github.com/Haraheriz/tesla-solar-charge/pull/4) |
 
+### 2.6 サービスの実行環境（ラズパイ）
+
+| 対策 | 理由 | 根拠 |
+| --- | --- | --- |
+| 4つのサービスに systemd の drop-in（`deploy/systemd/<unit>.service.d/10-hardening.conf`）を重ね、`NoNewPrivileges=yes` と空の `CapabilityBoundingSet=` で、サービスのプロセスが sudo などで権限を上げられないようにする | 実行ユーザーはパスワードなしで sudo を使える。外部から要求を受ける操作サーバーにコード実行の不具合があると、ラズパイの root を取られる（2026-11-20 の脆弱性検査 V-01）。ログインしたユーザーの sudo は変わらない | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
+| `ProtectSystem=strict` と `ProtectHome=read-only` で OS 全体とホームを読み取り専用にし、`ReadWritePaths=` でプロジェクトのディレクトリだけ書き込みを許す。プロキシには書き込みを許さない | 不具合があっても、ほかのユーザーの設定、`~/.ssh`、OS のファイルを書き換えられないようにする | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
+| `InaccessiblePaths=` で、各サービスが使わない認証情報ファイルを見えなくする（操作サーバーからは車両トークン・鍵2つ・`cert.pem`・`~/.ssh`、充電制御と観測ツールからは鍵2つ、プロキシからは車両トークンと `tesla_config.json`） | 1つのサービスに不具合があっても、取られる認証情報をそのサービスが使うものに限る | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
+| カーネル設定・モジュール・時計・ほかのプロセスへの操作を禁じ（`ProtectKernel*`、`ProtectClock`、`ProtectProc=invisible` など）、通信の種類を IPv4・IPv6・UNIX・netlink に絞る | このシステムが使わない操作を、サービスのプロセスから実行できないようにする | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
+
 ---
 
 ## 3. インシデント対応の記録
