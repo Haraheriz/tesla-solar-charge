@@ -21,6 +21,31 @@
 
 ---
 
+## 2026-11-22（操作サーバーの設定ファイルを分け、状態ファイルを state/ へ移した）
+
+**タグ：** なし（このPRのマージ後に付けるかを決める）
+
+**内容：** `control_server.py`、`show_control_url.sh`、`control_config.json.template`、`tesla-override.service`、`tesla-charger.service`、`tesla-override.service.d/10-hardening.conf` をこの PR の版にした。`control_config.json` を作り、`override_state.json`、`vehicle_status.json`、`control_server.log` を `state/` へ移した。`tesla_config.json` から `CONTROL_TOKEN` と `CONTROL_PORT` を消した。
+
+**理由：** 操作サーバーが `tesla_config.json`（Client Secret、Nature Remo のトークン）を読まずに起動でき、書き込める場所を `state/` に限るため（2026-11-20 の脆弱性検査 V-01 の残り）。
+
+**作業内容：**
+- 21:17 に、開発機から転送したスクリプトで次を行った。変更前の6ファイルを `backup-20261122b/`（700）に保存した
+- `control_config.json` は、`tesla_config.json` の `CONTROL_PORT`・`CONTROL_TOKEN`・`MAX_AMPS` を値を表示せずに写して作り、権限を 600 にした
+- `tesla-override.service` と `tesla-charger.service` を止め、3ファイルを `state/`（700）へ `mv` した。`override_state.json.lock` と `control_server.log.1` 以降は無かった
+- ユニットと drop-in を置き換え、`daemon-reload` の後に2サービスを起動した。止まっていたのは約10秒である
+- 起動を確かめた後、`tesla_config.json` から `CONTROL_TOKEN` と `CONTROL_PORT` を消した（変更前の写しは `backup-20261122b/`、権限 600）
+
+**確認：**
+- 3サービスとも `active`、`tesla-override` の `systemd-analyze security` は 3.0 OK
+- 操作サーバーの環境変数は4つとも `control_config.json` と `state/` を指し、`state/control_server.log` に起動の3行が出た。「全体の設定ファイル」「使わない項目」の警告は出ていない
+- 正しいトークンを付けた `GET /api/status` は 200 を返した（トークンは `control_config.json` からラズパイ上で読み、表示していない）
+- 操作サーバーのマウント名前空間の中では、`tesla_config.json` が読めず、プロジェクトの直下には書き込めず、`state/` には書き込めた
+- プロジェクトの直下に `override_state.json`、`vehicle_status.json`、`control_server.log` は作られていない
+- 充電制御が `state/vehicle_status.json` を書くことと、操作画面から状態を変える操作は、この時点では確かめていない（夜間休止中）
+
+---
+
 ## 2026-11-22（systemd の drop-in でサービスの権限を絞った）
 
 **タグ：** なし（このPRのマージ後に付けるかを決める）
