@@ -21,6 +21,35 @@
 
 ---
 
+## 2026-11-22（v0.10.2：V-09 のコード修正を反映した）
+
+**タグ：** `v0.10.2`（`62d04a7`、PR #88 のマージ）。同じ内容で GitHub の Release も作った
+
+**内容：** `control_server.py`、`override_state.py`、`tesla_auth.py`、`vehicle_status.py`、`tesla_solar_charger.py`、`show_control_url.sh` を置き換えた。エラーを含むすべての応答にセキュリティのヘッダーを付ける、`CONTROL_TOKEN` に8種類以上の文字を求める、など（PR #88）。
+
+**作業内容：** 本番の6ファイルが変更前の版（`66dcd76`）と SHA-256 で一致することを確かめてから、`backup-20261123/` に写した（フォルダ名は翌日の日付で付けてしまった。中身は 2026-11-22 23時台の変更前の版）。GitHub の `62d04a7` から取得して中身だけを置き換え（権限は保持）、`py_compile` の後に `tesla-charger` と `tesla-override` を再起動した（23:22:38）。プロキシは変更がないので再起動していない。
+
+**確認：**
+- 本番の6ファイルは `62d04a7` と SHA-256 が一致した。`show_control_url.sh` の権限は `-rwx------` のまま
+- 3サービスとも `active`。`tesla-charger` と `tesla-override` の `systemd-analyze security` は 3.0 のまま。再起動後10分の warning 以上のログは0件
+- 本番の `CONTROL_TOKEN` は16種類の文字を使っており、新しい検査を通る（値は表示していない）
+- `http://127.0.0.1:8090/nonexistent` の 404 応答に `Cache-Control: no-store`、`Referrer-Policy`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Content-Security-Policy: frame-ancestors 'none'` が付いた
+
+---
+
+## 2026-11-22（V-08：OS の更新、rpcbind の停止、ブートローダーの更新、古い控えの削除）
+
+**タグ：** なし（コードの変更なし）
+
+**内容と確認：**
+- プロジェクトのフォルダから、古い設定の写し2つ（`tesla_config.json.bak-*`）、`control_server.py.bak-20261003T161326JST`、控えのフォルダ3つ（`backup-20261102`、`backup-20261110`、`backup-20261121`）を消した。11月22日の控え3つ（`backup-20261122`、`backup-20261122b`、v0.10.2 の項の `backup-20261123`）は、充電が一巡して問題がないことを確かめてから消す
+- `apt full-upgrade` で198件を適用した（カーネル 6.18.34 から 6.18.60、raspi-firmware、無線のファームウェアなど）。再起動後、未適用の更新は0件
+- `rpcbind.socket` と `rpcbind.service` を停止して `mask` した。UDP 111 の待ち受けは無くなった
+- `rpi-eeprom-update -a` でブートローダーを 2025-11-05 版から 2026-10-30 版にした。USB の部品（VL805）は `000138c0` で最新
+- 再起動後、3サービスとも `active`、`systemd-analyze security` は3つとも 3.0、失敗したユニットは0件。有線 LAN と Tailscale が動いている（Wi-Fi は使っていない）
+
+---
+
 ## 2026-11-22（プロキシと充電制御から control_config.json を見えなくした）
 
 **タグ：** なし
