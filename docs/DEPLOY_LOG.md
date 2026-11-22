@@ -30,7 +30,7 @@
 **理由：** 2026-11-20 の脆弱性検査（V-01）で、3サービスがパスワードなしで sudo を使えるユーザーで動き、ユニットに権限を絞る設定が無いことを確認した。`systemd-analyze security` は3サービスとも 9.2 UNSAFE だった。
 
 **作業内容：**
-- 16:40 に `tesla-override` へ最初の版を配置した。パスに `%h` を使っていたため、`%h` が `/root` になり、`ReadWritePaths=/root/tesla-solar-charge` が存在せず、起動が `status=226/NAMESPACE` で失敗して10秒おきに再起動した。19:08 に `/home/takeshi/` で書いた版へ置き換えて起動した。この間（16:40〜19:08）、操作画面は使えなかった。充電制御とプロキシは影響を受けていない
+- 16:40 に `tesla-override` へ最初の版を配置した。パスに `%h` を使っていたため、`%h` が `/root` になり、`ReadWritePaths=/root/tesla-solar-charge` が存在せず、起動が `status=226/NAMESPACE` で失敗して10秒おきに再起動した。19:08 に `/home/<username>/` を実行ユーザー名に置き換えた版へ置き換えて起動した。この間（16:40〜19:08）、操作画面は使えなかった。充電制御とプロキシは影響を受けていない
 - 19:20 に、利用者が開発機から `tesla-proxy` と `tesla-charger` の drop-in を転送・配置し、2サービスを再起動した
 - 配置は `sudo install -m 644 -o root -g root` で行い、`sudo systemctl daemon-reload` の後に再起動した
 

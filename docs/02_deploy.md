@@ -258,7 +258,9 @@ for u in tesla-proxy tesla-charger tesla-override tesla-observer; do
 done
 ```
 
-`<unit>.service.d/10-hardening.conf` は、ユニットに重ねて読まれる追加の設定（drop-in）で、サービスの権限を絞る（`docs/06_security_hardening.md` 2.6）。サービスのプロセスは sudo で root になれず、書き込めるのはプロジェクトのディレクトリだけになり、使わない認証情報ファイルは見えなくなる。ログインしたユーザーが SSH で使う sudo は変わらない。パスは `%h` ではなく `/home/<username>/` で書く。システムのサービスでは `%h` が root のホームになり、起動が `status=226/NAMESPACE` で失敗するためである。プロジェクトのディレクトリの外へ書き込む機能を足すときは、`ReadWritePaths=` に書き込み先を足す。
+`<unit>.service.d/10-hardening.conf` は、ユニットに重ねて読まれる追加の設定（drop-in）で、サービスの権限を絞る（`docs/06_security_hardening.md` 2.6）。サービスのプロセスは sudo で root になれず、書き込めるのはプロジェクトのディレクトリだけになり、使わない認証情報ファイルは見えなくなる。ログインしたユーザーが SSH で使う sudo は変わらない。パスは `%h` ではなく `/home/<username>/` で書く。システムのサービスでは `%h` が root のホームになり、起動が `status=226/NAMESPACE` で失敗するためである。プロジェクトのディレクトリの外へ書き込む機能を足すときは、`ReadWritePaths=` に書き込み先を足す。drop-in は `UMask=0077` を指定するため、サービスが新しく作るファイル（ログの切り替えで作られるファイルを含む）は権限 `0600` になり、実行ユーザー以外は読めない。別のユーザーやツールにログを読ませる運用を始めるときは、この値を見直す。
+
+`sudo tee` で作るファイルは、root の umask（Raspberry Pi OS の既定は `022`）により、所有者 root・権限 `0644` になる。`ls -l /etc/systemd/system/<unit>.service.d/` で確かめられる。`sudo install -m 644 -o root -g root <元> <先>` で置いても同じ結果になる。
 
 drop-in を外すときは、`/etc/systemd/system/<unit>.service.d/10-hardening.conf` を消して `sudo systemctl daemon-reload` を実行し、サービスを再起動する。
 

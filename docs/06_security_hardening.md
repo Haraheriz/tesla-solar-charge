@@ -88,6 +88,8 @@
 | `InaccessiblePaths=` で、各サービスが使わない認証情報ファイルを見えなくする（操作サーバーからは車両トークン・鍵2つ・`cert.pem`・`~/.ssh`、充電制御と観測ツールからは鍵2つ、プロキシからは車両トークンと `tesla_config.json`） | 1つのサービスに不具合があっても、取られる認証情報をそのサービスが使うものに限る | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
 | カーネル設定・モジュール・時計・ほかのプロセスへの操作を禁じ（`ProtectKernel*`、`ProtectClock`、`ProtectProc=invisible` など）、通信の種類を IPv4・IPv6・UNIX・netlink に絞る | このシステムが使わない操作を、サービスのプロセスから実行できないようにする | [PR #86](https://github.com/Haraheriz/tesla-solar-charge/pull/86) |
 
+2026-11-22 時点で本番に配置して動作を確認したのは、`tesla-override`、`tesla-proxy`、`tesla-charger` の3つである。`tesla-observer` の drop-in は `tesla-charger` と同じ内容だが、本番では観測ツールを起動していないため、配置も動作確認もしていない。観測ツールを使うときは、drop-in を配置して起動し、`systemctl is-active` とログの書き込みを確認する。
+
 ---
 
 ## 3. インシデント対応の記録
