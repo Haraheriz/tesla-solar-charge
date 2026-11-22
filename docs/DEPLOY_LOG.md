@@ -68,6 +68,54 @@
 
 ---
 
+## 2026-11-22（プロキシを Go 1.26.11 でビルドし直した）
+
+**タグ：** なし（このPRのマージ後に付けるかを決める）
+
+**内容：** `tesla-http-proxy` を、`vehicle-command` の同じ版（`v0.4.1`、`49977a18`）のまま、Go 1.26.3 から Go 1.26.11 に替えてビルドし直し、ラズパイへ配置した。Python のファイルと systemd のユニットは変えていない。
+
+**理由：** 2026-11-20 の脆弱性検査（V-02）で、govulncheck が Go 1.26.3 の標準ライブラリの脆弱性19件（`net/http` 11件、`crypto/tls` 3件、`crypto/x509` 2件、ほか）を、`cmd/tesla-http-proxy` の呼び出し経路に到達すると報告した。修正版は Go 1.26.4 から 1.26.11 に分かれている。Go 1.26.11 を指定して同じ govulncheck（1.10.0、`GOOS=linux GOARCH=arm64`）を実行すると、到達する脆弱性は0件だった。
+
+**作業内容：**
+- `deploy/proxy/VERSION` の `GO_VERSION` を `go1.26.11` にした。Go は `GOTOOLCHAIN=go1.26.11` で取得し、開発機に入っている Go 1.26.3 は替えていない
+- `GOTOOLCHAIN=go1.26.11` を付けて `build.ps1` を実行した。ビルドは成功した。最後の SHA-256 の表示は、git-bash から起動した PowerShell で `Get-FileHash` が見つからず失敗したため、`sha256sum` で求めた
+- 出力の `go version -m` は `go1.26.11`、`vcs.revision=49977a18…`、`CGO_ENABLED=0`、`GOOS=linux`、`GOARCH=arm64` だった。大きさは 17,900,361 バイト、sha256 は `87fc8def…`
+- `docs/02_deploy.md` 第2章の「現在の版」の表を新しいバイナリの値に更新した
+- 転送前に、ラズパイ上の `tesla-http-proxy` の sha256 が `VERSION` の値（`3ff5c5cf…`）と一致することを確認し、`backup-20261122/`（700）に保存した
+- `C:\Windows\System32\OpenSSH\scp.exe` で `tesla-http-proxy.new` として転送し、sha256 が転送元と一致することを確認した後、権限を 700 にして `mv` で置き換えた
+- `tesla-proxy.service` を再起動した（16:16:52）。`tesla-charger.service` は依存関係により同時に再起動した。`tesla-override.service` は再起動していない
+- 転送と再起動は、利用者の指示（2026-11-22）を受けて行った
+
+**確認：**
+- `tesla-proxy.service` は `active`、`127.0.0.1:4443` だけで待ち受けている
+- `tesla-charger.service` は起動後、トークンの読み込み、車両の捕捉、ウォールコネクターの確認、定期チェックまで進んだ。車両は `offline` で、充電率が目標以上のため車両を起こさなかった。このため、プロキシを通る車両コマンドは、この時点では送られていない
+- 旧バイナリは `backup-20261122/tesla-http-proxy` にある。戻すときは、これを `tesla-http-proxy` に戻して `tesla-proxy.service` を再起動する
+
+---
+
+## 2026-11-21（コントロールサーバーの接続元ごとの上限）
+
+**タグ：** `v0.10.1`（main `f971d4d` に付け、同日に Release を作成した。`v0.10.0` から PR #83 までの範囲。ラズパイ上の `control_server.py` はこのコミットと一致する）
+
+**内容：** `control_server.py` の1ファイルを反映した。1つの接続元アドレスが同時に持てる枠を6件まで、ループバックのアドレスを10件までにする変更である（PR #83）。全体の上限16件と、ほかの転送対象ファイルは `v0.10.0` と同じである。
+
+**理由：** 全体の上限だけでは、閉じられた接続を張り直す1台のホストが16件の枠をすべて持ち続け、その間、正しいトークンを付けた要求が応答なしで閉じられた（2026-11-20 の脆弱性検査。開発機での試験で、24接続・39秒の間に151回中139回。GHSA-wgp6-69q8-c4qc）。
+
+**作業内容：**
+- 転送元は、開発機で `git fetch origin main` の後に `git show origin/main:control_server.py`（main `f971d4d`）で取り出したファイルである。CR は含まれていなかった。sha256 は `ad88ead2…`
+- 転送前（14:01:19）に、ラズパイ上の `control_server.py` の sha256 が `v0.10.0`（`030fe22e…`）と一致することを確認し、`backup-20261121/`（700）に保存した
+- `C:\Windows\System32\OpenSSH\scp.exe` で `control_server.py.new` として転送し、sha256 が転送元と一致することと、構文の解析が通ることを確認した後、権限を 600 にして `mv` で `control_server.py` に置き換えた
+- `tesla-override.service` を再起動した（14:01:33）。`tesla-charger.service`（起動 2026-11-18 19:26:45）と `tesla-proxy.service` は再起動していない
+- 転送と再起動は、利用者の許可（2026-11-21）を得てから行った
+
+**確認：**
+- `tesla-override.service` は `active (running)`、`0.0.0.0:8090` で待ち受けている。`control_server.log` に 14:01:33 の起動の3行が出た
+- トークンを付けない `GET /api/status` に、宅内 LAN からも Tailscale Serve 経由でも 403 が返った。ログの接続元は、LAN が開発機のアドレス、Tailscale Serve 経由が `127.0.0.1` だった。Tailscale Serve を通る接続がループバックの上限（10件）に数えられることと合う
+- 接続元ごとの上限による拒否は、本番では発生させていない（本番には接続を占有する試験を行わない）。上限の動作は開発機の試験と `tests/test_control_server.py` で確認した
+- スマホの操作画面からの操作は、この記録の時点では確認していない
+
+---
+
 ## 2026-11-11（プロキシの版の記録。反映作業なし）
 
 **タグ：** なし（ラズパイのファイルは変更していない）
